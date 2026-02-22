@@ -1,0 +1,21 @@
+{
+  "users": [
+    {
+      "email": "Cataleya178@SOMA.com",
+      "password": "Cataleya178",
+      "client_id": "CATALEYA",
+      "client_name": "Cataleya",
+      "db_path": "../../CLIENTES/CATALEYA/wa-openai/db.sqlite",
+      "media_dir": "../../CLIENTES/CATALEYA/wa-openai/media",
+      "wa_token": "EAAdWnN89DQcBQpvrcPskYcRUPIW1uL7g8HpM4LqnhIVU9pLeoeE1JOtsspWMmL2jT2g6RyCDSkxYGjVZAQuXWvmc07h1IVJdO3tr7XMEwCyqnZApx2KoAqiTXUtmCf8Xa4onLZC2GVzTZB3mc4jpPLARdEdawcmkOx7P9RZAnRYqFB0X7gVEdXExoAxHPe7tqkAZDZD",
+      "phone_number_id": "1029951286860268",
+      "calendar_id": "f83b1331e06bdf1e2bca496aa5c6bd5ad9b0e3e82bb6f3a149866df4c329eb5f@group.calendar.google.com",
+      "calendar_tz": "America/Argentina/Buenos_Aires",
+      "WA_API_VERSION": "v19.0"
+
+    }
+  ],
+  "default_calendar_id": "f83b1331e06bdf1e2bca496aa5c6bd5ad9b0e3e82bb6f3a149866df4c329eb5f@group.calendar.google.com",
+  "default_calendar_tz": "America/Argentina/Buenos_Aires"
+}
+

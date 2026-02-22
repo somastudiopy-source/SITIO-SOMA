@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SOMA. | Servicios</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+
+  <body class="theme-dark">
+    <div class="bg">
+      <div class="bg-orb orb-1"></div>
+      <div class="bg-orb orb-2"></div>
+      <div class="bg-orb orb-3"></div>
+    </div>
+
+    <header class="nav glass">
+      <div class="nav-inner">
+        <div class="brand">
+          <a class="brand-link" href="index.html">
+            <img
+              class="brand-logo"
+              id="brandLogo"
+              src="assets/logo-soma-white.png"
+              data-dark="assets/logo-soma-white.png"
+              data-light="assets/logo-soma-dark.png"
+              alt="SOMA."
+            />
+          </a>
+        </div>
+
+        <nav class="nav-links">
+          <a href="servicios.html">Servicios</a>
+          <a href="nosotros.html">Nosotros</a>
+          <a href="contacto.html">Contacto</a>
+        </nav>
+
+        <div class="nav-actions">
+          <button class="icon-btn" id="themeToggle" aria-label="Cambiar tema">
+            <span class="icon" id="themeIcon">☾</span>
+          </button>
+          <a class="link-pill" href="login.html">Acceso</a>
+        </div>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="section">
+        <div class="section-head">
+          <h2>Servicios</h2>
+          <p>Soluciones para empresas que quieren crecer con automatización e IA.</p>
+        </div>
+
+        <div class="grid">
+          <article class="glass card">
+            <h3>WhatsApp Automatizado</h3>
+            <p>Respuestas, seguimiento, derivación y mensajes programados.</p>
+          </article>
+
+          <article class="glass card">
+            <h3>Chat Inteligente</h3>
+            <p>IA conectada a tu información para atender como un equipo profesional.</p>
+          </article>
+
+          <article class="glass card">
+            <h3>Base de Datos</h3>
+            <p>Clientes, etiquetas, segmentación y reportes simples para vender más.</p>
+          </article>
+
+          <article class="glass card">
+            <h3>Publicidad & Contenido</h3>
+            <p>Campañas, anuncios y estrategia para captar leads reales.</p>
+          </article>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div>© <span id="year"></span> SOMA.</div>
+        <div class="footer-links">
+          <a href="index.html">Inicio</a>
+          <a href="nosotros.html">Nosotros</a>
+          <a href="contacto.html">Contacto</a>
+        </div>
+      </footer>
+    </main>
+
+    <script src="script.js"></script>
+  </body>
+</html>

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SOMA. | Automatización, IA y Publicidad</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+
+  <body class="theme-dark">
+    <div class="bg">
+      <div class="bg-orb orb-1"></div>
+      <div class="bg-orb orb-2"></div>
+      <div class="bg-orb orb-3"></div>
+    </div>
+
+    <!-- NAVBAR FULL WIDTH -->
+    <header class="nav glass">
+      <div class="nav-inner">
+        <div class="brand">
+          <a class="brand-link" href="index.html">
+            <img
+              class="brand-logo"
+              id="brandLogo"
+              src="assets/logo-soma-white.png"
+              data-dark="assets/logo-soma-white.png"
+              data-light="assets/logo-soma-dark.png"
+              alt="SOMA."
+            />
+          </a>
+        </div>
+
+        <nav class="nav-links">
+          <a href="servicios.html">Servicios</a>
+          <a href="nosotros.html">Nosotros</a>
+          <a href="contacto.html">Contacto</a>
+        </nav>
+
+        <div class="nav-actions">
+          <button class="icon-btn" id="themeToggle" aria-label="Cambiar tema">
+            <span class="icon" id="themeIcon">☾</span>
+          </button>
+          <a class="link-pill" href="login.html">Acceso</a>
+        </div>
+      </div>
+    </header>
+
+    <main class="container">
+      <!-- HERO -->
+      <section class="hero hero-single">
+        <div class="hero-left">
+          <p class="kicker">Automatización • Inteligencia Artificial • Publicidad</p>
+
+          <h1>
+            Hacé que tu empresa responda, venda y crezca
+            <span class="gradient-text">en automático</span>.
+          </h1>
+
+          <p class="sub">
+            SOMA. implementa chatbots con WhatsApp, bases de datos, campañas y sistemas
+            inteligentes para negocios profesionales. Empezamos en <strong>Salta</strong> y
+            nos abrimos al resto del país.
+          </p>
+
+          <div class="hero-cta">
+            <button class="blob-btn" type="button" id="demoBtn">
+              <span class="text">Pedir demo</span>
+              <span class="blob"></span>
+              <span class="blob"></span>
+              <span class="blob"></span>
+              <span class="blob"></span>
+            </button>
+
+            <a class="secondary" href="login.html">Ir al panel</a>
+
+            <div class="loader-wrap" id="loaderWrap" aria-hidden="true">
+              <div class="loader"></div>
+              <span>Cargando…</span>
+            </div>
+          </div>
+
+          <div class="hero-stats glass">
+            <div class="stat">
+              <div class="stat-num">+IA</div>
+              <div class="stat-label">respuestas inteligentes</div>
+            </div>
+            <div class="stat">
+              <div class="stat-num">+WA</div>
+              <div class="stat-label">automatización WhatsApp</div>
+            </div>
+            <div class="stat">
+              <div class="stat-num">+ADS</div>
+              <div class="stat-label">publicidad y campañas</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- QUÉ RESOLVEMOS (ABAJO) -->
+      <section class="section">
+        <div class="glass card-wide">
+          <div class="card-title">Qué resolvemos</div>
+
+          <ul class="feature-list feature-grid">
+            <li><span class="pill">Mensajes</span> automatización, respuestas y seguimiento</li>
+            <li><span class="pill">BD</span> bases de datos, segmentación y CRM simple</li>
+            <li><span class="pill">IA</span> chat inteligente conectado a tu info</li>
+            <li><span class="pill">ADS</span> publicidad y contenido para vender</li>
+          </ul>
+
+          <div class="mini-note">
+            <span class="dot"></span>
+            Panel por cliente: cada empresa ve solo su chat.
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div>© <span id="year"></span> SOMA. — Automatización e Inteligencia Artificial</div>
+        <div class="footer-links">
+          <a href="servicios.html">Servicios</a>
+          <a href="nosotros.html">Nosotros</a>
+          <a href="contacto.html">Contacto</a>
+        </div>
+      </footer>
+    </main>
+
+    <script src="script.js"></script>
+  </body>
+</html>

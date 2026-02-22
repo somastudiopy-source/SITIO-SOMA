@@ -1,0 +1,20 @@
+# --- NO SUBIR BOTS / CLIENTES ---
+CLIENTES/
+
+# --- node (por las dudas) ---
+node_modules/
+**/node_modules/
+
+# --- python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# --- secretos ---
+.env
+users.json
+
+# --- logs ---
+*.log
+.DS_Store
