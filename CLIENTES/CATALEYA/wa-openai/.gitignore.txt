@@ -1,5 +1,0 @@
-.env
-gcp-sa.json
-node_modules/
-.tmp/
-*.log
