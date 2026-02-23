@@ -37,8 +37,18 @@ app.mount("/panel-static", StaticFiles(directory=PANEL_STATIC_DIR), name="panel-
 
 # ---------------- Users + Session ----------------
 def load_users_data() -> Dict[str, Any]:
+    # 1) Si existe variable de entorno USERS_JSON (Railway), usarla
+    env_json = os.getenv("USERS_JSON", "").strip()
+    if env_json:
+        try:
+            return json.loads(env_json)
+        except Exception:
+            return {"users": []}
+
+    # 2) Si no, usar archivo local users.json
     if not os.path.exists(USERS_FILE):
         return {"users": []}
+
     with open(USERS_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
