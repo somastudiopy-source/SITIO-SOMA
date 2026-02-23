@@ -67,12 +67,17 @@
     });
   }
 
-  // Login form (placeholder)
+  // ===============================
+  // LOGIN REAL CONECTADO AL PANEL
+  // ===============================
+
   const loginForm = document.getElementById("loginForm");
   const formMsg = document.getElementById("formMsg");
+
   if (loginForm) {
-    loginForm.addEventListener("submit", (e) => {
+    loginForm.addEventListener("submit", async (e) => {
       e.preventDefault();
+
       const email = document.getElementById("email")?.value?.trim() || "";
       const password = document.getElementById("password")?.value?.trim() || "";
 
@@ -81,11 +86,33 @@
         return;
       }
 
-      showMsg("Acceso válido (demo). Luego lo conectamos al panel real.", false);
+      const PANEL_BASE = "https://produccion-de-paneles-8c0u1.up.railway.app";
 
-      setTimeout(() => {
-        window.location.href = "index.html";
-      }, 900);
+      try {
+        showMsg("Ingresando…", false);
+
+        const formData = new FormData();
+        formData.append("email", email);
+        formData.append("password", password);
+
+        const response = await fetch(${PANEL_BASE}/login, {
+          method: "POST",
+          body: formData,
+          credentials: "include",
+        });
+
+        if (response.status === 401) {
+          showMsg("Email o contraseña incorrectos.", true);
+          return;
+        }
+
+        // Si login OK, redirige al panel
+        window.location.href = ${PANEL_BASE}/;
+
+      } catch (error) {
+        console.error(error);
+        showMsg("Error conectando al panel. Intentá nuevamente.", true);
+      }
     });
   }
 
