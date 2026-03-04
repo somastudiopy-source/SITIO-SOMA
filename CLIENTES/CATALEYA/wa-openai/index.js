@@ -328,7 +328,7 @@ let calendarClient = null;
 
 async function getAuth() {
   return new google.auth.GoogleAuth({
-    keyFile: process.env.GOOGLE_SA_FILE,
+    credentials: JSON.parse(process.env.GOOGLE_SA_JSON),
     scopes: [
       "https://www.googleapis.com/auth/spreadsheets",
       "https://www.googleapis.com/auth/drive",
