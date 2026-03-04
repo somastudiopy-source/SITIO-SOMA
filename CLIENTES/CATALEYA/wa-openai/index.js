@@ -85,13 +85,27 @@ app.use(express.json({ limit: "25mb" }));
 const DRIVE_FOLDER_ID = "1pKCqh1HEvQaI6XQ85ST8yvzxYWRXpxM1";
 const TIMEZONE = "America/Argentina/Salta";
 
-// ===================== REQUIRED ENV CHECK (evita demos rotas) =====================
-const REQUIRED_ENV = ["OPENAI_API_KEY", "WHATSAPP_TOKEN", "PHONE_NUMBER_ID", "VERIFY_TOKEN", "GOOGLE_SA_FILE"];
+// ===================== REQUIRED ENV CHECK (Railway compatible) =====================
+
+const REQUIRED_ENV = ["OPENAI_API_KEY", "WHATSAPP_TOKEN", "PHONE_NUMBER_ID", "VERIFY_TOKEN"];
 for (const k of REQUIRED_ENV) {
-  if (!process.env[k]) throw new Error(`Falta variable en .env: ${k}`);
+  if (!process.env[k]) throw new Error(Falta variable de entorno: ${k});
 }
+
+// Si viene el JSON del Service Account por variable (Railway)
+if (process.env.GOOGLE_SA_JSON && !process.env.GOOGLE_SA_FILE) {
+  const tmpPath = path.join(os.tmpdir(), "gcp-sa.json");
+  fs.writeFileSync(tmpPath, process.env.GOOGLE_SA_JSON, "utf8");
+  process.env.GOOGLE_SA_FILE = tmpPath;
+}
+
+// Si no existe ninguno, error
+if (!process.env.GOOGLE_SA_FILE) {
+  throw new Error("Falta variable: GOOGLE_SA_FILE o GOOGLE_SA_JSON");
+}
+
 if (!fs.existsSync(process.env.GOOGLE_SA_FILE)) {
-  throw new Error(`No existe GOOGLE_SA_FILE en la ruta: ${process.env.GOOGLE_SA_FILE}`);
+  throw new Error(No existe GOOGLE_SA_FILE en la ruta: ${process.env.GOOGLE_SA_FILE});
 }
 
 // ===================== OpenAI =====================
