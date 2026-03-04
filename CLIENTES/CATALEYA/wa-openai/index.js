@@ -89,7 +89,7 @@ const TIMEZONE = "America/Argentina/Salta";
 
 const REQUIRED_ENV = ["OPENAI_API_KEY", "WHATSAPP_TOKEN", "PHONE_NUMBER_ID", "VERIFY_TOKEN"];
 for (const k of REQUIRED_ENV) {
-  if (!process.env[k]) throw new Error(Falta variable de entorno: ${k});
+if (!process.env[k]) throw new Error(Falta variable de entorno: ${k});
 }
 
 // Si viene el JSON del Service Account por variable (Railway)
