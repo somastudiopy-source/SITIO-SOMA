@@ -1985,16 +1985,21 @@ async function maybeSendProductPhoto(phone, product, userText) {
   }
 }
 
-// ===================== WEBHOOK VERIFY =====================
+// ==================== WEBHOOK VERIFY ====================
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
-  if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
+  console.log("Webhook verify request:", mode, token);
+
+  if (mode && token && mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
+    console.log("Webhook verificado correctamente");
     return res.status(200).send(challenge);
   }
-  return res.sendStatus(403);
+
+  console.log("Webhook verification falló");
+  return res.status(403).send("Forbidden");
 });
 
 // ===================== HEALTH =====================
