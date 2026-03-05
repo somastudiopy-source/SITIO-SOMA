@@ -105,7 +105,7 @@ if (!process.env.GOOGLE_SA_FILE) {
 }
 
 if (!fs.existsSync(process.env.GOOGLE_SA_FILE)) {
-  throw new Error(No existe GOOGLE_SA_FILE en la ruta: ${process.env.GOOGLE_SA_FILE});
+  throw new Error(No existe GOOGLE_SA_FILE en la ruta: ${process.env.GOOGLE_SA_FILE`});
 }
 
 // ===================== OpenAI =====================
