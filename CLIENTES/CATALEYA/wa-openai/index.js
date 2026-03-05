@@ -85,11 +85,13 @@ app.use(express.json({ limit: "25mb" }));
 const DRIVE_FOLDER_ID = "1pKCqh1HEvQaI6XQ85ST8yvzxYWRXpxM1";
 const TIMEZONE = "America/Argentina/Salta";
 
+
 // ===================== REQUIRED ENV CHECK (Railway compatible) =====================
 
 const REQUIRED_ENV = ["OPENAI_API_KEY", "WHATSAPP_TOKEN", "PHONE_NUMBER_ID", "VERIFY_TOKEN"];
+
 for (const k of REQUIRED_ENV) {
-if (!process.env[k]) throw new Error(`Falta variable de entorno: ${k}`);
+  if (!process.env[k]) throw new Error(`Falta variable de entorno: ${k}`);
 }
 
 // Si viene el JSON del Service Account por variable (Railway)
