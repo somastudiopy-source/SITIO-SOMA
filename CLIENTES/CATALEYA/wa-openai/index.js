@@ -2014,6 +2014,11 @@ app.get("/health", (req, res) => {
 
 // ===================== WEBHOOK =====================
 app.post("/webhook", async (req, res) => {
+
+  console.log("===== WEBHOOK EVENT =====");
+  console.log(JSON.stringify(req.body, null, 2));
+
+  // resto del código...
   res.sendStatus(200);
 
   try {
