@@ -828,4 +828,55 @@ async def api_delete_conversation(request: Request):
     con.execute("DELETE FROM conv_reads WHERE wa_peer = ?", (wa_peer,))
     con.commit()
 
+    return {"ok": True
+
+            @app.post("/webhook")
+async def whatsapp_webhook(request: Request):
+    data = await request.json()
+
+    try:
+        entry = data["entry"][0]
+        changes = entry["changes"][0]
+        value = changes["value"]
+
+        messages = value.get("messages")
+
+        if not messages:
+            return {"ok": True}
+
+        msg = messages[0]
+
+        wa_peer = msg["from"]
+        text = msg.get("text", {}).get("body", "")
+        msg_type = msg.get("type", "text")
+        wa_msg_id = msg.get("id")
+
+        users = load_users()
+        if not users:
+            return {"ok": False}
+
+        u = users[0]
+
+        con = db_connect(u["db_path"])
+        ensure_tables(con)
+
+        con.execute("""
+        INSERT INTO messages
+        (direction, wa_peer, name, text, msg_type, wa_msg_id, ts_utc, raw_json)
+        VALUES ('in', ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            wa_peer,
+            value.get("contacts",[{}])[0].get("profile",{}).get("name",""),
+            text,
+            msg_type,
+            wa_msg_id,
+            now_iso(),
+            json.dumps(msg)
+        ))
+
+        con.commit()
+
+    except Exception as e:
+        print("Webhook error:", e)
+
     return {"ok": True}
