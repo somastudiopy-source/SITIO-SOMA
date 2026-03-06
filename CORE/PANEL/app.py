@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any, List
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Form, UploadFile, File
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 # WhatsApp Cloud API (Meta) - standard library HTTP
@@ -22,6 +22,7 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 PANEL_SECRET = os.getenv("PANEL_SECRET", "dev_secret_change_me")
 USERS_FILE = os.path.join(BASE_DIR, "users.json")
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "mi_token_123")
 
 # WhatsApp defaults (optional; per-user in users.json overrides)
 WA_GRAPH_VERSION = os.getenv("WA_GRAPH_VERSION", "v19.0")
@@ -67,8 +68,6 @@ def find_user(email: str) -> Optional[Dict[str, Any]]:
 
 
 def get_calendar_config_for_session(session: Dict[str, Any]) -> Dict[str, str]:
-    # Calendar config is stored in users.json (per-user).
-    # For admin (or any user without a match), we fall back to defaults stored in users.json root.
     email = (session.get("email") or "").lower()
     role = session.get("role") or "user"
 
@@ -81,7 +80,6 @@ def get_calendar_config_for_session(session: Dict[str, Any]) -> Dict[str, str]:
     }
 
     if not user and role == "admin":
-        # If admin logs in, prefer first user's config, else defaults.
         users = data.get("users", []) or []
         user = users[0] if users else None
 
@@ -149,26 +147,12 @@ def require_user(request: Request) -> Dict[str, Any]:
 
 # ---------------- WhatsApp (Meta Cloud API) ----------------
 def get_whatsapp_config_for_user(u: Dict[str, Any]) -> Dict[str, str]:
-    """
-    Read WhatsApp Cloud API config from users.json (per user) with optional env fallbacks.
-    Expected keys in users.json user:
-      - wa_token
-      - phone_number_id
-    """
     token = (u.get("wa_token") or WA_TOKEN_DEFAULT or "").strip()
     phone_number_id = (u.get("phone_number_id") or WA_PHONE_NUMBER_ID_DEFAULT or "").strip()
     return {"wa_token": token, "phone_number_id": phone_number_id}
 
 
 def wa_cloud_api_send_text(*, token: str, phone_number_id: str, to: str, body: str) -> Dict[str, Any]:
-    """
-    Sends a WhatsApp text message via Meta Cloud API.
-    Returns dict:
-      - ok: bool
-      - status: int
-      - data: response json (if any)
-      - error: string (if any)
-    """
     url = f"https://graph.facebook.com/{WA_GRAPH_VERSION}/{phone_number_id}/messages"
     payload = {
         "messaging_product": "whatsapp",
@@ -257,12 +241,6 @@ def client_media_abs(user: Dict[str, Any]) -> str:
 
 
 def conv_day_label(ts_iso: str) -> str:
-    """
-    WhatsApp-like label:
-    - If today: HH:MM
-    - If yesterday: AYER
-    - Else: DD/MM/YYYY
-    """
     if not ts_iso:
         return ""
     try:
@@ -330,7 +308,6 @@ def login_page():
     </div>
   </div>
 
-  <!-- Calendar Modal -->
   <div class="modal" id="calModal" aria-hidden="true">
     <div class="modal-card glass">
       <div class="modal-head">
@@ -490,12 +467,9 @@ def dashboard(request: Request):
         <div class="composer">
           <div class="composer-row">
             <button class="icon-action" id="emojiBtn" title="Emojis" disabled>😊</button>
-
             <textarea id="text" class="textbox textarea" placeholder="Escribí un mensaje… (emojis ✅)"></textarea>
-
             <input id="file" class="file-hidden" type="file" />
             <button class="icon-action" id="attachBtn" title="Adjuntar" disabled>📎</button>
-
             <button id="send" class="send-btn" disabled>Enviar</button>
           </div>
 
@@ -512,7 +486,6 @@ def dashboard(request: Request):
     </div>
   </div>
 
-  <!-- Calendar Modal -->
   <div class="modal" id="calModal" aria-hidden="true">
     <div class="modal-card glass">
       <div class="modal-head">
@@ -741,11 +714,6 @@ async def api_upload(request: Request, file: UploadFile = File(...)):
 
 @app.post("/api/send")
 async def api_send(request: Request):
-    """
-    Envía el mensaje:
-      1) Lo guarda en la DB local (como ya hacía).
-      2) Lo envía por WhatsApp Cloud API usando wa_token + phone_number_id del usuario (users.json).
-    """
     u = require_user(request)
     con = db_connect(u["db_path"])
     ensure_tables(con)
@@ -771,19 +739,13 @@ async def api_send(request: Request):
             msg_type = "image"
         raw = {"media": {"filename": safe_basename(filename), "kind": kind, "content_type": content_type}}
 
-    # 1) Guardar en DB (igual que antes)
     con.execute("""
       INSERT INTO messages (direction, wa_peer, name, text, msg_type, wa_msg_id, ts_utc, raw_json)
       VALUES ('out', ?, ?, ?, ?, NULL, ?, ?)
     """, (to, u.get("client_name", ""), text, msg_type, now_iso(), json.dumps(raw)))
     con.commit()
 
-    # 2) Enviar por WhatsApp (por ahora, soporte seguro para TEXT)
     if filename:
-        # Si querés que también mande adjuntos por WhatsApp Cloud API, hay que implementar:
-        #   - upload media a /{phone_number_id}/media
-        #   - luego enviar message con media_id
-        # Esto lo dejamos listo para el próximo paso sin romper tu flujo actual.
         return {
             "ok": True,
             "warning": "MEDIA_NOT_SENT_YET",
@@ -795,7 +757,6 @@ async def api_send(request: Request):
     phone_number_id = cfg.get("phone_number_id", "")
 
     if not token or not phone_number_id:
-        # Esto es exactamente lo que te estaba pasando: “WHATSAPP_NOT_CONFIGURED”
         return JSONResponse(
             {"ok": False, "error": "WHATSAPP_NOT_CONFIGURED", "detail": "Falta wa_token o phone_number_id en users.json (o en variables de entorno)."},
             status_code=502,
@@ -804,7 +765,6 @@ async def api_send(request: Request):
     wa_resp = wa_cloud_api_send_text(token=token, phone_number_id=phone_number_id, to=str(to), body=text)
 
     if not wa_resp.get("ok"):
-        # devolvemos 502 con detalles para que lo veas en consola/panel
         return JSONResponse(
             {"ok": False, "error": wa_resp.get("error", "WHATSAPP_SEND_FAILED"), "status": wa_resp.get("status", 500), "data": wa_resp.get("data")},
             status_code=502,
@@ -828,35 +788,58 @@ async def api_delete_conversation(request: Request):
     con.execute("DELETE FROM conv_reads WHERE wa_peer = ?", (wa_peer,))
     con.commit()
 
-    return {"ok": True
+    return {"ok": True}
 
-            @app.post("/webhook")
+
+# ---------------- Webhook Meta / WhatsApp ----------------
+@app.get("/webhook")
+async def verify_webhook(request: Request):
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        return PlainTextResponse(challenge or "", status_code=200)
+
+    return PlainTextResponse("Forbidden", status_code=403)
+
+
+@app.post("/webhook")
 async def whatsapp_webhook(request: Request):
     data = await request.json()
 
     try:
-        entry = data["entry"][0]
-        changes = entry["changes"][0]
-        value = changes["value"]
+        entry = data.get("entry", [])
+        if not entry:
+            return {"ok": True}
 
-        messages = value.get("messages")
+        changes = entry[0].get("changes", [])
+        if not changes:
+            return {"ok": True}
+
+        value = changes[0].get("value", {})
+        messages = value.get("messages", [])
 
         if not messages:
             return {"ok": True}
 
         msg = messages[0]
 
-        wa_peer = msg["from"]
+        wa_peer = msg.get("from", "")
         text = msg.get("text", {}).get("body", "")
         msg_type = msg.get("type", "text")
         wa_msg_id = msg.get("id")
 
+        contacts = value.get("contacts", [])
+        contact_name = ""
+        if contacts:
+            contact_name = contacts[0].get("profile", {}).get("name", "")
+
         users = load_users()
         if not users:
-            return {"ok": False}
+            return {"ok": False, "error": "NO_USERS"}
 
         u = users[0]
-
         con = db_connect(u["db_path"])
         ensure_tables(con)
 
@@ -866,14 +849,13 @@ async def whatsapp_webhook(request: Request):
         VALUES ('in', ?, ?, ?, ?, ?, ?, ?)
         """, (
             wa_peer,
-            value.get("contacts",[{}])[0].get("profile",{}).get("name",""),
+            contact_name,
             text,
             msg_type,
             wa_msg_id,
             now_iso(),
             json.dumps(msg)
         ))
-
         con.commit()
 
     except Exception as e:
