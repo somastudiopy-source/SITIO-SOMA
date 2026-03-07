@@ -3,10 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SOMA. | Sistemas, identidad y operación digital para empresas</title>
+    <title>SOMA. | Sistemas, identidad y estructura digital para empresas</title>
     <meta
       name="description"
-      content="SOMA. diseña identidad, organiza la comunicación, automatiza WhatsApp, estructura bases de datos y convierte información en decisiones para empresas."
+      content="SOMA diseña identidad, presencia visual, automatización por WhatsApp, organización de contactos y lectura de información para empresas."
     />
     <link rel="stylesheet" href="styles.css" />
     <script src="./config.js"></script>
@@ -19,20 +19,18 @@
       <div class="bg-orb orb-3"></div>
     </div>
 
-    <header class="nav glass">
+    <header class="nav">
       <div class="nav-inner">
-        <div class="brand">
-          <a class="brand-link" href="index.html" aria-label="Ir al inicio">
-            <img
-              class="brand-logo"
-              id="brandLogo"
-              src="assets/logo-soma-white.png"
-              data-dark="assets/logo-soma-white.png"
-              data-light="assets/logo-soma-dark.png"
-              alt="SOMA."
-            />
-          </a>
-        </div>
+        <a class="brand-link" href="index.html" aria-label="Ir al inicio">
+          <img
+            class="brand-logo"
+            id="brandLogo"
+            src="assets/logo-soma-white.png"
+            data-dark="assets/logo-soma-white.png"
+            data-light="assets/logo-soma-dark.png"
+            alt="SOMA."
+          />
+        </a>
 
         <nav class="nav-links">
           <a href="servicios.html">Servicios</a>
@@ -44,29 +42,35 @@
           <button class="icon-btn" id="themeToggle" aria-label="Cambiar tema">
             <span class="icon" id="themeIcon">☾</span>
           </button>
-          <a href="https://panel-production-9d04.up.railway.app" class="btn-primary">Acceso</a>
+          <a href="https://panel-production-9d04.up.railway.app/login" class="nav-pill">Acceso</a>
         </div>
       </div>
     </header>
 
     <main class="container">
       <!-- HERO -->
-      <section class="hero hero-single">
-        <div class="hero-left">
-          <p class="kicker">Sistemas • Identidad • Comunicación • Automatización</p>
+      <section class="hero-visual">
+        <div class="hero-overlay"></div>
+
+        <div class="hero-content">
+          <div class="hero-badges">
+            <span class="hero-badge">Automatización</span>
+            <span class="hero-badge">Identidad</span>
+            <span class="hero-badge">Datos</span>
+          </div>
 
           <h1>
-            Diseñamos la presencia, ordenamos la operación y conectamos
-            <span class="gradient-text">tu empresa con un sistema real</span>.
+            Diseñamos la presencia, ordenamos la atención y convertimos
+            <span class="gradient-text">la actividad de una empresa en sistema</span>.
           </h1>
 
-          <p class="sub">
-            SOMA. trabaja sobre la estructura digital de una empresa: identidad visual,
-            comunicación profesional, automatización por WhatsApp, organización de contactos,
-            bases de datos y lectura de información para tomar decisiones con criterio.
+          <p class="hero-sub">
+            SOMA trabaja sobre identidad visual, comunicación profesional,
+            automatización por WhatsApp, organización de contactos, seguimiento y
+            lectura de información para empresas que necesitan estructura real.
           </p>
 
-          <div class="hero-cta">
+          <div class="hero-actions">
             <button class="blob-btn" type="button" id="demoBtn">
               <span class="text">Pedir demo</span>
               <span class="blob"></span>
@@ -75,248 +79,232 @@
               <span class="blob"></span>
             </button>
 
-            <a class="secondary" href="contacto.html">Hablar con nosotros</a>
+            <a class="hero-secondary" href="contacto.html">Hablar con nosotros</a>
 
             <div class="loader-wrap" id="loaderWrap" aria-hidden="true">
               <div class="loader"></div>
               <span>Cargando…</span>
             </div>
           </div>
+        </div>
 
-          <div class="hero-stats glass">
-            <div class="stat">
-              <div class="stat-num">+IDENTIDAD</div>
-              <div class="stat-label">criterio visual y presencia profesional</div>
-            </div>
-            <div class="stat">
-              <div class="stat-num">+SISTEMA</div>
-              <div class="stat-label">automatización, seguimiento y orden operativo</div>
-            </div>
-            <div class="stat">
-              <div class="stat-num">+DATOS</div>
-              <div class="stat-label">información clara para decidir mejor</div>
-            </div>
-          </div>
+        <div class="hero-dots">
+          <span></span>
+          <span class="active"></span>
+          <span></span>
         </div>
       </section>
 
-      <!-- PROPUESTA -->
+      <!-- AREAS -->
       <section class="section">
-        <div class="glass card-wide">
-          <div class="card-title">Qué hacemos</div>
-
-          <ul class="feature-list feature-grid">
-            <li>
-              <span class="pill">Identidad</span>
-              construcción visual, criterio estético y lenguaje de marca para empresas
-            </li>
-            <li>
-              <span class="pill">Comunicación</span>
-              gestión de canales, piezas visuales y presencia digital sostenida
-            </li>
-            <li>
-              <span class="pill">Automatización</span>
-              respuestas, filtros, seguimiento y atención por WhatsApp
-            </li>
-            <li>
-              <span class="pill">Información</span>
-              bases de datos, segmentación y lectura profesional de resultados
-            </li>
-          </ul>
-
-          <div class="mini-note">
-            <span class="dot"></span>
-            No trabajamos acciones aisladas: armamos estructura, orden y continuidad.
-          </div>
-        </div>
-      </section>
-
-      <!-- ÁREAS -->
-      <section class="section">
-        <div class="section-head">
+        <div class="section-top">
           <h2>Áreas que integramos</h2>
-          <p>
-            SOMA. reúne diseño, comunicación, automatización y análisis en un mismo sistema de
-            trabajo. Eso permite que una empresa no solo se vea mejor, sino que también responda
-            mejor, registre mejor y decida mejor.
-          </p>
+          <a href="servicios.html" class="section-link">Ver servicios</a>
         </div>
 
-        <div class="grid">
-          <article class="glass card">
-            <h3>Identidad y presencia</h3>
-            <p>
-              Desarrollamos una imagen coherente, sólida y profesional para que la empresa tenga
-              una presencia clara en todos sus puntos de contacto.
-            </p>
+        <div class="visual-grid">
+          <article class="visual-card card-identity">
+            <div class="card-arrow">↗</div>
+            <div class="card-overlay"></div>
+            <div class="visual-card-content">
+              <span class="visual-kicker">Presencia</span>
+              <h3>Identidad y lenguaje visual</h3>
+              <p>
+                Construimos una presencia clara, coherente y profesional para que
+                la empresa se vea sólida en todos sus puntos de contacto.
+              </p>
+            </div>
           </article>
 
-          <article class="glass card">
-            <h3>Contenido y gestión de canales</h3>
-            <p>
-              Organizamos la comunicación visual y textual de la marca para sostener una presencia
-              activa, prolija y alineada con su perfil.
-            </p>
+          <article class="visual-card card-comms">
+            <div class="card-arrow">↗</div>
+            <div class="card-overlay"></div>
+            <div class="visual-card-content">
+              <span class="visual-kicker">Canales</span>
+              <h3>Contenido y gestión de comunicación</h3>
+              <p>
+                Ordenamos piezas, publicaciones y comunicación digital con una
+                línea visual y verbal mucho más consistente.
+              </p>
+            </div>
           </article>
 
-          <article class="glass card">
-            <h3>WhatsApp y atención automatizada</h3>
-            <p>
-              Creamos flujos de atención para responder, clasificar consultas, derivar, registrar
-              conversaciones y mantener seguimiento sin perder tiempo.
-            </p>
+          <article class="visual-card card-auto">
+            <div class="card-arrow">↗</div>
+            <div class="card-overlay"></div>
+            <div class="visual-card-content">
+              <span class="visual-kicker">Sistema</span>
+              <h3>WhatsApp y automatización operativa</h3>
+              <p>
+                Respuesta automática, clasificación de consultas, seguimiento y
+                orden en conversaciones que antes se perdían.
+              </p>
+            </div>
           </article>
+        </div>
 
-          <article class="glass card">
-            <h3>Base de datos y lectura de información</h3>
-            <p>
-              Estructuramos contactos, historial, segmentación y métricas para transformar la
-              actividad diaria en información útil para futuras decisiones.
-            </p>
-          </article>
+        <div class="popular-row">
+          <div class="popular-item">
+            <span class="popular-label">Identidad</span>
+            <p>criterio visual, piezas y construcción de marca</p>
+          </div>
+          <div class="popular-item">
+            <span class="popular-label">Automatización</span>
+            <p>respuesta, seguimiento y estructura de atención</p>
+          </div>
+          <div class="popular-item">
+            <span class="popular-label">Información</span>
+            <p>bases de datos, segmentación y lectura profesional</p>
+          </div>
         </div>
       </section>
 
-      <!-- DEMOSTRACIÓN -->
+      <!-- BLOQUE PRINCIPAL -->
       <section class="section">
-        <div class="glass wide">
-          <div>
-            <div class="card-title">Cómo se ve en la práctica</div>
-            <p class="sub" style="margin-bottom: 0;">
-              Una consulta no debería perderse entre mensajes. La idea es que cada interacción tenga
-              orden, respuesta y registro.
+        <div class="featured-block">
+          <div class="featured-copy">
+            <h2>Tu empresa no necesita solo verse bien. Necesita funcionar mejor.</h2>
+            <p>
+              SOMA une imagen, comunicación, automatización y organización de
+              información para que el trabajo digital de una empresa tenga
+              estructura, continuidad y criterio.
             </p>
+
+            <div class="newsletter-form">
+              <a href="contacto.html" class="featured-btn">Consultar</a>
+              <a href="servicios.html" class="featured-btn featured-btn-secondary">Explorar áreas</a>
+            </div>
           </div>
 
-          <div class="wide-right">
-            <span class="tag">WhatsApp</span>
-            <span class="tag">Seguimiento</span>
-            <span class="tag">Registro</span>
-            <span class="tag">Clasificación</span>
+          <div class="featured-device">
+            <div class="device-screen">
+              <div class="device-topbar">
+                <span></span><span></span><span></span>
+              </div>
+
+              <div class="device-content">
+                <div class="device-line strong">Consulta recibida por WhatsApp</div>
+                <div class="device-line">Respuesta automática activada</div>
+                <div class="device-line">Clasificación: turno / servicio / presupuesto</div>
+                <div class="device-line">Registro en base de datos</div>
+                <div class="device-line">Seguimiento posterior</div>
+              </div>
+            </div>
           </div>
-        </div>
-
-        <div class="grid" style="margin-top: 12px;">
-          <article class="glass card">
-            <h3>1. Ingresa una consulta</h3>
-            <p>
-              Una persona escribe por WhatsApp para pedir información, turno, precios o detalles
-              sobre un servicio.
-            </p>
-          </article>
-
-          <article class="glass card">
-            <h3>2. El sistema responde y ordena</h3>
-            <p>
-              Se activa una respuesta clara, profesional y útil, con opciones que orientan la charla
-              según la necesidad real del contacto.
-            </p>
-          </article>
-
-          <article class="glass card">
-            <h3>3. Se registra la conversación</h3>
-            <p>
-              La interacción puede guardarse en una base de datos, quedar segmentada y pasar a un
-              seguimiento comercial u operativo.
-            </p>
-          </article>
-
-          <article class="glass card">
-            <h3>4. La empresa decide con información</h3>
-            <p>
-              Lo que antes era solo un mensaje aislado se convierte en información concreta para
-              observar demanda, comportamiento y próximas acciones.
-            </p>
-          </article>
         </div>
       </section>
 
-      <!-- FORMA DE TRABAJO -->
-      <section class="section">
-        <div class="section-head">
-          <h2>Cómo trabajamos</h2>
-          <p>
-            Cada empresa necesita una estructura distinta. Por eso no aplicamos fórmulas vacías:
-            observamos, ordenamos y construimos según el funcionamiento real del negocio.
-          </p>
+      <!-- CASO / FORMA -->
+      <section class="section split-section">
+        <div class="split-main">
+          <div class="split-image">
+            <div class="split-image-overlay"></div>
+            <div class="split-image-content">
+              <span class="split-date">Sistema aplicado</span>
+              <h2>
+                De una consulta aislada a una estructura de atención, seguimiento y lectura útil
+              </h2>
+            </div>
+          </div>
         </div>
 
-        <div class="grid">
-          <article class="glass card">
-            <h3>Observación inicial</h3>
+        <aside class="split-side">
+          <div class="author-card">
+            <div class="author-avatar"></div>
+            <h3>SOMA</h3>
             <p>
-              Revisamos cómo se presenta la empresa, cómo responde, cómo organiza su información y
-              dónde están sus puntos de pérdida o desorden.
+              Estructura digital para empresas: identidad, canales, automatización,
+              organización de información y decisiones mejor respaldadas.
             </p>
-          </article>
+          </div>
 
-          <article class="glass card">
-            <h3>Diseño de estructura</h3>
-            <p>
-              Definimos la identidad visual, la lógica de comunicación y el sistema de atención o
-              seguimiento que mejor se adapte al negocio.
-            </p>
-          </article>
+          <div class="side-list">
+            <h4>Cómo trabajamos</h4>
 
-          <article class="glass card">
-            <h3>Implementación</h3>
-            <p>
-              Ponemos en marcha automatizaciones, piezas visuales, canales, bases de datos y
-              recursos concretos de operación.
-            </p>
-          </article>
+            <div class="side-item">
+              <span>01</span>
+              <p>Observamos el funcionamiento real del negocio</p>
+            </div>
 
-          <article class="glass card">
-            <h3>Lectura y ajuste</h3>
-            <p>
-              Analizamos comportamiento, resultados e información acumulada para mejorar acciones,
-              tiempos y dirección de trabajo.
-            </p>
-          </article>
-        </div>
+            <div class="side-item">
+              <span>02</span>
+              <p>Diseñamos una estructura visual y operativa clara</p>
+            </div>
+
+            <div class="side-item">
+              <span>03</span>
+              <p>Implementamos automatización, piezas y organización</p>
+            </div>
+
+            <div class="side-item">
+              <span>04</span>
+              <p>Leemos la información para ajustar acciones futuras</p>
+            </div>
+          </div>
+        </aside>
       </section>
 
-      <!-- IDEAL PARA -->
+      <!-- BENEFICIOS -->
       <section class="section">
-        <div class="glass card-wide">
-          <div class="card-title">Ideal para</div>
+        <div class="section-top">
+          <h2>Lo que resolvemos</h2>
+        </div>
 
-          <ul class="feature-list feature-grid">
-            <li><span class="pill">Servicios</span> empresas que responden por WhatsApp todo el día</li>
-            <li><span class="pill">Agenda</span> negocios que necesitan orden en turnos o consultas</li>
-            <li><span class="pill">Imagen</span> marcas que necesitan presencia visual seria y coherente</li>
-            <li><span class="pill">Operación</span> equipos que quieren dejar de improvisar procesos</li>
-          </ul>
+        <div class="info-grid">
+          <article class="info-card glass-card">
+            <h3>Más claridad visual</h3>
+            <p>
+              La empresa se presenta con una imagen más sólida, más coherente y
+              más alineada con el valor real que ofrece.
+            </p>
+          </article>
 
-          <div class="mini-note">
-            <span class="dot"></span>
-            Trabajamos especialmente con empresas y marcas que necesitan estructura, claridad y una
-            presencia más sólida.
-          </div>
+          <article class="info-card glass-card">
+            <h3>Menos desorden en la atención</h3>
+            <p>
+              Las consultas dejan de depender solo de respuestas manuales y pasan a
+              integrarse dentro de una lógica más organizada.
+            </p>
+          </article>
+
+          <article class="info-card glass-card">
+            <h3>Registro y seguimiento</h3>
+            <p>
+              La conversación deja de perderse: puede quedar guardada, clasificada
+              y lista para acciones posteriores.
+            </p>
+          </article>
+
+          <article class="info-card glass-card">
+            <h3>Información para decidir</h3>
+            <p>
+              Los movimientos diarios se convierten en lectura útil para detectar
+              demanda, hábitos y próximos pasos.
+            </p>
+          </article>
         </div>
       </section>
 
       <!-- CIERRE -->
       <section class="section">
-        <div class="glass contact">
+        <div class="final-cta glass-card">
           <div>
-            <div class="card-title">Tu empresa puede verse mejor, responder mejor y decidir mejor</div>
-            <p class="sub" style="margin-bottom: 0;">
-              Si querés, podemos empezar por revisar tu situación actual y definir qué conviene
-              construir primero: identidad, automatización, organización de contactos o lectura de
-              información.
+            <h2>Presencia, sistema y criterio para empresas que quieren trabajar mejor</h2>
+            <p>
+              Podemos empezar revisando qué necesita hoy tu empresa: identidad,
+              canales, automatización, base de datos o estructura general.
             </p>
           </div>
 
-          <div class="contact-actions">
-            <a class="secondary" href="contacto.html">Consultar</a>
-            <a class="secondary" href="servicios.html">Ver servicios</a>
+          <div class="final-cta-actions">
+            <a href="contacto.html" class="hero-secondary">Hablar con nosotros</a>
+            <a href="servicios.html" class="hero-secondary alt">Ver servicios</a>
           </div>
         </div>
       </section>
 
       <footer class="footer">
-        <div>© <span id="year"></span> SOMA. — Sistemas, identidad y estructura digital</div>
+        <div>© <span id="year"></span> SOMA. — Automatización e Inteligencia Artificial</div>
         <div class="footer-links">
           <a href="servicios.html">Servicios</a>
           <a href="nosotros.html">Nosotros</a>
@@ -325,7 +313,6 @@
       </footer>
     </main>
 
-    <!-- WhatsApp flotante -->
     <a
       href="https://wa.me/5493868466370?text=Hola%2C%20quiero%20informaci%C3%B3n%20sobre%20SOMA"
       class="whatsapp-float"
