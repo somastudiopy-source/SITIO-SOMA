@@ -4,7 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SOMA. | Servicios</title>
+    <meta
+      name="description"
+      content="Servicios administrativos con tecnología integrada, publicidad, identidad visual y estructura digital para empresas."
+    />
     <link rel="stylesheet" href="styles.css" />
+    <script src="./config.js"></script>
   </head>
 
   <body class="theme-dark">
@@ -14,20 +19,18 @@
       <div class="bg-orb orb-3"></div>
     </div>
 
-    <header class="nav glass">
+    <header class="nav">
       <div class="nav-inner">
-        <div class="brand">
-          <a class="brand-link" href="index.html">
-            <img
-              class="brand-logo"
-              id="brandLogo"
-              src="assets/logo-soma-white.png"
-              data-dark="assets/logo-soma-white.png"
-              data-light="assets/logo-soma-dark.png"
-              alt="SOMA."
-            />
-          </a>
-        </div>
+        <a class="brand-link" href="index.html" aria-label="Ir al inicio">
+          <img
+            class="brand-logo"
+            id="brandLogo"
+            src="assets/logo-soma-white.png"
+            data-dark="assets/logo-soma-white.png"
+            data-light="assets/logo-soma-dark.png"
+            alt="SOMA."
+          />
+        </a>
 
         <nav class="nav-links">
           <a href="servicios.html">Servicios</a>
@@ -39,43 +42,281 @@
           <button class="icon-btn" id="themeToggle" aria-label="Cambiar tema">
             <span class="icon" id="themeIcon">☾</span>
           </button>
-          <a class="link-pill" href="https://panel-production-9d04.up.railway.app/login">Acceso</a>
+          <a href="https://panel-production-9d04.up.railway.app/login" class="nav-pill">Acceso</a>
         </div>
       </div>
     </header>
 
     <main class="container">
-      <section class="section">
-        <div class="section-head">
-          <h2>Servicios</h2>
-          <p>Soluciones para empresas que quieren crecer con automatización e IA.</p>
+      <!-- HERO -->
+      <section class="hero-visual services-hero">
+        <div class="hero-overlay"></div>
+
+        <div class="hero-content">
+          <div class="hero-badges">
+            <span class="hero-badge">Estructura</span>
+            <span class="hero-badge">Imagen</span>
+            <span class="hero-badge">Difusión</span>
+          </div>
+
+          <h1>
+            Servicios pensados para dar
+            <span class="gradient-text">más orden, más presencia y más capacidad operativa</span>
+            a una empresa.
+          </h1>
+
+          <p class="hero-sub">
+            SOMA integra procesos administrativos con tecnología, desarrollo de
+            imagen de marca, contenido visual y difusión digital para empresas que
+            necesitan una estructura más profesional y sostenible.
+          </p>
+
+          <div class="hero-actions">
+            <a class="hero-secondary" href="contacto.html">Solicitar asesoramiento</a>
+            <a class="hero-secondary alt" href="index.html">Volver al inicio</a>
+          </div>
         </div>
 
-        <div class="grid">
-          <article class="glass card">
-            <h3>WhatsApp Automatizado</h3>
-            <p>Respuestas, seguimiento, derivación y mensajes programados.</p>
+        <div class="hero-dots">
+          <span></span>
+          <span class="active"></span>
+          <span></span>
+        </div>
+      </section>
+
+      <!-- INTRO -->
+      <section class="section">
+        <div class="section-top">
+          <h2>Qué áreas trabajamos</h2>
+        </div>
+
+        <div class="popular-row">
+          <div class="popular-item">
+            <span class="popular-label">Administración + tecnología</span>
+            <p>procesos, seguimiento, automatización y organización de información</p>
+          </div>
+          <div class="popular-item">
+            <span class="popular-label">Publicidad</span>
+            <p>difusión estratégica, campañas y presencia comercial digital</p>
+          </div>
+          <div class="popular-item">
+            <span class="popular-label">Marca e imagen</span>
+            <p>identidad visual, criterio estético y construcción de presencia</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- TARJETAS PRINCIPALES -->
+      <section class="section">
+        <div class="visual-grid">
+          <article class="visual-card card-auto">
+            <div class="card-arrow">↗</div>
+            <div class="card-overlay"></div>
+            <div class="visual-card-content">
+              <span class="visual-kicker">Operación</span>
+              <h3>Servicios administrativos con tecnología integrada</h3>
+              <p>
+                Diseñamos una estructura de trabajo más clara para ordenar consultas,
+                seguimiento, bases de datos, respuestas, registros y tareas operativas
+                con apoyo tecnológico.
+              </p>
+            </div>
           </article>
 
-          <article class="glass card">
-            <h3>Chat Inteligente</h3>
-            <p>IA conectada a tu información para atender como un equipo profesional.</p>
+          <article class="visual-card card-comms">
+            <div class="card-arrow">↗</div>
+            <div class="card-overlay"></div>
+            <div class="visual-card-content">
+              <span class="visual-kicker">Difusión</span>
+              <h3>Servicio de publicidad</h3>
+              <p>
+                Desarrollamos acciones de difusión digital orientadas a generar
+                visibilidad, consultas y movimiento real para negocios que necesitan
+                presencia sostenida.
+              </p>
+            </div>
           </article>
 
-          <article class="glass card">
-            <h3>Base de Datos</h3>
-            <p>Clientes, etiquetas, segmentación y reportes simples para vender más.</p>
-          </article>
-
-          <article class="glass card">
-            <h3>Publicidad & Contenido</h3>
-            <p>Campañas, anuncios y estrategia para captar leads reales.</p>
+          <article class="visual-card card-identity">
+            <div class="card-arrow">↗</div>
+            <div class="card-overlay"></div>
+            <div class="visual-card-content">
+              <span class="visual-kicker">Presencia</span>
+              <h3>Creación de marca e imagen</h3>
+              <p>
+                Construimos identidad visual, criterio gráfico y una presencia coherente
+                para que la empresa se vea sólida, reconocible y profesional.
+              </p>
+            </div>
           </article>
         </div>
       </section>
 
+      <!-- DETALLE 1 -->
+      <section class="section">
+        <div class="featured-block">
+          <div class="featured-copy">
+            <h2>Servicios administrativos con tecnología integrada</h2>
+            <p>
+              Esta área está pensada para empresas que necesitan más orden en su
+              funcionamiento diario. Integramos automatización, registros, seguimiento
+              y herramientas de organización para reducir desorden, mejorar tiempos
+              y dar mayor continuidad a la operación.
+            </p>
+
+            <div class="mini-service-list">
+              <div class="mini-service-item">Automatización de atención por WhatsApp</div>
+              <div class="mini-service-item">Organización de consultas y seguimiento</div>
+              <div class="mini-service-item">Bases de datos y segmentación</div>
+              <div class="mini-service-item">Lectura de actividad y métricas</div>
+            </div>
+          </div>
+
+          <div class="featured-device">
+            <div class="device-screen">
+              <div class="device-topbar">
+                <span></span><span></span><span></span>
+              </div>
+
+              <div class="device-content">
+                <div class="device-line strong">Nuevo contacto ingresado</div>
+                <div class="device-line">Respuesta automática enviada</div>
+                <div class="device-line">Clasificación por interés</div>
+                <div class="device-line">Registro en base de datos</div>
+                <div class="device-line">Seguimiento disponible</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- DETALLE 2 -->
+      <section class="section split-section">
+        <div class="split-main">
+          <div class="split-image services-publicidad">
+            <div class="split-image-overlay"></div>
+            <div class="split-image-content">
+              <span class="split-date">Difusión digital</span>
+              <h2>Servicio de publicidad pensado para generar presencia y movimiento real</h2>
+            </div>
+          </div>
+        </div>
+
+        <aside class="split-side">
+          <div class="side-list">
+            <h4>Incluye</h4>
+
+            <div class="side-item">
+              <span>01</span>
+              <p>Campañas de difusión en redes y canales digitales</p>
+            </div>
+
+            <div class="side-item">
+              <span>02</span>
+              <p>Piezas visuales para anuncios y comunicación comercial</p>
+            </div>
+
+            <div class="side-item">
+              <span>03</span>
+              <p>Optimización de presencia para captar consultas reales</p>
+            </div>
+
+            <div class="side-item">
+              <span>04</span>
+              <p>Lectura de resultados para ajustar acciones futuras</p>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <!-- DETALLE 3 -->
+      <section class="section">
+        <div class="featured-block featured-block-light">
+          <div class="featured-copy">
+            <h2>Creación de marca e imagen para empresas que necesitan una presencia sólida</h2>
+            <p>
+              Trabajamos la identidad de una empresa de forma integral: su estilo,
+              su criterio visual, sus piezas, su tono y la manera en que se presenta
+              frente a clientes, redes, materiales y canales.
+            </p>
+
+            <div class="mini-service-list">
+              <div class="mini-service-item">Identidad visual</div>
+              <div class="mini-service-item">Diseño de piezas y publicaciones</div>
+              <div class="mini-service-item">Presencia estética coherente</div>
+              <div class="mini-service-item">Construcción de marca profesional</div>
+            </div>
+          </div>
+
+          <div class="author-card">
+            <div class="author-avatar"></div>
+            <h3>Imagen con criterio</h3>
+            <p>
+              No se trata solo de verse bien: se trata de construir una presencia
+              que esté a la altura del valor real de la empresa.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- BENEFICIOS -->
+      <section class="section">
+        <div class="section-top">
+          <h2>Qué aporta esta estructura</h2>
+        </div>
+
+        <div class="info-grid">
+          <article class="info-card glass-card">
+            <h3>Más orden interno</h3>
+            <p>
+              La empresa gana claridad en sus procesos, sus respuestas y su manera
+              de trabajar la información.
+            </p>
+          </article>
+
+          <article class="info-card glass-card">
+            <h3>Mejor presencia externa</h3>
+            <p>
+              La marca se ve más sólida, más profesional y más coherente frente a su público.
+            </p>
+          </article>
+
+          <article class="info-card glass-card">
+            <h3>Mayor continuidad</h3>
+            <p>
+              Las acciones dejan de ser aisladas y pasan a formar parte de una lógica sostenida.
+            </p>
+          </article>
+
+          <article class="info-card glass-card">
+            <h3>Información útil</h3>
+            <p>
+              La actividad diaria puede leerse mejor para tomar decisiones futuras con más criterio.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <!-- CIERRE -->
+      <section class="section">
+        <div class="final-cta glass-card">
+          <div>
+            <h2>Podemos ayudarte a ordenar, posicionar y fortalecer tu empresa</h2>
+            <p>
+              Si querés, revisamos tu situación actual y definimos qué conviene
+              desarrollar primero según tu etapa, tus necesidades y tu estructura.
+            </p>
+          </div>
+
+          <div class="final-cta-actions">
+            <a href="contacto.html" class="hero-secondary">Hablar con nosotros</a>
+            <a href="index.html" class="hero-secondary alt">Ir al inicio</a>
+          </div>
+        </div>
+      </section>
+
       <footer class="footer">
-        <div>© <span id="year"></span> SOMA.</div>
+        <div>© <span id="year"></span> SOMA. — Servicios para empresas</div>
         <div class="footer-links">
           <a href="index.html">Inicio</a>
           <a href="nosotros.html">Nosotros</a>
@@ -83,6 +324,22 @@
         </div>
       </footer>
     </main>
+
+    <a
+      href="https://wa.me/5493868466370?text=Hola%2C%20quiero%20informaci%C3%B3n%20sobre%20los%20servicios%20de%20SOMA"
+      class="whatsapp-float"
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label="Hablar por WhatsApp con SOMA"
+      title="Hablar por WhatsApp"
+    >
+      <svg viewBox="0 0 32 32" width="28" height="28" aria-hidden="true">
+        <path
+          fill="white"
+          d="M19.11 17.47c-.27-.14-1.59-.78-1.84-.87-.25-.09-.43-.14-.61.14-.18.27-.7.86-.86 1.05-.16.18-.32.2-.59.07-.27-.14-1.13-.42-2.15-1.33-.79-.7-1.32-1.56-1.47-1.83-.14-.27-.01-.42.13-.56.13-.13.27-.34.41-.52.14-.18.18-.29.27-.48.09-.18.04-.34-.02-.48-.07-.14-.61-1.47-.84-2.02-.22-.53-.44-.46-.61-.47h-.52c-.18 0-.48.07-.73.34-.25.27-.95.93-.95 2.27 0 1.34.97 2.64 1.11 2.82.14.18 1.9 2.9 4.6 4.07.64.28 1.15.45 1.54.58.65.2 1.24.17 1.71.1.52-.08 1.59-.65 1.81-1.28.22-.63.22-1.16.16-1.28-.07-.11-.25-.18-.52-.32M16.02 3.2c-7 0-12.67 5.67-12.67 12.67 0 2.23.58 4.41 1.67 6.33L3.2 28.8l6.78-1.78c1.86 1.01 3.95 1.54 6.04 1.54h.01c7 0 12.67-5.67 12.67-12.67S23.02 3.2 16.02 3.2m0 23.2h-.01c-1.89 0-3.74-.51-5.35-1.48l-.38-.22-4.02 1.05 1.07-3.92-.25-.4a10.56 10.56 0 0 1-1.63-5.63c0-5.85 4.76-10.61 10.61-10.61 2.83 0 5.49 1.1 7.49 3.11 2 2 3.1 4.66 3.1 7.5 0 5.85-4.76 10.6-10.62 10.6"
+        />
+      </svg>
+    </a>
 
     <script src="script.js"></script>
   </body>
