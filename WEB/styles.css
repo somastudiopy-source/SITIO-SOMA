@@ -952,4 +952,37 @@ img {
     width: 56px;
     height: 56px;
   }
+.services-hero {
+  min-height: 620px;
+}
+
+  
+
+.mini-service-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.mini-service-item {
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.88);
+  line-height: 1.5;
+}
+
+.featured-block-light {
+  background:
+    linear-gradient(135deg, rgba(18, 22, 34, 0.96), rgba(24, 29, 44, 0.98)),
+    linear-gradient(90deg, rgba(255, 147, 15, 0.06), rgba(0, 97, 255, 0.06));
+}
+
+.services-publicidad {
+  background:
+    radial-gradient(circle at 75% 20%, rgba(191, 15, 255, 0.16), transparent 30%),
+    radial-gradient(circle at 20% 20%, rgba(255, 147, 15, 0.14), transparent 28%),
+    linear-gradient(180deg, rgba(8, 10, 18, 0.08), rgba(8, 10, 18, 0.6)),
+    linear-gradient(135deg, #46536f, #273148 60%, #181d2a);
 }
