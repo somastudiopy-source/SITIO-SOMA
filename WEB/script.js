@@ -3,107 +3,72 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const toggleBtn = document.getElementById("themeToggle");
   const themeIcon = document.getElementById("themeIcon");
-
+  const brandLogo = document.getElementById("brandLogo");
   const yearEl = document.getElementById("year");
-  if (yearEl) yearEl.textContent = new Date().getFullYear();
 
-  function syncIcon() {
-    const isLight = body.classList.contains("theme-light");
-    if (themeIcon) themeIcon.textContent = isLight ? "☀" : "☾";
+  const demoBtn = document.getElementById("demoBtn");
+  const loaderWrap = document.getElementById("loaderWrap");
+
+  const THEME_KEY = "soma_theme";
+
+  if (yearEl) {
+    yearEl.textContent = new Date().getFullYear();
   }
 
-  function syncLogo() {
-    const logo = document.getElementById("brandLogo");
-    if (!logo) return;
-    const isLight = body.classList.contains("theme-light");
-    logo.src = isLight ? logo.dataset.light : logo.dataset.dark;
+  function isLightTheme() {
+    return body.classList.contains("theme-light");
   }
 
-  // Load theme from localStorage
-  const saved = localStorage.getItem("soma_theme");
-  if (saved === "light") {
-    body.classList.remove("theme-dark");
-    body.classList.add("theme-light");
-  } else {
-    body.classList.remove("theme-light");
-    body.classList.add("theme-dark");
+  function applyTheme(theme) {
+    const light = theme === "light";
+
+    body.classList.toggle("theme-light", light);
+    body.classList.toggle("theme-dark", !light);
+
+    if (themeIcon) {
+      themeIcon.textContent = light ? "☀" : "☾";
+    }
+
+    if (brandLogo) {
+      const darkLogo = brandLogo.dataset.dark;
+      const lightLogo = brandLogo.dataset.light;
+      brandLogo.src = light ? lightLogo : darkLogo;
+    }
+
+    localStorage.setItem(THEME_KEY, theme);
   }
 
-  syncIcon();
-  syncLogo();
+  function loadSavedTheme() {
+    const savedTheme = localStorage.getItem(THEME_KEY);
+
+    if (savedTheme === "light") {
+      applyTheme("light");
+    } else {
+      applyTheme("dark");
+    }
+  }
+
+  loadSavedTheme();
 
   if (toggleBtn) {
     toggleBtn.addEventListener("click", () => {
-      const isLight = body.classList.contains("theme-light");
-      body.classList.toggle("theme-light", !isLight);
-      body.classList.toggle("theme-dark", isLight);
-      localStorage.setItem("soma_theme", !isLight ? "light" : "dark");
-      syncIcon();
-      syncLogo();
+      applyTheme(isLightTheme() ? "dark" : "light");
     });
   }
 
-  // Demo button loader
-  const demoBtn = document.getElementById("demoBtn");
-  const loaderWrap = document.getElementById("loaderWrap");
   if (demoBtn && loaderWrap) {
     demoBtn.addEventListener("click", () => {
-      loaderWrap.classList.add("show");
+      if (demoBtn.disabled) return;
+
       demoBtn.disabled = true;
+      loaderWrap.classList.add("show");
 
       setTimeout(() => {
         loaderWrap.classList.remove("show");
         demoBtn.disabled = false;
-        alert("¡Listo! Después conectamos esto a tu WhatsApp / formulario.");
-      }, 1100);
-    });
-  }
 
-  // Contact button (placeholder)
-  const contactBtn = document.getElementById("contactBtn");
-  if (contactBtn) {
-    contactBtn.addEventListener("click", () => {
-      alert("Acá vamos a abrir WhatsApp o un formulario de contacto.");
-    });
-  }
-
-  // Login form (placeholder)
-  const loginForm = document.getElementById("loginForm");
-  const formMsg = document.getElementById("formMsg");
-
-  function showMsg(text, isError) {
-    if (!formMsg) return;
-    formMsg.classList.add("show");
-    formMsg.textContent = text;
-    formMsg.style.borderColor = isError
-      ? "rgba(255,27,107,0.55)"
-      : "rgba(0,97,255,0.55)";
-  }
-
-  if (loginForm) {
-    loginForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const email = document.getElementById("email")?.value?.trim() || "";
-      const password = document.getElementById("password")?.value?.trim() || "";
-
-      if (!email || !password) {
-        showMsg("Completá email y contraseña.", true);
-        return;
-      }
-
-      showMsg("Acceso válido (demo). Luego lo conectamos al panel real.", false);
-
-      setTimeout(() => {
-        window.location.href = "index.html";
+        window.location.href = "contacto.html";
       }, 900);
-    });
-  }
-
-  const forgot = document.getElementById("forgot");
-  if (forgot) {
-    forgot.addEventListener("click", (e) => {
-      e.preventDefault();
-      alert("Después conectamos recuperación de contraseña.");
     });
   }
 });
