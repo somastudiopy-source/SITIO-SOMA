@@ -986,3 +986,196 @@ img {
     linear-gradient(180deg, rgba(8, 10, 18, 0.08), rgba(8, 10, 18, 0.6)),
     linear-gradient(135deg, #46536f, #273148 60%, #181d2a);
 }
+
+# ULTIMO 
+
+  .services-page {
+  max-width: 980px;
+}
+
+.services-intro {
+  padding: 36px 6px 12px;
+  max-width: 760px;
+}
+
+.services-eyebrow {
+  display: inline-flex;
+  margin-bottom: 14px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.services-intro h1 {
+  margin: 0 0 18px;
+  font-size: clamp(2.3rem, 5vw, 4.5rem);
+  line-height: 1.03;
+  letter-spacing: -1px;
+  max-width: 12ch;
+}
+
+.services-lead {
+  margin: 0;
+  max-width: 62ch;
+  color: rgba(255, 255, 255, 0.76);
+  font-size: 1.04rem;
+  line-height: 1.75;
+}
+
+.services-stack {
+  display: grid;
+  gap: 28px;
+  margin-top: 34px;
+}
+
+.service-bubble {
+  position: relative;
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: 20px;
+  padding: 34px 30px;
+  border-radius: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  overflow: hidden;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.2);
+}
+
+.bubble-admin {
+  background:
+    radial-gradient(circle at 15% 20%, rgba(0, 97, 255, 0.16), transparent 28%),
+    linear-gradient(135deg, rgba(49, 56, 77, 0.95), rgba(31, 36, 51, 0.98));
+}
+
+.bubble-publicidad {
+  background:
+    radial-gradient(circle at 85% 20%, rgba(191, 15, 255, 0.18), transparent 28%),
+    linear-gradient(135deg, rgba(47, 55, 74, 0.95), rgba(31, 36, 51, 0.98));
+}
+
+.bubble-marca {
+  background:
+    radial-gradient(circle at 20% 80%, rgba(255, 147, 15, 0.16), transparent 28%),
+    linear-gradient(135deg, rgba(50, 57, 78, 0.95), rgba(31, 36, 51, 0.98));
+}
+
+.service-number {
+  width: 74px;
+  height: 74px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: white;
+  font-size: 1.1rem;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+}
+
+.service-copy {
+  max-width: 720px;
+}
+
+.service-tag {
+  display: inline-flex;
+  margin-bottom: 10px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.service-copy h2 {
+  margin: 0 0 14px;
+  font-size: clamp(1.6rem, 3vw, 2.4rem);
+  line-height: 1.1;
+  letter-spacing: -0.5px;
+}
+
+.service-copy p {
+  margin: 0 0 14px;
+  color: rgba(255, 255, 255, 0.76);
+  line-height: 1.78;
+  font-size: 1rem;
+}
+
+.service-copy p:last-child {
+  margin-bottom: 0;
+}
+
+.services-cta {
+  margin-top: 34px;
+}
+
+.services-cta-box {
+  padding: 28px 30px;
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.services-cta-box h3 {
+  margin: 0 0 12px;
+  font-size: clamp(1.4rem, 2.6vw, 2rem);
+  letter-spacing: -0.4px;
+}
+
+.services-cta-box p {
+  margin: 0;
+  max-width: 60ch;
+  color: rgba(255, 255, 255, 0.74);
+  line-height: 1.72;
+}
+
+.services-cta-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 20px;
+}
+
+@media (max-width: 740px) {
+  .services-intro {
+    padding-top: 18px;
+  }
+
+  .services-intro h1 {
+    max-width: 100%;
+    font-size: clamp(2rem, 9vw, 3rem);
+  }
+
+  .service-bubble {
+    grid-template-columns: 1fr;
+    padding: 24px 20px;
+    border-radius: 24px;
+  }
+
+  .service-number {
+    width: 62px;
+    height: 62px;
+    font-size: 1rem;
+  }
+
+  .services-cta-box {
+    padding: 22px 20px;
+    border-radius: 22px;
+  }
+
+  .services-cta-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .services-cta-actions .hero-secondary {
+    width: 100%;
+  }
+}
