@@ -1967,6 +1967,11 @@ async function maybeSendProductPhoto(phone, product, userText) {
   }
 }
 
+app.get("/ping", (req, res) => {
+  console.log("PING HIT");
+  res.status(200).send("pong");
+});
+
 // ===================== WEBHOOK VERIFY =====================
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
