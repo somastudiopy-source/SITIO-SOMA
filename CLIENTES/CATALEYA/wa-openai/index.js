@@ -70,7 +70,7 @@ function normalizePhone(s) {
 async function dbInsertMessage({ direction, wa_peer, name, text, msg_type, wa_msg_id, raw }) {
   const peerNorm = normalizePhone(wa_peer);
   await db.query(
-    `INSERT INTO messages(direction, wa_peer, name, text, msg_type, wa_msg_id, raw_json)
+    `INSERT INTO messages(client_id, direction, wa_peer, name, text, msg_type, wa_msg_id, raw_json)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
     [
       CLIENT_ID,
