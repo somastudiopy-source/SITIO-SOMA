@@ -7,6 +7,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { Pool } = require("pg");
+const CLIENT_ID = "CATALEYA";
 // ===================== ✅ PDF (documentos) =====================
 // Intentamos extraer texto de PDFs si está instalado 'pdf-parse'.
 // Si no está, el bot pedirá una captura/imagen del PDF para poder leerlo.
@@ -72,6 +73,7 @@ async function dbInsertMessage({ direction, wa_peer, name, text, msg_type, wa_ms
     `INSERT INTO messages(direction, wa_peer, name, text, msg_type, wa_msg_id, raw_json)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
     [
+      CLIENT_ID,
       direction,
       peerNorm,
       name || null,
