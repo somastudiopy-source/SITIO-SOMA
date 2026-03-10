@@ -65,11 +65,11 @@
     selectedFile: null,
     chatSearchMatches: [],
     chatSearchIndex: -1,
-    typingTimer: null,
     newestInboundByPeer: new Map(),
     loadedOnce: false,
     currentCalendarMode: "WEEK",
     theme: localStorage.getItem("soma_theme") || "light",
+    refreshInFlight: false,
   };
 
   injectRuntimeStyles();
@@ -168,16 +168,19 @@
   async function loadMe() {
     const res = await fetch("/api/me", { credentials: "same-origin" });
     if (!res.ok) throw new Error("No se pudo cargar /api/me");
-    state.me = await res.json();
+    state.me = await safeJson(res);
   }
 
   async function loadConversations(initial = false) {
     const res = await fetch("/api/conversations?limit=400", { credentials: "same-origin" });
     if (!res.ok) throw new Error("No se pudo cargar conversaciones");
-    const data = await res.json();
 
+    const data = await safeJson(res);
     const previousUnread = new Map();
-    for (const c of state.conversations) previousUnread.set(c.wa_peer, Number(c.unread || 0));
+
+    for (const c of state.conversations) {
+      previousUnread.set(c.wa_peer, Number(c.unread || 0));
+    }
 
     state.conversations = Array.isArray(data.conversations) ? data.conversations : [];
     state.filteredConversations = state.conversations;
@@ -228,7 +231,9 @@
       const row = document.createElement("button");
       row.type = "button";
       row.className = `conv-row ${conv.wa_peer === state.currentPeer ? "active" : ""}`;
-      row.addEventListener("click", () => openConversation(conv.wa_peer, true));
+      row.addEventListener("click", () => {
+        openConversation(conv.wa_peer, true).catch(console.error);
+      });
 
       const avatarText = escapeHtml((conv.name || conv.wa_peer || "?").trim().charAt(0).toUpperCase());
       const dayText = conv.day_label || formatConversationDay(conv.last_ts);
@@ -254,6 +259,8 @@
   }
 
   async function openConversation(waPeer, markRead = true) {
+    if (!waPeer) return;
+
     state.currentPeer = waPeer;
 
     const conv = state.conversations.find((c) => c.wa_peer === waPeer);
@@ -265,31 +272,32 @@
     updateComposerState();
     showTypingIndicator("Actualizando…");
 
-    const url = `/api/chat?wa_peer=${encodeURIComponent(waPeer)}&limit=100`;
-    const res = await fetch(url, { credentials: "same-origin" });
-    if (!res.ok) {
+    try {
+      const url = `/api/chat?wa_peer=${encodeURIComponent(waPeer)}&limit=100`;
+      const res = await fetch(url, { credentials: "same-origin" });
+      if (!res.ok) throw new Error("No se pudo cargar chat");
+
+      const data = await safeJson(res);
+      state.currentChatMessages = Array.isArray(data.messages) ? data.messages : [];
+
+      renderMessages();
+      handleChatSearch();
+      scrollMessagesToBottom();
+
+      if (markRead) {
+        await fetch("/api/mark_read", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ wa_peer: waPeer }),
+        }).catch(console.error);
+
+        const local = state.conversations.find((c) => c.wa_peer === waPeer);
+        if (local) local.unread = 0;
+        renderConversationList();
+      }
+    } finally {
       hideTypingIndicator();
-      throw new Error("No se pudo cargar chat");
-    }
-
-    const data = await res.json();
-    state.currentChatMessages = Array.isArray(data.messages) ? data.messages : [];
-    renderMessages();
-    handleChatSearch();
-    scrollMessagesToBottom();
-    hideTypingIndicator();
-
-    if (markRead) {
-      await fetch("/api/mark_read", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ wa_peer: waPeer }),
-      }).catch(console.error);
-
-      const local = state.conversations.find((c) => c.wa_peer === waPeer);
-      if (local) local.unread = 0;
-      renderConversationList();
     }
   }
 
@@ -362,6 +370,7 @@
       img.src = msg.media_url;
       img.alt = "Imagen";
       img.className = "msg-image";
+      img.loading = "lazy";
       box.appendChild(img);
       return box;
     }
@@ -380,7 +389,6 @@
     if (!state.currentPeer || !els.send || els.send.disabled) return;
 
     const text = (els.text?.value || "").trim();
-
     if (!text && !state.selectedFile) return;
 
     els.send.disabled = true;
@@ -407,9 +415,9 @@
         body: JSON.stringify(payload),
       });
 
-      const data = await res.json();
+      const data = await safeJson(res);
 
-      if (!res.ok || data.ok === FalseBoolean()) {
+      if (!res.ok || !data.ok) {
         throw new Error(data.detail || data.error || "No se pudo enviar");
       }
 
@@ -439,10 +447,12 @@
       body: fd,
     });
 
-    const data = await res.json();
+    const data = await safeJson(res);
+
     if (!res.ok || !data.ok) {
       throw new Error(data.error || "No se pudo subir el archivo");
     }
+
     return data;
   }
 
@@ -466,7 +476,8 @@
 
   async function onDeleteConversation() {
     if (!state.currentPeer) return;
-    const ok = confirm("¿Eliminar esta conversación del panel?");
+
+    const ok = window.confirm("¿Eliminar esta conversación del panel?");
     if (!ok) return;
 
     try {
@@ -477,8 +488,11 @@
         body: JSON.stringify({ wa_peer: state.currentPeer }),
       });
 
-      const data = await res.json();
-      if (!res.ok || !data.ok) throw new Error(data.error || "No se pudo eliminar");
+      const data = await safeJson(res);
+
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || "No se pudo eliminar");
+      }
 
       state.currentPeer = null;
       state.currentChatMessages = [];
@@ -506,8 +520,12 @@
     stopAutoRefresh();
 
     state.refreshTimer = setInterval(async () => {
+      if (state.refreshInFlight) return;
+      state.refreshInFlight = true;
+
       try {
         showTypingIndicator("Actualizando…");
+
         const prevMessagesLen = state.currentChatMessages.length;
         const prevLastInbound = getLastInboundId(state.currentChatMessages);
 
@@ -539,6 +557,7 @@
         setSync("Error");
       } finally {
         hideTypingIndicator();
+        state.refreshInFlight = false;
       }
     }, state.refreshMs);
   }
@@ -551,7 +570,7 @@
   }
 
   function getLastInboundId(messages) {
-    for (let i = messages.length - 1; i >= 0; i--) {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
       if (messages[i]?.direction === "in") return messages[i]?.id;
     }
     return null;
@@ -584,10 +603,8 @@
 
   function parseServerDate(ts) {
     if (!ts) return null;
-
     const d = new Date(ts);
     if (!Number.isFinite(d.getTime())) return null;
-
     return d;
   }
 
@@ -641,6 +658,7 @@
     state.chatSearchIndex = -1;
 
     const bubbles = Array.from(document.querySelectorAll(".msg-text"));
+
     bubbles.forEach((node) => {
       node.innerHTML = nl2br(escapeHtml(node.textContent || ""));
     });
@@ -653,6 +671,7 @@
     bubbles.forEach((node, index) => {
       const text = node.textContent || "";
       const lower = text.toLowerCase();
+
       if (lower.includes(q)) {
         state.chatSearchMatches.push(index);
         node.innerHTML = highlightText(text, q);
@@ -675,6 +694,7 @@
     if (state.chatSearchIndex < 0) {
       state.chatSearchIndex = state.chatSearchMatches.length - 1;
     }
+
     if (state.chatSearchIndex >= state.chatSearchMatches.length) {
       state.chatSearchIndex = 0;
     }
@@ -685,6 +705,7 @@
 
   function focusChatMatch() {
     document.querySelectorAll(".msg-text mark").forEach((m) => m.classList.remove("active"));
+
     const marks = Array.from(document.querySelectorAll(".msg-text mark"));
     if (!marks.length) return;
 
@@ -697,30 +718,37 @@
 
   function updateFindCount() {
     if (!els.findCount) return;
+
     if (!state.chatSearchMatches.length) {
       els.findCount.textContent = "0/0";
       return;
     }
+
     els.findCount.textContent = `${state.chatSearchIndex + 1}/${state.chatSearchMatches.length}`;
   }
 
   function toggleEmojiPanel() {
     if (!els.emojiPanel) return;
+
     if (!els.emojiPanel.innerHTML.trim()) {
       buildEmojiPanel();
     }
-    els.emojiPanel.style.display = els.emojiPanel.style.display === "none" ? "grid" : "none";
+
+    const isHidden = getComputedStyle(els.emojiPanel).display === "none";
+    els.emojiPanel.style.display = isHidden ? "grid" : "none";
   }
 
   function buildEmojiPanel() {
     if (!els.emojiPanel) return;
+
     const emojis = [
-      "😀","😁","😂","🤣","😊","😍","😘","😎","🤩","🤔",
-      "🙌","👏","👍","👋","🙏","🔥","✨","🎉","❤️","💬",
-      "📅","📍","📞","💇","💅","🧴","🛍️","✅","❗","😉"
+      "😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😎", "🤩", "🤔",
+      "🙌", "👏", "👍", "👋", "🙏", "🔥", "✨", "🎉", "❤️", "💬",
+      "📅", "📍", "📞", "💇", "💅", "🧴", "🛍️", "✅", "❗", "😉"
     ];
 
     els.emojiPanel.innerHTML = "";
+
     emojis.forEach((emoji) => {
       const b = document.createElement("button");
       b.type = "button";
@@ -736,12 +764,14 @@
 
   function insertAtCursor(input, text) {
     if (!input) return;
+
     const start = input.selectionStart ?? input.value.length;
     const end = input.selectionEnd ?? input.value.length;
     const before = input.value.slice(0, start);
     const after = input.value.slice(end);
 
     input.value = before + text + after;
+
     const pos = start + text.length;
     input.setSelectionRange(pos, pos);
     input.focus();
@@ -749,6 +779,7 @@
 
   function setupCalendar() {
     if (!els.openCalendarBtn || !els.calModal || !els.calFrame) return;
+
     setCalendarMode(state.currentCalendarMode);
 
     els.openCalendarBtn.addEventListener("click", () => {
@@ -785,6 +816,7 @@
 
   function setCalendarMode(mode) {
     state.currentCalendarMode = mode;
+
     if (els.calWeekBtn) els.calWeekBtn.classList.toggle("active", mode === "WEEK");
     if (els.calMonthBtn) els.calMonthBtn.classList.toggle("active", mode === "MONTH");
 
@@ -802,6 +834,7 @@
     src.searchParams.set("showCalendars", "0");
     src.searchParams.set("showPrint", "0");
     src.searchParams.set("showNav", "1");
+
     els.calFrame.src = src.toString();
   }
 
@@ -819,8 +852,14 @@
 
     const start = buildCalendarDate(date, startTime);
     const end = buildCalendarDate(date, endTime);
+
     if (!start || !end) {
       alert("Fecha u horario inválidos.");
+      return;
+    }
+
+    if (start >= end) {
+      alert("La hora de fin debe ser posterior a la hora de inicio.");
       return;
     }
 
@@ -829,7 +868,10 @@
     url.searchParams.set("text", title);
     url.searchParams.set("details", details);
     url.searchParams.set("dates", `${start}/${end}`);
-    if (state.me?.calendar_id) url.searchParams.set("src", state.me.calendar_id);
+
+    if (state.me?.calendar_id) {
+      url.searchParams.set("src", state.me.calendar_id);
+    }
 
     window.open(url.toString(), "_blank", "noopener,noreferrer");
   }
@@ -838,12 +880,14 @@
     try {
       const d = new Date(`${date}T${time}:00`);
       if (!Number.isFinite(d.getTime())) return "";
+
       const yyyy = d.getUTCFullYear();
       const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
       const dd = String(d.getUTCDate()).padStart(2, "0");
       const hh = String(d.getUTCHours()).padStart(2, "0");
       const mi = String(d.getUTCMinutes()).padStart(2, "0");
       const ss = String(d.getUTCSeconds()).padStart(2, "0");
+
       return `${yyyy}${mm}${dd}T${hh}${mi}${ss}Z`;
     } catch {
       return "";
@@ -872,6 +916,7 @@
         </div>
       </div>
     `;
+
     els.msgs.appendChild(wrap);
     scrollMessagesToBottom();
   }
@@ -883,6 +928,7 @@
 
   function requestBrowserNotifications() {
     if (!("Notification" in window)) return;
+
     if (Notification.permission === "default") {
       Notification.requestPermission().catch(() => {});
     }
@@ -905,9 +951,11 @@
   function flashWindowTitle() {
     const original = document.title;
     let count = 0;
+
     const timer = setInterval(() => {
       document.title = document.title === "Nuevo mensaje · SOMA." ? original : "Nuevo mensaje · SOMA.";
       count += 1;
+
       if (count >= 6 || !document.hidden) {
         clearInterval(timer);
         document.title = original;
@@ -932,9 +980,9 @@
     }
 
     if (els.brandLogo) {
-      els.brandLogo.src = theme === "dark"
-        ? els.brandLogo.dataset.dark
-        : els.brandLogo.dataset.light;
+      const darkSrc = els.brandLogo.dataset.dark;
+      const lightSrc = els.brandLogo.dataset.light;
+      els.brandLogo.src = theme === "dark" ? (darkSrc || els.brandLogo.src) : (lightSrc || els.brandLogo.src);
     }
   }
 
@@ -1155,7 +1203,11 @@
     return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 
-  function FalseBoolean() {
-    return false;
+  async function safeJson(res) {
+    try {
+      return await res.json();
+    } catch {
+      return {};
+    }
   }
 })();
