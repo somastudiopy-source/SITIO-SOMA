@@ -366,7 +366,7 @@ async function getCalendarClient() {
 
 // ===================== ✅ TURNOS (Calendar + Sheet dedicada) =====================
 // Sheet donde se anotan turnos
-const TURNOS_SHEET_ID = process.env.TURNOS_SHEET_ID ||"1oZRH_nKNjXpKReZIGdOjM6DNwM2IKjqvrFzzBPqh8Z4";
+const TURNOS_SHEET_ID = process.env.TURNOS_SHEET_ID ||"18mxtcDoD5BbkulG8g1fXE7YRZpt_CFFPvt8JBGzh4S8";
 
 const TURNOS_TAB = process.env.TURNOS_TAB || "TURNOS";
 
@@ -376,11 +376,14 @@ const CALENDAR_ID = process.env.CALENDAR_ID || process.env.GCALENDAR_ID || "";
 
 const TURNOS_HEADERS = [
   "FECHA",
+  "DIA",
   "HORA",
   "CLIENTE",
   "TELEFONO",
   "SERVICIO",
   "DURACION_MIN",
+  "CALENDAR_EVENT_ID",
+  "CREADO_EN",
 ];
 
 // Estado para reserva en 2 o más mensajes (si el cliente responde solo fecha/hora, igual agenda)
@@ -569,7 +572,7 @@ async function extractTurnoFromText({ text, customerName, context }) {
 `Extraé datos de un pedido de turno para un salón de estética.
 Respondé JSON estricto con:
 - ok: boolean
-- fecha: DD-MM-YYYY o ""
+- fecha: YYYY-MM-DD o ""
 - hora: HH:MM (24h) o ""
 - duracion_min: number (default 60 si hay turno)
 - servicio: string corto (puede ser "")
@@ -712,6 +715,259 @@ async function getOrCreateMonthlySpreadsheet() {
   return file.data.id;
 }
 
+// ===================== SHEETS (SEGUIMIENTO) =====================
+// Columnas requeridas por el cliente:
+const TRACK_HEADERS = ["NAME", "PHONE", "OBSERVACION", "CATEGORIA", "PRODUCTOS", "ULTIMO_CONTACTO"];
+
+function ddmmyyyyAR() {
+  return new Date().toLocaleDateString("es-AR", { timeZone: TIMEZONE });
+}
+
+// ✅ Formatos de fecha (sin cambiar arquitectura)
+// Internamente seguimos usando YYYY-MM-DD para Calendar/lógica.
+// Para registrar/enviar al cliente usamos DD/MM/YYYY.
+function ymdToDMY(ymd) {
+  const s = String(ymd || "").trim();
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return s;
+  return `${m[3]}/${m[2]}/${m[1]}`;
+}
+
+// Acepta "DD/MM/YYYY", "DD-MM-YYYY", "YYYY-MM-DD" y devuelve siempre "YYYY-MM-DD" (si puede).
+function toYMD(dateStr) {
+  const s = String(dateStr || "").trim();
+  if (!s) return "";
+  // ya viene en YMD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+  // DD/MM/YYYY o DD-MM-YYYY
+  let m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (m) {
+    const dd = String(m[1]).padStart(2, "0");
+    const mm = String(m[2]).padStart(2, "0");
+    const yyyy = String(m[3]);
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  // DD/MM o DD-MM (asumimos año actual en TIMEZONE)
+  m = s.match(/^(\d{1,2})[\/\-](\d{1,2})$/);
+  if (m) {
+    const dd = String(m[1]).padStart(2, "0");
+    const mm = String(m[2]).padStart(2, "0");
+    const yyyy = todayYMDInTZ().slice(0, 4);
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  return s;
+}
+
+async function ensureDailySheet(spreadsheetId, sheetName) {
+  const sheets = await getSheetsClient();
+  const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId });
+
+  const exists = (spreadsheet.data.sheets || [])
+    .map((s) => s.properties.title)
+    .includes(sheetName);
+
+  if (!exists) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: sheetName } } }],
+      },
+    });
+    console.log(`📄 Hoja creada: ${sheetName}`);
+  }
+
+  // ✅ Header fijo (si ya existía, lo deja correcto)
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${sheetName}!A1:F1`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values: [TRACK_HEADERS] },
+  });
+}
+
+async function upsertContactRow({ spreadsheetId, sheetName, name, phone, observacion, categoria, productos, ultimo_contacto }) {
+  const sheets = await getSheetsClient();
+  const phoneNorm = normalizePhone(phone);
+
+  // Buscar phone en columna B (PHONE) desde fila 2
+  const col = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${sheetName}!B2:B`,
+  });
+
+  const values = col.data.values || [];
+  let rowIndex = -1;
+  for (let i = 0; i < values.length; i++) {
+    const cell = (values[i]?.[0] || "").trim();
+    if (normalizePhone(cell) === phoneNorm) { rowIndex = i; break; }
+  }
+
+  const row = [[
+    name || "",
+    phoneNorm,
+    observacion || "",
+    categoria || "",
+    productos || "",
+    ultimo_contacto || "",
+  ]];
+
+  if (rowIndex >= 0) {
+    const targetRowNumber = 2 + rowIndex;
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${sheetName}!A${targetRowNumber}:F${targetRowNumber}`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: row },
+    });
+    return;
+  }
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `${sheetName}!A:F`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values: row },
+  });
+}
+
+// Mantengo el nombre para respetar arquitectura (se usa en endOfDayJob).
+async function appendToSheet({ name, phone, interest }) {
+  const spreadsheetId = await getOrCreateMonthlySpreadsheet();
+  const sheetName = getTodaySheetName();
+  await ensureDailySheet(spreadsheetId, sheetName);
+
+  const obs = interest
+    ? `${ddmmyyyyAR()} ${String(interest).trim()}`
+    : `${ddmmyyyyAR()} (sin detalle)`;
+
+  await upsertContactRow({
+    spreadsheetId,
+    sheetName,
+    name: name || "",
+    phone,
+    observacion: obs,
+    categoria: "",
+    productos: "",
+    ultimo_contacto: ddmmyyyyAR(),
+  });
+}
+
+// ===================== INTERÉS (LEADS) =====================
+async function detectInterest(text) {
+  const completion = await openai.chat.completions.create({
+    model: PRIMARY_MODEL,
+    messages: [
+      { role: "system", content: "Detectá solo interés real. Respondé una frase corta o 'NINGUNO'." },
+      { role: "user", content: text },
+    ],
+  });
+
+  const result = completion.choices[0].message.content.trim();
+  return result.toUpperCase() === "NINGUNO" ? null : result;
+}
+
+// ===================== UTIL =====================
+function normalize(str) {
+  return String(str || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+
+function isYesNoShortReply(text) {
+  const t = normalize(text);
+  return [
+    "si", "sí", "sii", "siii", "ok", "oka", "dale", "de una", "claro", "perfecto",
+    "no", "nop", "nah"
+  ].includes(t);
+}
+
+function lastAssistantWasQuestion(waId) {
+  const conv = ensureConv(waId);
+  const last = [...(conv.messages || [])].reverse().find((m) => m.role === "assistant");
+  if (!last?.content) return false;
+  return String(last.content).includes("?");
+}
+
+
+function canonicalizeQuery(text) {
+  const t = normalize(text);
+  return t
+    .replace(/\bchampu\b/g, "shampoo")
+    .replace(/\bshampu\b/g, "shampoo")
+    .replace(/\bshampoo\b/g, "shampoo");
+}
+
+// ===================== CATEGORIA / PRODUCTOS (SOLO LISTA PERMITIDA) =====================
+const CATEGORIAS_OK = [
+  "CURSOS📝",
+  "MUEBLES🪑",
+  "SERVICIOS DE BELLEZA💄",
+  "BARBER💈",
+  "INSUMOS🧴",
+  "MÁQUINAS⚙️",
+];
+
+const PRODUCTOS_OK = [
+  "Silla Hidráulica", "Camillas", "Puff", "Espejos / Muebles", "Mesas", "Planchas", "Secadores",
+  "Shampoo ácido", "Nutrición", "Tintura", "Baño de crema", "Matizador",
+  "Ojos", "Peinado", "Limpieza Facial", "Lifting", "Pestañas", "Cejas", "Pies", "Uñas", "Cera",
+  "Alisado", "Corte", "Tintura", "Maquillaje",
+  "Aceite maquina", "Tijeras", "Trenzas", "Depilación", "Masajes", "Permanente",
+  "Mesa", "Manicura", "Barber"
+];
+
+function pickCategoria({ intentType, text }) {
+  const t = normalize(text);
+
+  if (intentType === "COURSE" || t.includes("curso") || t.includes("taller")) return "CURSOS📝";
+
+  if (intentType === "SERVICE" || t.includes("turno") || t.includes("servicio") ||
+      t.includes("limpieza facial") || t.includes("lifting") || t.includes("pesta") || t.includes("ceja") ||
+      t.includes("uñas") || t.includes("unas") || t.includes("depil") || t.includes("masaje") ||
+      t.includes("alisado") || t.includes("peinado") || t.includes("maquill")) {
+    return "SERVICIOS DE BELLEZA💄";
+  }
+
+  if (t.includes("barber") || t.includes("barbero") || t.includes("maquina de cortar") ||
+      t.includes("máquina de cortar") || t.includes("tijera") || t.includes("aceite maquina") ||
+      t.includes("aceite máquina") || t.includes("insumo para maquina") || t.includes("insumo para máquina")) {
+    return "BARBER💈";
+  }
+
+  if (t.includes("camilla") || t.includes("espejo") || t.includes("respaldo") || t.includes("maquillador") ||
+      t.includes("mueble") || t.includes("mesa") || t.includes("puff") || t.includes("silla")) {
+    return "MUEBLES🪑";
+  }
+
+  if (t.includes("maquina") || t.includes("máquina") || t.includes("herramienta") ||
+      t.includes("plancha") || t.includes("secador")) {
+    return "MÁQUINAS⚙️";
+  }
+
+  if (intentType === "PRODUCT" || t.includes("shampoo") || t.includes("baño de crema") || t.includes("baño de crema") ||
+      t.includes("matizador") || t.includes("tintura") || t.includes("nutricion") || t.includes("nutrición")) {
+    return "INSUMOS🧴";
+  }
+
+  return "";
+}
+
+function pickProductos(text) {
+  const t = normalize(text);
+  const hits = [];
+  for (const p of PRODUCTOS_OK) {
+    const k = normalize(p);
+    if (k && t.includes(k)) hits.push(p);
+  }
+  return Array.from(new Set(hits)).slice(0, 6).join(" / ");
+}
 
 // ===================== ✅ FUZZY MATCH (stock) =====================
 // Objetivo: el cliente suele usar variaciones (plurales, marcas, typos, etc.).
@@ -725,7 +981,7 @@ const STOCK_STOPWORDS = new Set([
   "precio", "cuanto", "cuánto", "sale", "valen", "vale",
   "me", "pasas", "pasás", "mandame", "enviame", "enviáme", "mostrar", "mostrame", "ver",
   "foto", "fotos", "imagen", "imagenes", "queria", "quería",
-  "hola", "buenas", "por", "favor", "gracias", "quiero", "quisiera","ay", "ahi"
+  "hola", "buenas", "por", "favor", "gracias", "quiero", "quisiera",
   // conectores
   "de", "del", "la", "las", "el", "los", "un", "una", "unos", "unas",
   "para", "con", "sin", "y", "o", "en", "a"
