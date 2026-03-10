@@ -41,7 +41,6 @@
     });
   }
 
-  // Helpers
   function esc(s) {
     return String(s || "")
       .replaceAll("&", "&amp;")
@@ -55,55 +54,85 @@
     return String(str || "").replace(/\n/g, "<br>");
   }
 
-  function fmtHour(ts) {
-    try {
-      const d = new Date(ts);
-      if (!Number.isFinite(d.getTime())) return "";
-      return d.toLocaleTimeString("es-AR", {
-        hour: "2-digit",
-        minute: "2-digit",
-        timeZone: "America/Argentina/Buenos_Aires",
-      });
-    } catch {
-      return "";
+  function parseServerDate(ts) {
+    if (!ts) return null;
+
+    if (ts instanceof Date && Number.isFinite(ts.getTime())) return ts;
+
+    const direct = new Date(ts);
+    if (Number.isFinite(direct.getTime())) return direct;
+
+    if (typeof ts === "string") {
+      const fixed = ts.replace(" ", "T");
+      const d2 = new Date(fixed);
+      if (Number.isFinite(d2.getTime())) return d2;
+
+      const d3 = new Date(fixed + "Z");
+      if (Number.isFinite(d3.getTime())) return d3;
     }
+
+    return null;
+  }
+
+  function fmtHour(ts) {
+    const d = parseServerDate(ts);
+    if (!d) return "";
+
+    return d.toLocaleTimeString("es-AR", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: "America/Argentina/Buenos_Aires",
+    });
   }
 
   function fmtDayLabel(ts) {
-    try {
-      const d = new Date(ts);
-      if (!Number.isFinite(d.getTime())) return "";
+    const d = parseServerDate(ts);
+    if (!d) return "";
 
-      const now = new Date();
-      const dArg = new Date(
-        d.toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" })
-      );
-      const nowArg = new Date(
-        now.toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" })
-      );
+    const now = new Date();
 
-      const sameDay =
-        dArg.getDate() === nowArg.getDate() &&
-        dArg.getMonth() === nowArg.getMonth() &&
-        dArg.getFullYear() === nowArg.getFullYear();
+    const dArg = new Date(
+      d.toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" })
+    );
+    const nowArg = new Date(
+      now.toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" })
+    );
 
-      const yesterday = new Date(nowArg);
-      yesterday.setDate(nowArg.getDate() - 1);
+    const sameDay =
+      dArg.getDate() === nowArg.getDate() &&
+      dArg.getMonth() === nowArg.getMonth() &&
+      dArg.getFullYear() === nowArg.getFullYear();
 
-      const isYesterday =
-        dArg.getDate() === yesterday.getDate() &&
-        dArg.getMonth() === yesterday.getMonth() &&
-        dArg.getFullYear() === yesterday.getFullYear();
+    const yesterday = new Date(nowArg);
+    yesterday.setDate(nowArg.getDate() - 1);
 
-      if (sameDay) return fmtHour(ts);
-      if (isYesterday) return "AYER";
+    const isYesterday =
+      dArg.getDate() === yesterday.getDate() &&
+      dArg.getMonth() === yesterday.getMonth() &&
+      dArg.getFullYear() === yesterday.getFullYear();
 
-      return dArg.toLocaleDateString("es-AR", {
-        timeZone: "America/Argentina/Buenos_Aires",
-      });
-    } catch {
-      return "";
-    }
+    if (sameDay) return fmtHour(ts);
+    if (isYesterday) return "AYER";
+
+    return dArg.toLocaleDateString("es-AR", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "2-digit",
+      timeZone: "America/Argentina/Buenos_Aires",
+    });
+  }
+
+  function getConversationTime(c) {
+    const candidate =
+      c?.last_ts ||
+      c?.last_message_ts ||
+      c?.ts_utc ||
+      c?.updated_at ||
+      c?.created_at ||
+      null;
+
+    return fmtDayLabel(candidate);
   }
 
   function setSync(text) {
@@ -139,7 +168,6 @@
     return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
   }
 
-  // Elements / state
   let selectedPeer = null;
   let convCache = [];
   let currentMessages = [];
@@ -169,7 +197,6 @@
   const elText = document.getElementById("text");
   const elSend = document.getElementById("send");
 
-  // Calendar
   let CALENDAR_ID = "";
   let CAL_TZ = "America/Argentina/Buenos_Aires";
   const CAL_HL = "es";
@@ -190,12 +217,10 @@
   const elCalEndTime = document.getElementById("calEndTime");
   const elCalDetails = document.getElementById("calDetails");
 
-  // Find state
   let findQuery = "";
   let hits = [];
   let hitIndex = -1;
 
-  // -------- Calendar --------
   async function ensureCalendarConfig() {
     if (CALENDAR_ID) return true;
     try {
@@ -312,7 +337,6 @@
     if (e.key === "Escape") closeCal();
   });
 
-  // -------- Composer --------
   function setEnabledForChat(enabled) {
     if (elSend) elSend.disabled = !enabled;
     if (elEmojiBtn) elEmojiBtn.disabled = !enabled;
@@ -334,7 +358,6 @@
 
   elText?.addEventListener("input", updateComposerState);
 
-  // -------- Conversations --------
   async function loadConversations() {
     const res = await fetch("/api/conversations?limit=400", {
       credentials: "same-origin",
@@ -367,12 +390,14 @@
       btn.type = "button";
       btn.className = "conv-row" + (c.wa_peer === selectedPeer ? " active" : "");
 
+      const timeText = getConversationTime(c);
+
       btn.innerHTML = `
         <div class="conv-avatar">${esc((c.name || c.wa_peer || "?").slice(0, 1).toUpperCase())}</div>
         <div class="conv-main">
           <div class="conv-top">
             <div class="conv-name">${esc(c.name || c.wa_peer || "Sin nombre")}</div>
-            <div class="conv-time">${esc(c.day_label || fmtDayLabel(c.last_ts))}</div>
+            <div class="conv-time">${esc(timeText)}</div>
           </div>
           <div class="conv-bottom">
             <div class="conv-preview">${esc(c.last_text || "Sin mensajes")}</div>
@@ -398,19 +423,32 @@
 
   elQ?.addEventListener("input", renderConversations);
 
-  // -------- Messages --------
   function isImageMessage(m) {
-    if ((m.msg_type || "") === "image") return true;
-    if ((m.media_kind || "") === "image") return true;
-    if ((m.content_type || "").startsWith("image/")) return true;
-    const u = (m.media_url || "").toLowerCase();
-    return (
-      u.endsWith(".png") ||
-      u.endsWith(".jpg") ||
-      u.endsWith(".jpeg") ||
-      u.endsWith(".webp") ||
-      u.endsWith(".gif")
-    );
+    const msgType = String(m.msg_type || "").toLowerCase();
+    const mediaKind = String(m.media_kind || "").toLowerCase();
+    const contentType = String(m.content_type || "").toLowerCase();
+    const mediaUrl = String(m.media_url || "").toLowerCase();
+    const text = String(m.text || "").toLowerCase();
+
+    if (msgType.includes("image")) return true;
+    if (mediaKind.includes("image")) return true;
+    if (contentType.startsWith("image/")) return true;
+
+    if (
+      mediaUrl.endsWith(".png") ||
+      mediaUrl.endsWith(".jpg") ||
+      mediaUrl.endsWith(".jpeg") ||
+      mediaUrl.endsWith(".webp") ||
+      mediaUrl.endsWith(".gif") ||
+      mediaUrl.includes("/image") ||
+      mediaUrl.includes("image/")
+    ) {
+      return true;
+    }
+
+    if (text.includes("<imagen>") || text === "imagen") return true;
+
+    return false;
   }
 
   function messageNode(m) {
@@ -423,7 +461,15 @@
     let mediaHtml = "";
     if (m.media_url) {
       if (isImageMessage(m)) {
-        mediaHtml = `<img class="media-preview" src="${esc(m.media_url)}" alt="imagen" />`;
+        mediaHtml = `
+          <img
+            class="media-preview"
+            src="${esc(m.media_url)}"
+            alt="imagen"
+            loading="lazy"
+            onerror="this.style.display='none'; this.insertAdjacentHTML('afterend','<div style=&quot;margin-bottom:8px;opacity:.8;&quot;>📷 Imagen no disponible</div>');"
+          />
+        `;
       } else {
         mediaHtml = `
           <div style="margin-bottom:8px;">
@@ -435,7 +481,7 @@
       }
     }
 
-    const hour = fmtHour(m.ts_utc);
+    const hour = fmtHour(m.ts_utc || m.created_at || m.timestamp);
 
     b.innerHTML = `
       ${mediaHtml}
@@ -488,7 +534,6 @@
     }
   }
 
-  // -------- Realtime refresh --------
   async function refreshCurrentConversationSilently() {
     if (!selectedPeer || refreshBusy) return;
     refreshBusy = true;
@@ -542,7 +587,6 @@
     }
   });
 
-  // -------- Emoji --------
   const EMOJIS = [
     "😀","😁","😂","🤣","😊","😍","😘","😎",
     "🙂","😉","😅","😇","🤩","🥳","😴","🤔",
@@ -606,7 +650,6 @@
     closeEmoji();
   });
 
-  // -------- Attach --------
   function setFileChip(name) {
     if (!elFileChip || !elFileChipName) return;
     elFileChipName.textContent = name || "";
@@ -654,7 +697,6 @@
     return data;
   }
 
-  // -------- Send --------
   async function sendMessage() {
     if (!selectedPeer || !elSend) return;
 
@@ -714,7 +756,6 @@
     }
   });
 
-  // -------- Delete conversation --------
   elDeleteChat?.addEventListener("click", async () => {
     if (!selectedPeer) return;
 
@@ -751,7 +792,6 @@
     await loadConversations();
   });
 
-  // -------- Find in chat --------
   function resetFind() {
     findQuery = "";
     hits = [];
@@ -861,7 +901,6 @@
   elFindDown?.addEventListener("click", findNext);
   elFindUp?.addEventListener("click", findPrev);
 
-  // -------- Notifications --------
   function requestBrowserNotifications() {
     if (!("Notification" in window)) return;
     if (Notification.permission === "default") {
@@ -871,7 +910,6 @@
 
   requestBrowserNotifications();
 
-  // -------- Runtime styles --------
   function injectRuntimeStyles() {
     const style = document.createElement("style");
     style.textContent = `
@@ -1022,8 +1060,6 @@
   }
 
   injectRuntimeStyles();
-
-  // start
   setEnabledForChat(false);
   closeEmoji();
   loadConversations().catch(console.error);
