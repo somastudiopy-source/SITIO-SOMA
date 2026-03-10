@@ -366,7 +366,7 @@ async function getCalendarClient() {
 
 // ===================== ✅ TURNOS (Calendar + Sheet dedicada) =====================
 // Sheet donde se anotan turnos
-const TURNOS_SHEET_ID = process.env.TURNOS_SHEET_ID ||"18mxtcDoD5BbkulG8g1fXE7YRZpt_CFFPvt8JBGzh4S8";
+const TURNOS_SHEET_ID = process.env.TURNOS_SHEET_ID ||"1oZRH_nKNjXpKReZIGdOjM6DNwM2IKjqvrFzzBPqh8Z4";
 
 const TURNOS_TAB = process.env.TURNOS_TAB || "TURNOS";
 
