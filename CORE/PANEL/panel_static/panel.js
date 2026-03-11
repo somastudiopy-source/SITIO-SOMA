@@ -74,17 +74,22 @@
     return null;
   }
 
-  function fmtHour(ts) {
-    const d = parseServerDate(ts);
-    if (!d) return "";
+function formatMessageHour(ts) {
 
-    return d.toLocaleTimeString("es-AR", {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-      timeZone: "America/Argentina/Buenos_Aires",
-    });
-  }
+  if (!ts) return "";
+
+  const d = new Date(ts);
+
+  if (!Number.isFinite(d.getTime())) return "";
+
+  return d.toLocaleTimeString("es-AR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "America/Argentina/Buenos_Aires"
+  });
+
+}
 
   function fmtDayLabel(ts) {
     const d = parseServerDate(ts);
