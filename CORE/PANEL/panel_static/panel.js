@@ -269,35 +269,50 @@
     return String(str || "").replace(/\n/g, "<br>");
   }
 
-  function parseServerDate(ts) {
-    if (!ts) return null;
-    if (ts instanceof Date && Number.isFinite(ts.getTime())) return ts;
+function parseServerDate(ts) {
+  if (!ts) return null;
 
-    const direct = new Date(ts);
-    if (Number.isFinite(direct.getTime())) return direct;
+  if (ts instanceof Date && Number.isFinite(ts.getTime())) return ts;
 
-    if (typeof ts === "string") {
-      const fixed = ts.replace(" ", "T");
-      const d2 = new Date(fixed);
-      if (Number.isFinite(d2.getTime())) return d2;
-
-      const d3 = new Date(fixed + "Z");
-      if (Number.isFinite(d3.getTime())) return d3;
-    }
-
-    return null;
+  if (typeof ts === "number") {
+    const dNum = new Date(ts);
+    if (Number.isFinite(dNum.getTime())) return dNum;
   }
 
-  function formatMessageHour(ts) {
+  const direct = new Date(ts);
+  if (Number.isFinite(direct.getTime())) return direct;
+
+  if (typeof ts === "string") {
+    const s = ts.trim();
+
+    const fixed1 = s.replace(" ", "T");
+    const d1 = new Date(fixed1);
+    if (Number.isFinite(d1.getTime())) return d1;
+
+    const d2 = new Date(fixed1 + "Z");
+    if (Number.isFinite(d2.getTime())) return d2;
+
+    const onlyDigits = /^\d+$/.test(s);
+    if (onlyDigits) {
+      const n = Number(s);
+      const d3 = new Date(n);
+      if (Number.isFinite(d3.getTime())) return d3;
+    }
+  }
+
+  return null;
+}}
+
+function formatMessageHour(ts) {
   const d = parseServerDate(ts);
   if (!d) return "";
 
-  return new Intl.DateTimeFormat("es-AR", {
+  return d.toLocaleTimeString("es-AR", {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
-    timeZone: "America/Argentina/Buenos_Aires"
-  }).format(d);
+    timeZone: "America/Argentina/Buenos_Aires",
+  });
 }
 
 
@@ -341,29 +356,58 @@
     );
   }
 
-  function getMessageTimestamp(m) {
-    return m.ts_utc || m.timestamp || m.created_at || m.sent_at || m.ts || null;
+function getMessageTimestamp(m) {
+  return (
+    m.ts_utc ||
+    m.timestamp ||
+    m.created_at ||
+    m.sent_at ||
+    m.ts ||
+    m.date ||
+    m.datetime ||
+    m.raw_ts ||
+    (m.raw_json && (
+      m.raw_json.ts_utc ||
+      m.raw_json.timestamp ||
+      m.raw_json.created_at ||
+      m.raw_json.sent_at ||
+      m.raw_json.ts ||
+      m.raw_json.date
+    )) ||
+    null
+  );
+}
+
+function getMediaUrl(m) {
+  const candidates = [
+    m.media_url,
+    m.file_url,
+    m.url,
+    m.image_url,
+    m.photo_url,
+    m.media?.url,
+    m.media?.path,
+    m.raw_json?.media_url,
+    m.raw_json?.file_url,
+    m.raw_json?.url,
+    m.raw_json?.image_url,
+    m.raw_json?.photo_url,
+    m.raw_json?.media?.url,
+    m.raw_json?.media?.path,
+    m.path,
+  ].filter(Boolean);
+
+  if (!candidates.length) return "";
+
+  const raw = String(candidates[0]);
+
+  if (/^https?:\/\//i.test(raw) || raw.startsWith("blob:") || raw.startsWith("data:")) {
+    return raw;
   }
+  if (raw.startsWith("/")) return raw;
 
-  function getMediaUrl(m) {
-    const candidates = [
-      m.media_url,
-      m.file_url,
-      m.url,
-      m.media?.url,
-      m.media?.path,
-      m.path,
-    ].filter(Boolean);
-
-    if (!candidates.length) return "";
-
-    const raw = String(candidates[0]);
-    if (/^https?:\/\//i.test(raw) || raw.startsWith("blob:") || raw.startsWith("data:")) {
-      return raw;
-    }
-    if (raw.startsWith("/")) return raw;
-    return `/${raw.replace(/^\/+/, "")}`;
-  }
+  return `/${raw.replace(/^\/+/, "")}`;
+}
 
   function showResult(msg, isError) {
     if (!elSendResult) return;
@@ -400,28 +444,48 @@
     }
   }
 
-  function scrollToBottom() {
-    if (!elMsgs) return;
+function scrollToBottom() {
+  if (!elMsgs) return;
+  elMsgs.scrollTop = elMsgs.scrollHeight;
+}
+
+function scrollToBottomForce() {
+  if (!elMsgs) return;
+
+  const target = elMsgs.scrollHeight;
+
+  elMsgs.scrollTop = target;
+
+  requestAnimationFrame(() => {
     elMsgs.scrollTop = elMsgs.scrollHeight;
-  }
+  });
+
+  setTimeout(() => {
+    elMsgs.scrollTop = elMsgs.scrollHeight;
+  }, 80);
+}
 
   function isNearBottom(el) {
     if (!el) return true;
     return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
   }
 
-  function buildMessagesSignature(msgs) {
-    if (!Array.isArray(msgs) || !msgs.length) return "empty";
-    const first = msgs[0];
-    const last = msgs[msgs.length - 1];
-    return JSON.stringify({
-      count: msgs.length,
-      first: first?.id || first?.wa_id || first?.timestamp || first?.ts_utc || null,
-      last: last?.id || last?.wa_id || last?.timestamp || last?.ts_utc || null,
-      lastText: last?.text || "",
-      lastMedia: getMediaUrl(last) || "",
-    });
-  }
+function buildMessagesSignature(msgs) {
+  if (!Array.isArray(msgs) || !msgs.length) return "empty";
+
+  const first = msgs[0];
+  const last = msgs[msgs.length - 1];
+
+  return JSON.stringify({
+    count: msgs.length,
+    firstId: first?.id || null,
+    lastId: last?.id || null,
+    lastTs: getMessageTimestamp(last) || "",
+    lastText: last?.text || "",
+    lastMedia: getMediaUrl(last) || "",
+    lastType: last?.msg_type || last?.type || "",
+  });
+}
 
   // =========================
   // Conversations
@@ -524,7 +588,9 @@ setTimeout(() => {
     lastRenderedSignature = buildMessagesSignature(msgs);
 
     if (msgs.length) oldestId = msgs[0].id;
-    scrollToBottom();
+    setTimeout(() => {
+  scrollToBottomForce();
+}, 30);
     applyFind(findQuery);
   }
 
@@ -579,55 +645,79 @@ setTimeout(() => {
     elMsgs.prepend(frag);
   }
 
-  function isImageMessage(m) {
-    const msgType = String(m.msg_type || "").toLowerCase();
-    const mediaKind = String(m.media_kind || "").toLowerCase();
-    const contentType = String(m.content_type || "").toLowerCase();
-    const mediaUrl = String(getMediaUrl(m) || "").toLowerCase();
+function isImageMessage(m) {
+  const msgType = String(
+    m.msg_type ||
+    m.type ||
+    m.media_kind ||
+    m.raw_json?.msg_type ||
+    m.raw_json?.type ||
+    m.raw_json?.media_kind ||
+    ""
+  ).toLowerCase();
 
-    return (
-      msgType === "image" ||
-      mediaKind === "image" ||
-      contentType.startsWith("image/") ||
-      mediaUrl.endsWith(".png") ||
-      mediaUrl.endsWith(".jpg") ||
-      mediaUrl.endsWith(".jpeg") ||
-      mediaUrl.endsWith(".webp") ||
-      mediaUrl.endsWith(".gif")
-    );
-  }
+  const mediaKind = String(
+    m.media_kind ||
+    m.raw_json?.media_kind ||
+    m.media?.kind ||
+    m.raw_json?.media?.kind ||
+    ""
+  ).toLowerCase();
 
-  function messageNode(m) {
-    const row = document.createElement("div");
-    const direction = m.direction === "in" ? "in" : "out";
-    row.className = "bubble-row " + direction;
+  const contentType = String(
+    m.content_type ||
+    m.raw_json?.content_type ||
+    m.media?.content_type ||
+    m.raw_json?.media?.content_type ||
+    ""
+  ).toLowerCase();
 
-    const b = document.createElement("div");
-    b.className = "bubble " + direction;
+  const mediaUrl = String(getMediaUrl(m) || "").toLowerCase();
 
-    const mediaUrl = getMediaUrl(m);
-    let mediaHtml = "";
+  return (
+    msgType === "image" ||
+    mediaKind === "image" ||
+    contentType.startsWith("image/") ||
+    mediaUrl.endsWith(".png") ||
+    mediaUrl.endsWith(".jpg") ||
+    mediaUrl.endsWith(".jpeg") ||
+    mediaUrl.endsWith(".webp") ||
+    mediaUrl.endsWith(".gif")
+  );
+}
+  
 
-    if (mediaUrl) {
-      if (isImageMessage(m)) {
-        mediaHtml = `<img class="media-preview" src="${esc(mediaUrl)}" alt="imagen" loading="lazy">`;
-      } else {
-        mediaHtml = `<div style="margin-bottom:8px;"><a href="${esc(mediaUrl)}" target="_blank" rel="noopener noreferrer" style="color:inherit;opacity:.9;text-decoration:none;">📎 Abrir archivo</a></div>`;
-      }
+function messageNode(m) {
+  const row = document.createElement("div");
+  const direction = m.direction === "in" ? "in" : "out";
+  row.className = "bubble-row " + direction;
+
+  const b = document.createElement("div");
+  b.className = "bubble " + direction;
+
+  const mediaUrl = getMediaUrl(m);
+  let mediaHtml = "";
+
+  if (mediaUrl) {
+    if (isImageMessage(m)) {
+      mediaHtml = `<img class="media-preview" src="${esc(mediaUrl)}" alt="imagen" loading="lazy">`;
+    } else {
+      mediaHtml = `<div style="margin-bottom:8px;"><a href="${esc(mediaUrl)}" target="_blank" rel="noopener noreferrer" style="color:inherit;opacity:.9;text-decoration:none;">📎 Abrir archivo</a></div>`;
     }
-
-    const rawText = String(m.text || "");
-    const hour = formatMessageHour(getMessageTimestamp(m));
-
-    b.innerHTML = `
-      ${mediaHtml}
-      <div class="txt" data-msgtext="1" data-rawtext="${esc(rawText)}">${nl2br(esc(rawText))}</div>
-      <div class="meta">${esc(hour)}</div>
-    `;
-
-    row.appendChild(b);
-    return row;
   }
+
+  const rawText = String(m.text || "");
+  const hour = formatMessageHour(getMessageTimestamp(m));
+
+  b.innerHTML = `
+    ${mediaHtml}
+    <div class="txt" data-msgtext="1" data-rawtext="${esc(rawText)}">${nl2br(esc(rawText))}</div>
+    <div class="meta">${esc(hour || "--:--")}</div>
+  `;
+
+  row.appendChild(b);
+  return row;
+}
 
   elMsgs?.addEventListener("scroll", async () => {
     if (!selectedPeer) return;
@@ -658,7 +748,11 @@ setTimeout(() => {
         if (msgs.length) oldestId = msgs[0].id;
         hasMore = !!data.has_more;
 
-        if (keepBottom) scrollToBottom();
+        if (keepBottom) {
+  setTimeout(() => {
+    scrollToBottomForce();
+  }, 30);
+}
         applyFind(findQuery);
       }
     } catch (e) {
