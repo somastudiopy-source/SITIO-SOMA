@@ -366,7 +366,7 @@ async function getCalendarClient() {
 
 // ===================== ✅ TURNOS (Calendar + Sheet dedicada) =====================
 // Sheet donde se anotan turnos
-const TURNOS_SHEET_ID = process.env.TURNOS_SHEET_ID ||"1oZRH_nKNjXpKReZIGdOjM6DNwM2IKjqvrFzzBPqh8Z4";
+const TURNOS_SHEET_ID = process.env.TURNOS_SHEET_ID ||"";
 
 const TURNOS_TAB = process.env.TURNOS_TAB || "TURNOS";
 
@@ -2328,23 +2328,21 @@ if (!merged.cliente_full) {
 
         // 3) Anotar en planilla
         try {
-          const dia = weekdayEsFromYMD(merged.fecha);
-          await appendTurnoRow({
-            fechaYMD: merged.fecha,
-            dia,
-            horaHM: merged.hora,
-            cliente: merged.cliente_full || name || "",
-            telefono: merged.telefono_contacto || phone,
-            servicio: merged.senado ? `${servicioToSave} - SEÑADO` : servicioToSave,
-            duracionMin: merged.duracion_min,
-            calendarEventId: eventId,
-          });
-        } catch (e) {
-          console.error("❌ Error guardando turno en sheet:", e?.response?.data || e?.message || e);
-          await sendWhatsAppText(phone, "Tuve un problema registrando el turno en la planilla. ¿Me confirma fecha, hora y servicio para reintentar?");
-          scheduleInactivityFollowUp(waId, phone);
-          return;
-        }
+  const dia = weekdayEsFromYMD(merged.fecha);
+  await appendTurnoRow({
+    fechaYMD: merged.fecha,
+    dia,
+    horaHM: merged.hora,
+    cliente: merged.cliente_full || name || "",
+    telefono: merged.telefono_contacto || phone,
+    servicio: merged.senado ? `${servicioToSave} - SEÑADO` : servicioToSave,
+    duracionMin: merged.duracion_min,
+    calendarEventId: eventId,
+  });
+} catch (e) {
+  console.error("❌ Error guardando turno en sheet:", e?.response?.data || e?.message || e);
+}
+        
 
         pendingTurnos.delete(waId);
         const diaOk = weekdayEsFromYMD(merged.fecha);
