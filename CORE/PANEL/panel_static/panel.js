@@ -495,19 +495,19 @@
   }
 
   async function openConversation(peer) {
-    await fetch("/api/mark_read", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ wa_peer: peer }),
-    }).catch(() => {});
+   ;
 
     resetFind();
     if (elMsgs) elMsgs.innerHTML = "";
     oldestId = null;
     lastRenderedSignature = "";
-    await loadLatest(peer);
+   await loadLatest(peer);
     await loadConversations();
+
+setTimeout(() => {
+  scrollToBottom();
+}, 50);
+
   }
 
   async function loadLatest(peer) {
@@ -1078,5 +1078,5 @@
     } catch (e) {
       console.error(e);
     }
-  }, 2500);
+  }, 1500);
 })();
