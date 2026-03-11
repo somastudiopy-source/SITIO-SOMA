@@ -74,22 +74,17 @@
     return null;
   }
 
-function formatMessageHour(ts) {
+  function formatMessageHour(ts) {
+    const d = parseServerDate(ts);
+    if (!d) return "";
 
-  if (!ts) return "";
-
-  const d = new Date(ts);
-
-  if (!Number.isFinite(d.getTime())) return "";
-
-  return d.toLocaleTimeString("es-AR", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "America/Argentina/Buenos_Aires"
-  });
-
-}
+    return d.toLocaleTimeString("es-AR", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: "America/Argentina/Buenos_Aires",
+    });
+  }
 
   function fmtDayLabel(ts) {
     const d = parseServerDate(ts);
@@ -117,7 +112,7 @@ function formatMessageHour(ts) {
       dArg.getMonth() === yesterday.getMonth() &&
       dArg.getFullYear() === yesterday.getFullYear();
 
-    if (sameDay) return fmtHour(ts);
+    if (sameDay) return formatMessageHour(ts);
     if (isYesterday) return "AYER";
 
     return dArg.toLocaleDateString("es-AR", {
@@ -240,7 +235,9 @@ function formatMessageHour(ts) {
   function calEmbedSrc(mode) {
     const src = encodeURIComponent(CALENDAR_ID);
     const ctz = encodeURIComponent(CAL_TZ);
-    return `https://calendar.google.com/calendar/embed?src=${src}&ctz=${ctz}&hl=${encodeURIComponent(CAL_HL)}&mode=${mode}&showTitle=0&showPrint=0&showTabs=0&showCalendars=0&showTz=0`;
+    return `https://calendar.google.com/calendar/embed?src=${src}&ctz=${ctz}&hl=${encodeURIComponent(
+      CAL_HL
+    )}&mode=${mode}&showTitle=0&showPrint=0&showTabs=0&showCalendars=0&showTz=0`;
   }
 
   async function openCal(mode) {
@@ -428,28 +425,28 @@ function formatMessageHour(ts) {
 
   elQ?.addEventListener("input", renderConversations);
 
-function isImageMessage(m) {
-  const type = String(m.msg_type || "").toLowerCase();
-  const kind = String(m.media_kind || "").toLowerCase();
-  const content = String(m.content_type || "").toLowerCase();
-  const url = String(m.media_url || "").toLowerCase();
+  function isImageMessage(m) {
+    const type = String(m?.msg_type || "").toLowerCase();
+    const kind = String(m?.media_kind || "").toLowerCase();
+    const content = String(m?.content_type || "").toLowerCase();
+    const url = String(m?.media_url || "").toLowerCase();
+    const text = String(m?.text || "").toLowerCase();
 
-  if (type === "image") return true;
-  if (kind === "image") return true;
-  if (content.startsWith("image/")) return true;
+    if (type === "image") return true;
+    if (kind === "image") return true;
+    if (content.startsWith("image/")) return true;
 
-  if (
-    url.endsWith(".png") ||
-    url.endsWith(".jpg") ||
-    url.endsWith(".jpeg") ||
-    url.endsWith(".webp") ||
-    url.endsWith(".gif")
-  ) {
-    return true;
-  }
-
-  return false;
-}
+    if (
+      url.endsWith(".png") ||
+      url.endsWith(".jpg") ||
+      url.endsWith(".jpeg") ||
+      url.endsWith(".webp") ||
+      url.endsWith(".gif") ||
+      url.includes("/image") ||
+      url.includes("image/")
+    ) {
+      return true;
+    }
 
     if (text.includes("<imagen>") || text === "imagen") return true;
 
@@ -464,32 +461,30 @@ function isImageMessage(m) {
     b.className = "bubble " + (m.direction === "out" ? "out" : "");
 
     let mediaHtml = "";
-if (m.media_url) {
-  if (isImageMessage(m)) {
 
-    mediaHtml = `
-      <img 
-        src="${esc(m.media_url)}"
-        class="msg-image"
-        loading="lazy"
-        style="max-width:260px;border-radius:12px;margin-bottom:6px"
-      />
-    `;
+    if (m.media_url) {
+      if (isImageMessage(m)) {
+        mediaHtml = `
+          <img
+            src="${esc(m.media_url)}"
+            class="media-preview"
+            loading="lazy"
+            alt="imagen"
+            onerror="this.style.display='none'; this.insertAdjacentHTML('afterend','<div style=&quot;margin-bottom:6px;opacity:.75;&quot;>📷 Imagen no disponible</div>');"
+          />
+        `;
+      } else {
+        mediaHtml = `
+          <div style="margin-bottom:6px">
+            <a href="${esc(m.media_url)}" target="_blank" rel="noopener noreferrer">
+              📎 Abrir archivo
+            </a>
+          </div>
+        `;
+      }
+    }
 
-  } else {
-
-    mediaHtml = `
-      <div style="margin-bottom:6px">
-        <a href="${esc(m.media_url)}" target="_blank">
-          📎 Abrir archivo
-        </a>
-      </div>
-    `;
-
-  }
-}
-
-    const hour = fmtHour(m.ts_utc || m.created_at || m.timestamp);
+    const hour = formatMessageHour(m.ts_utc || m.created_at || m.timestamp || m.ts);
 
     b.innerHTML = `
       ${mediaHtml}
@@ -596,11 +591,11 @@ if (m.media_url) {
   });
 
   const EMOJIS = [
-    "😀","😁","😂","🤣","😊","😍","😘","😎",
-    "🙂","😉","😅","😇","🤩","🥳","😴","🤔",
-    "👍","👎","👏","🙏","💪","🔥","✨","💯",
-    "❤️","💙","💜","🩷","🧡","💛","💚","🤍",
-    "🎉","✅","❌","⚠️","📎","📷","🧾","📄"
+    "😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😎",
+    "🙂", "😉", "😅", "😇", "🤩", "🥳", "😴", "🤔",
+    "👍", "👎", "👏", "🙏", "💪", "🔥", "✨", "💯",
+    "❤️", "💙", "💜", "🩷", "🧡", "💛", "💚", "🤍",
+    "🎉", "✅", "❌", "⚠️", "📎", "📷", "🧾", "📄"
   ];
 
   function insertAtCursor(textarea, text) {
@@ -620,7 +615,7 @@ if (m.media_url) {
     if (!elEmojiPanel) return;
     elEmojiPanel.innerHTML = `
       <div class="emoji-grid">
-        ${EMOJIS.map(e => `<button class="emoji" type="button" data-e="${esc(e)}">${esc(e)}</button>`).join("")}
+        ${EMOJIS.map((e) => `<button class="emoji" type="button" data-e="${esc(e)}">${esc(e)}</button>`).join("")}
       </div>
     `;
     elEmojiPanel.querySelectorAll(".emoji").forEach((btn) => {
