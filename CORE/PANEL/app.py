@@ -38,8 +38,8 @@ DATABASE_URL = (
 
 # WhatsApp defaults (optional; per-user in users.json overrides)
 WA_GRAPH_VERSION = os.getenv("WA_GRAPH_VERSION", "v19.0")
-WA_TOKEN_DEFAULT = os.getenv("WA_TOKEN", "")  # optional fallback
-WA_PHONE_NUMBER_ID_DEFAULT = os.getenv("WA_PHONE_NUMBER_ID", "")  # optional fallback
+WA_TOKEN_DEFAULT = os.getenv("WA_TOKEN", "")
+WA_PHONE_NUMBER_ID_DEFAULT = os.getenv("WA_PHONE_NUMBER_ID", "")
 
 app = FastAPI()
 
@@ -50,7 +50,6 @@ app.mount("/panel-static", StaticFiles(directory=PANEL_STATIC_DIR), name="panel-
 
 # ---------------- Users + Session ----------------
 def load_users_data() -> Dict[str, Any]:
-    # 1) Si existe variable de entorno USERS_JSON (Railway), usarla
     env_json = os.getenv("USERS_JSON", "").strip()
     if env_json:
         try:
@@ -58,7 +57,6 @@ def load_users_data() -> Dict[str, Any]:
         except Exception:
             return {"users": []}
 
-    # 2) Si no, usar archivo local users.json
     if not os.path.exists(USERS_FILE):
         return {"users": []}
 
@@ -205,6 +203,7 @@ def wa_cloud_api_send_text(*, token: str, phone_number_id: str, to: str, body: s
         return {"ok": False, "status": int(getattr(e, "code", 500)), "error": "WHATSAPP_HTTP_ERROR", "data": parsed}
     except Exception as e:
         return {"ok": False, "status": 500, "error": f"WHATSAPP_NETWORK_ERROR: {e}"}
+
 
 def guess_extension(content_type: str, fallback: str = ".bin") -> str:
     ext = mimetypes.guess_extension(content_type or "")
@@ -375,7 +374,6 @@ def wa_cloud_api_download_media(*, token: str, download_url: str) -> Dict[str, A
 def db_connect(_db_path: str = ""):
     if not DATABASE_URL:
         raise RuntimeError("Falta DATABASE_URL / PANEL_DATABASE_URL / DB_URL")
-
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = False
     return conn
@@ -444,9 +442,11 @@ def conv_day_label(ts_iso: str) -> str:
         return ""
     try:
         dt = datetime.fromisoformat(str(ts_iso).replace("Z", "+00:00"))
-        local_dt = dt.astimezone()
-        today = datetime.now().astimezone().date()
+        arg_tz = timezone(timedelta(hours=-3))
+        local_dt = dt.astimezone(arg_tz)
+        today = datetime.now(arg_tz).date()
         d = local_dt.date()
+
         if d == today:
             return local_dt.strftime("%H:%M")
         if d == (today - timedelta(days=1)):
@@ -953,6 +953,148 @@ async def api_upload(request: Request, file: UploadFile = File(...)):
     }
 
 
+@app.post("/api/send")
+async def api_send(request: Request):
+    u = require_user(request)
+    client_id = get_panel_client_id(u)
+
+    body = await request.json()
+    to = body.get("to")
+    text = (body.get("text") or "").strip()
+    filename = body.get("filename")
+    content_type = body.get("content_type") or "application/octet-stream"
+
+    if not to:
+        return JSONResponse({"error": "missing to"}, status_code=400)
+    if not text and not filename:
+        return JSONResponse({"error": "missing text or file"}, status_code=400)
+
+    cfg = get_whatsapp_config_for_user(u)
+    token = cfg.get("wa_token", "")
+    phone_number_id = cfg.get("phone_number_id", "")
+
+    if not token or not phone_number_id:
+        return JSONResponse(
+            {"ok": False, "error": "WHATSAPP_NOT_CONFIGURED", "detail": "Falta wa_token o phone_number_id."},
+            status_code=502,
+        )
+
+    wa_resp = None
+    msg_type = "text"
+    raw = {}
+
+    if filename:
+        abs_media = client_media_abs(u)
+        safe_name = safe_basename(filename)
+        file_path = os.path.join(abs_media, safe_name)
+
+        if not os.path.exists(file_path):
+            return JSONResponse(
+                {"ok": False, "error": "FILE_NOT_FOUND", "path": file_path},
+                status_code=404
+            )
+
+        media_kind = "document"
+        msg_type = "document"
+        if (content_type or "").startswith("image/"):
+            media_kind = "image"
+            msg_type = "image"
+
+        upload_resp = wa_cloud_api_upload_media(
+            token=token,
+            phone_number_id=phone_number_id,
+            file_path=file_path,
+            content_type=content_type,
+        )
+        if not upload_resp.get("ok"):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": upload_resp.get("error", "WHATSAPP_MEDIA_UPLOAD_FAILED"),
+                    "status": upload_resp.get("status", 500),
+                    "data": upload_resp.get("data"),
+                },
+                status_code=502,
+            )
+
+        media_id = (upload_resp.get("data") or {}).get("id")
+        if not media_id:
+            return JSONResponse(
+                {"ok": False, "error": "WHATSAPP_MEDIA_UPLOAD_NO_ID", "data": upload_resp.get("data")},
+                status_code=502,
+            )
+
+        wa_resp = wa_cloud_api_send_media(
+            token=token,
+            phone_number_id=phone_number_id,
+            to=str(to),
+            media_id=media_id,
+            media_kind=media_kind,
+            caption=text,
+            filename=safe_name,
+        )
+
+        if not wa_resp.get("ok"):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": wa_resp.get("error", "WHATSAPP_MEDIA_SEND_FAILED"),
+                    "status": wa_resp.get("status", 500),
+                    "data": wa_resp.get("data"),
+                },
+                status_code=502,
+            )
+
+        raw = {
+            "media": {
+                "filename": safe_name,
+                "kind": media_kind,
+                "content_type": content_type,
+                "media_id": media_id,
+            }
+        }
+
+    else:
+        wa_resp = wa_cloud_api_send_text(
+            token=token,
+            phone_number_id=phone_number_id,
+            to=str(to),
+            body=text,
+        )
+
+        if not wa_resp.get("ok"):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": wa_resp.get("error", "WHATSAPP_SEND_FAILED"),
+                    "status": wa_resp.get("status", 500),
+                    "data": wa_resp.get("data"),
+                },
+                status_code=502,
+            )
+
+    con = db_connect(u.get("db_path", ""))
+    ensure_tables(con)
+
+    with con.cursor() as cur:
+        cur.execute("""
+          INSERT INTO messages (client_id, direction, wa_peer, name, text, msg_type, wa_msg_id, ts_utc, raw_json)
+          VALUES (%s, 'out', %s, %s, %s, %s, NULL, %s, %s::jsonb)
+        """, (
+            client_id,
+            to,
+            u.get("client_name", ""),
+            text,
+            msg_type,
+            now_iso(),
+            json.dumps(raw)
+        ))
+    con.commit()
+    con.close()
+
+    return {"ok": True, "whatsapp": wa_resp.get("data", {})}
+
+
 @app.post("/webhook")
 async def whatsapp_webhook(request: Request):
     data = await request.json()
@@ -1085,78 +1227,3 @@ async def verify_webhook(request: Request):
 
     return PlainTextResponse("Forbidden", status_code=403)
 
-
-@app.post("/webhook")
-async def whatsapp_webhook(request: Request):
-    data = await request.json()
-
-    try:
-        entry = data.get("entry", [])
-        if not entry:
-            return {"ok": True}
-
-        changes = entry[0].get("changes", [])
-        if not changes:
-            return {"ok": True}
-
-        value = changes[0].get("value", {})
-        messages = value.get("messages", [])
-
-        if not messages:
-            return {"ok": True}
-
-        msg = messages[0]
-
-        wa_peer = msg.get("from", "")
-        text = msg.get("text", {}).get("body", "")
-        msg_type = msg.get("type", "text")
-        wa_msg_id = msg.get("id")
-        phone_number_id = str(value.get("metadata", {}).get("phone_number_id", "")).strip()
-
-        contacts = value.get("contacts", [])
-        contact_name = ""
-        if contacts:
-            contact_name = contacts[0].get("profile", {}).get("name", "")
-
-        users = load_users()
-        if not users:
-            return {"ok": False, "error": "NO_USERS"}
-
-        # Buscar el usuario correcto por phone_number_id
-        u = None
-        for user in users:
-            if str(user.get("phone_number_id", "")).strip() == phone_number_id:
-                u = user
-                break
-
-        # fallback al primero si no encuentra
-        if not u:
-            u = users[0]
-
-        client_id = get_panel_client_id(u)
-
-        con = db_connect(u.get("db_path", ""))
-        ensure_tables(con)
-
-        with con.cursor() as cur:
-            cur.execute("""
-            INSERT INTO messages
-            (client_id, direction, wa_peer, name, text, msg_type, wa_msg_id, ts_utc, raw_json)
-            VALUES (%s, 'in', %s, %s, %s, %s, %s, %s, %s::jsonb)
-            """, (
-                client_id,
-                wa_peer,
-                contact_name,
-                text,
-                msg_type,
-                wa_msg_id,
-                now_iso(),
-                json.dumps(msg)
-            ))
-        con.commit()
-        con.close()
-
-    except Exception as e:
-        print("Webhook error:", e)
-
-    return {"ok": True}
