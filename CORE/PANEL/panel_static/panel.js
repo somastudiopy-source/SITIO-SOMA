@@ -3,7 +3,9 @@
 
   const body = document.body;
 
+  // =========================
   // Theme
+  // =========================
   const themeToggle = document.getElementById("themeToggle");
   const themeIcon = document.getElementById("themeIcon");
   const logo = document.getElementById("brandLogo");
@@ -42,10 +44,13 @@
     });
   }
 
+  // =========================
   // Google Calendar
+  // =========================
   let CALENDAR_ID = "";
   let CAL_TZ = "America/Argentina/Buenos_Aires";
   const CAL_HL = "es";
+  let currentCalMode = "WEEK";
 
   const elOpenCal = document.getElementById("openCalendarBtn");
   const elCalModal = document.getElementById("calModal");
@@ -67,6 +72,7 @@
     if (CALENDAR_ID) return true;
     try {
       const r = await fetch("/api/me", { credentials: "same-origin" });
+      if (!r.ok) return false;
       const j = await r.json();
       CALENDAR_ID = j.calendar_id || "";
       CAL_TZ = j.calendar_tz || CAL_TZ;
@@ -77,7 +83,8 @@
   function calEmbedSrc(mode) {
     const src = encodeURIComponent(CALENDAR_ID);
     const ctz = encodeURIComponent(CAL_TZ);
-    return `https://calendar.google.com/calendar/embed?src=${src}&ctz=${ctz}&hl=${encodeURIComponent(CAL_HL)}&mode=${mode}&showTitle=0&showPrint=0&showTabs=0&showCalendars=0&showTz=0`;
+    const m = encodeURIComponent(mode || "WEEK");
+    return `https://calendar.google.com/calendar/embed?src=${src}&ctz=${ctz}&hl=${encodeURIComponent(CAL_HL)}&mode=${m}&showTitle=0&showPrint=0&showTabs=0&showCalendars=0&showTz=0`;
   }
 
   async function openCal(mode) {
@@ -87,7 +94,8 @@
       alert("No hay un calendario configurado para este usuario.");
       return;
     }
-    elCalFrame.src = calEmbedSrc(mode || "WEEK");
+    currentCalMode = mode || currentCalMode || "WEEK";
+    elCalFrame.src = calEmbedSrc(currentCalMode);
     elCalModal.classList.add("show");
     elCalModal.setAttribute("aria-hidden", "false");
   }
@@ -100,17 +108,24 @@
     elCalFrame.src = "about:blank";
   }
 
+  function pad2(n) {
+    return String(n).padStart(2, "0");
+  }
+
+  // Devuelve formato Google Calendar: YYYYMMDDTHHmmss
+  // SIN Z, para que el ctz haga el trabajo correctamente
   function toGCalDateFromParts(dateValue, timeValue) {
     if (!dateValue || !timeValue) return "";
-    const d = new Date(`${dateValue}T${timeValue}`);
-    if (Number.isNaN(d.getTime())) return "";
-    const yyyy = d.getUTCFullYear();
-    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-    const dd = String(d.getUTCDate()).padStart(2, "0");
-    const hh = String(d.getUTCHours()).padStart(2, "0");
-    const mi = String(d.getUTCMinutes()).padStart(2, "0");
-    const ss = "00";
-    return `${yyyy}${mm}${dd}T${hh}${mi}${ss}Z`;
+    const [yyyy, mm, dd] = String(dateValue).split("-");
+    const [hh, mi] = String(timeValue).split(":");
+    if (!yyyy || !mm || !dd || !hh || !mi) return "";
+    return `${yyyy}${pad2(mm)}${pad2(dd)}T${pad2(hh)}${pad2(mi)}00`;
+  }
+
+  function localDateFromParts(dateValue, timeValue) {
+    if (!dateValue || !timeValue) return null;
+    const d = new Date(`${dateValue}T${timeValue}:00`);
+    return Number.isNaN(d.getTime()) ? null : d;
   }
 
   async function openCreateEvent() {
@@ -134,6 +149,19 @@
       return;
     }
 
+    const startLocal = localDateFromParts(date, startTime);
+    const endLocal = localDateFromParts(date, endTime);
+
+    if (!startLocal || !endLocal) {
+      alert("Fecha u hora inválida.");
+      return;
+    }
+
+    if (endLocal <= startLocal) {
+      alert("La hora de fin debe ser mayor a la hora de inicio.");
+      return;
+    }
+
     const base = "https://calendar.google.com/calendar/u/0/r/eventedit";
     const params = new URLSearchParams();
     params.set("text", title);
@@ -144,37 +172,50 @@
     params.set("sf", "true");
     params.set("output", "xml");
 
-    window.open(`${base}?${params.toString()}`, "_blank", "noopener");
+    window.open(`${base}?${params.toString()}`, "_blank", "noopener,noreferrer");
   }
 
   elOpenCal?.addEventListener("click", () => openCal("WEEK"));
   elCalClose?.addEventListener("click", closeCal);
+
   elCalWeek?.addEventListener("click", async () => {
     const ok = await ensureCalendarConfig();
     if (!ok) return;
-    if (elCalFrame) elCalFrame.src = calEmbedSrc("WEEK");
+    currentCalMode = "WEEK";
+    if (elCalFrame) elCalFrame.src = calEmbedSrc(currentCalMode);
   });
+
   elCalMonth?.addEventListener("click", async () => {
     const ok = await ensureCalendarConfig();
     if (!ok) return;
-    if (elCalFrame) elCalFrame.src = calEmbedSrc("MONTH");
+    currentCalMode = "MONTH";
+    if (elCalFrame) elCalFrame.src = calEmbedSrc(currentCalMode);
   });
+
   elCalAddToggle?.addEventListener("click", () => {
     if (!elCalAdd) return;
     elCalAdd.hidden = !elCalAdd.hidden;
   });
+
   elCalCreate?.addEventListener("click", openCreateEvent);
+
   elCalModal?.addEventListener("click", (e) => {
     if (e.target === elCalModal) closeCal();
   });
+
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeCal();
+    if (e.key === "Escape" && elCalModal?.classList.contains("show")) {
+      closeCal();
+    }
   });
 
+  // =========================
   // Elements / state
+  // =========================
   let selectedPeer = null;
   let convCache = [];
   let refreshBusy = false;
+  let lastRenderedSignature = "";
 
   const elConvs = document.getElementById("convs");
   const elQ = document.getElementById("q");
@@ -239,6 +280,7 @@
       const fixed = ts.replace(" ", "T");
       const d2 = new Date(fixed);
       if (Number.isFinite(d2.getTime())) return d2;
+
       const d3 = new Date(fixed + "Z");
       if (Number.isFinite(d3.getTime())) return d3;
     }
@@ -253,7 +295,7 @@
       hour: "2-digit",
       minute: "2-digit",
       hour12: false,
-      timeZone: "America/Argentina/Buenos_Aires",
+      timeZone: CAL_TZ || "America/Argentina/Buenos_Aires",
     });
   }
 
@@ -262,8 +304,10 @@
     if (!d) return "";
 
     const now = new Date();
-    const dArg = new Date(d.toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
-    const nowArg = new Date(now.toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
+    const tz = CAL_TZ || "America/Argentina/Buenos_Aires";
+
+    const dArg = new Date(d.toLocaleString("en-US", { timeZone: tz }));
+    const nowArg = new Date(now.toLocaleString("en-US", { timeZone: tz }));
 
     const sameDay =
       dArg.getDate() === nowArg.getDate() &&
@@ -285,7 +329,6 @@
       day: "2-digit",
       month: "2-digit",
       year: "2-digit",
-      timeZone: "America/Argentina/Buenos_Aires",
     });
   }
 
@@ -350,7 +393,10 @@
     if (elSync) {
       elSync.textContent =
         "OK • " +
-        new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" });
+        new Date().toLocaleTimeString("es-AR", {
+          hour: "2-digit",
+          minute: "2-digit",
+        });
     }
   }
 
@@ -364,11 +410,37 @@
     return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
   }
 
+  function buildMessagesSignature(msgs) {
+    if (!Array.isArray(msgs) || !msgs.length) return "empty";
+    const first = msgs[0];
+    const last = msgs[msgs.length - 1];
+    return JSON.stringify({
+      count: msgs.length,
+      first: first?.id || first?.wa_id || first?.timestamp || first?.ts_utc || null,
+      last: last?.id || last?.wa_id || last?.timestamp || last?.ts_utc || null,
+      lastText: last?.text || "",
+      lastMedia: getMediaUrl(last) || "",
+    });
+  }
+
+  // =========================
   // Conversations
+  // =========================
   async function loadConversations() {
     const res = await fetch("/api/conversations?limit=400", { credentials: "same-origin" });
     const data = await res.json();
     convCache = Array.isArray(data.conversations) ? data.conversations : [];
+
+    if (selectedPeer && !convCache.some((c) => c.wa_peer === selectedPeer)) {
+      selectedPeer = null;
+      setEnabledForChat(false);
+      if (elChatTitle) elChatTitle.textContent = "Seleccioná un chat";
+      if (elChatSubtitle) elChatSubtitle.textContent = "—";
+      if (elMsgs) {
+        elMsgs.innerHTML = `<div class="center-hint">Elegí una conversación para ver los mensajes.</div>`;
+      }
+    }
+
     renderConversations();
     setSyncOk();
   }
@@ -433,6 +505,7 @@
     resetFind();
     if (elMsgs) elMsgs.innerHTML = "";
     oldestId = null;
+    lastRenderedSignature = "";
     await loadLatest(peer);
     await loadConversations();
   }
@@ -448,6 +521,7 @@
 
     const msgs = Array.isArray(data.messages) ? data.messages : [];
     renderMessagesReplace(msgs);
+    lastRenderedSignature = buildMessagesSignature(msgs);
 
     if (msgs.length) oldestId = msgs[0].id;
     scrollToBottom();
@@ -460,35 +534,40 @@
 
     const prevScrollHeight = elMsgs ? elMsgs.scrollHeight : 0;
 
-    const url = new URL(location.origin + "/api/chat");
-    url.searchParams.set("wa_peer", peer);
-    url.searchParams.set("limit", "50");
-    url.searchParams.set("before_id", String(oldestId));
+    try {
+      const url = new URL(location.origin + "/api/chat");
+      url.searchParams.set("wa_peer", peer);
+      url.searchParams.set("limit", "50");
+      url.searchParams.set("before_id", String(oldestId));
 
-    const res = await fetch(url.toString(), { credentials: "same-origin" });
-    const data = await res.json();
-    hasMore = !!data.has_more;
+      const res = await fetch(url.toString(), { credentials: "same-origin" });
+      const data = await res.json();
+      hasMore = !!data.has_more;
 
-    const msgs = Array.isArray(data.messages) ? data.messages : [];
-    if (msgs.length) oldestId = msgs[0].id;
+      const msgs = Array.isArray(data.messages) ? data.messages : [];
+      if (msgs.length) oldestId = msgs[0].id;
 
-    renderMessagesPrepend(msgs);
+      renderMessagesPrepend(msgs);
 
-    if (elMsgs) {
-      const newScrollHeight = elMsgs.scrollHeight;
-      elMsgs.scrollTop = newScrollHeight - prevScrollHeight;
+      if (elMsgs) {
+        const newScrollHeight = elMsgs.scrollHeight;
+        elMsgs.scrollTop = newScrollHeight - prevScrollHeight;
+      }
+    } finally {
+      loadingMore = false;
     }
 
-    loadingMore = false;
     applyFind(findQuery);
   }
 
   function renderMessagesReplace(msgs) {
     if (!elMsgs) return;
+
     if (!msgs.length) {
       elMsgs.innerHTML = `<div class="center-hint">Sin mensajes.</div>`;
       return;
     }
+
     elMsgs.innerHTML = "";
     msgs.forEach((m) => elMsgs.appendChild(messageNode(m)));
   }
@@ -520,10 +599,11 @@
 
   function messageNode(m) {
     const row = document.createElement("div");
-    row.className = "bubble-row " + (m.direction === "in" ? "in" : "out");
+    const direction = m.direction === "in" ? "in" : "out";
+    row.className = "bubble-row " + direction;
 
     const b = document.createElement("div");
-    b.className = "bubble " + (m.direction === "out" ? "out" : "");
+    b.className = "bubble " + direction;
 
     const mediaUrl = getMediaUrl(m);
     let mediaHtml = "";
@@ -536,13 +616,15 @@
       }
     }
 
+    const rawText = String(m.text || "");
     const hour = formatMessageHour(getMessageTimestamp(m));
 
     b.innerHTML = `
       ${mediaHtml}
-      <div class="txt" data-msgtext="1">${nl2br(esc(m.text || ""))}</div>
+      <div class="txt" data-msgtext="1" data-rawtext="${esc(rawText)}">${nl2br(esc(rawText))}</div>
       <div class="meta">${esc(hour)}</div>
     `;
+
     row.appendChild(b);
     return row;
   }
@@ -555,8 +637,10 @@
   async function refreshSelectedConversation() {
     if (!selectedPeer || refreshBusy) return;
     refreshBusy = true;
+
     try {
       const keepBottom = isNearBottom(elMsgs);
+
       const url = new URL(location.origin + "/api/chat");
       url.searchParams.set("wa_peer", selectedPeer);
       url.searchParams.set("limit", "50");
@@ -565,11 +649,15 @@
       const data = await res.json();
       const msgs = Array.isArray(data.messages) ? data.messages : [];
 
-      const currentLast = elMsgs?.lastElementChild?.textContent || "";
-      const nextLast = msgs.length ? JSON.stringify(msgs[msgs.length - 1]) : "";
+      const nextSignature = buildMessagesSignature(msgs);
 
-      if (!currentLast || currentLast !== nextLast) {
+      if (nextSignature !== lastRenderedSignature) {
         renderMessagesReplace(msgs);
+        lastRenderedSignature = nextSignature;
+
+        if (msgs.length) oldestId = msgs[0].id;
+        hasMore = !!data.has_more;
+
         if (keepBottom) scrollToBottom();
         applyFind(findQuery);
       }
@@ -580,7 +668,9 @@
     }
   }
 
+  // =========================
   // Emojis
+  // =========================
   const EMOJIS = [
     "😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😎",
     "🙂", "😉", "😅", "😇", "🤩", "🥳", "😴", "🤔",
@@ -596,6 +686,7 @@
         ${EMOJIS.map((e) => `<button class="emoji" type="button" data-e="${esc(e)}">${esc(e)}</button>`).join("")}
       </div>
     `;
+
     elEmojiPanel.querySelectorAll(".emoji").forEach((btn) => {
       btn.addEventListener("click", () => {
         const e = btn.getAttribute("data-e") || "";
@@ -632,6 +723,7 @@
   }
 
   elEmojiBtn?.addEventListener("click", toggleEmoji);
+
   document.addEventListener("click", (e) => {
     if (!elEmojiPanel || !elEmojiBtn) return;
     const t = e.target;
@@ -642,7 +734,9 @@
   buildEmojiPanel();
   closeEmoji();
 
+  // =========================
   // Attach
+  // =========================
   function setFileChip(name) {
     if (!elFileChip || !elFileChipName) return;
     elFileChipName.textContent = name || "";
@@ -668,22 +762,37 @@
 
   elFileChipClear?.addEventListener("click", clearFileChip);
 
+  // =========================
   // Send
+  // =========================
   async function uploadIfNeeded() {
     if (!elFile || !elFile.files || elFile.files.length === 0) return null;
+
     const file = elFile.files[0];
     const fd = new FormData();
     fd.append("file", file);
 
     showResult("Subiendo archivo…", false);
+
     const res = await fetch("/api/upload", {
       method: "POST",
       credentials: "same-origin",
       body: fd,
     });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || "Upload failed");
-    return data;
+
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || "No se pudo subir el archivo");
+    }
+
+    return {
+      filename: data.filename || file.name,
+      content_type: data.content_type || file.type || "application/octet-stream",
+      media_url: data.media_url || data.file_url || data.url || data.path || null,
+      media_id: data.media_id || data.id || null,
+      raw: data,
+    };
   }
 
   async function sendMessage() {
@@ -699,11 +808,14 @@
       const upload = hasFile ? await uploadIfNeeded() : null;
 
       showResult("Enviando…", false);
+
       const payload = {
         to: selectedPeer,
         text,
         filename: upload ? upload.filename : null,
         content_type: upload ? upload.content_type : null,
+        media_url: upload ? upload.media_url : null,
+        media_id: upload ? upload.media_id : null,
       };
 
       const res = await fetch("/api/send", {
@@ -712,29 +824,34 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = await res.json();
+
+      const data = await res.json().catch(() => ({}));
 
       if (!res.ok || !data.ok) {
         throw new Error(data.error || "No se pudo enviar");
       }
 
       showResult("Enviado ✅", false);
+
       if (elText) elText.value = "";
       clearFileChip();
 
       oldestId = null;
+      lastRenderedSignature = "";
       await loadLatest(selectedPeer);
       await loadConversations();
       scrollToBottom();
     } catch (e) {
-      showResult("Error: " + e.message, true);
+      showResult("Error: " + (e?.message || "Error inesperado"), true);
     } finally {
       updateComposerState();
     }
   }
 
   elSend?.addEventListener("click", sendMessage);
+
   elText?.addEventListener("input", updateComposerState);
+
   elText?.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -742,9 +859,12 @@
     }
   });
 
+  // =========================
   // Delete conversation
+  // =========================
   elDeleteChat?.addEventListener("click", async () => {
     if (!selectedPeer) return;
+
     const ok = confirm("¿Eliminar este chat completo? (Se borra del panel)");
     if (!ok) return;
 
@@ -754,13 +874,16 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ wa_peer: selectedPeer }),
     });
-    const data = await res.json();
+
+    const data = await res.json().catch(() => ({}));
+
     if (!res.ok || !data.ok) {
       alert("No se pudo eliminar.");
       return;
     }
 
     selectedPeer = null;
+    lastRenderedSignature = "";
     setEnabledForChat(false);
     closeEmoji();
     clearFileChip();
@@ -768,50 +891,62 @@
 
     if (elChatTitle) elChatTitle.textContent = "Seleccioná un chat";
     if (elChatSubtitle) elChatSubtitle.textContent = "—";
-    if (elMsgs) elMsgs.innerHTML = `<div class="center-hint">Elegí una conversación para ver los mensajes.</div>`;
+    if (elMsgs) {
+      elMsgs.innerHTML = `<div class="center-hint">Elegí una conversación para ver los mensajes.</div>`;
+    }
 
     await loadConversations();
   });
 
+  // =========================
   // Find in chat
+  // =========================
   function resetFind() {
     findQuery = "";
     hits = [];
     hitIndex = -1;
     if (elFindCount) elFindCount.textContent = "0/0";
+    if (elChatSearch) elChatSearch.value = "";
     clearHighlights();
   }
 
   function clearHighlights() {
     if (!elMsgs) return;
-    elMsgs.querySelectorAll("mark.find-hit").forEach((mark) => {
-      const textNode = document.createTextNode(mark.textContent || "");
-      mark.replaceWith(textNode);
+
+    elMsgs.querySelectorAll(".txt[data-msgtext='1']").forEach((txtEl) => {
+      const raw = txtEl.getAttribute("data-rawtext") || "";
+      txtEl.innerHTML = nl2br(esc(raw));
     });
   }
 
   function highlightTextInElement(el, query) {
-    const text = el.textContent || "";
-    if (!query) return;
+    const raw = el.getAttribute("data-rawtext") || el.textContent || "";
+    if (!query) {
+      el.innerHTML = nl2br(esc(raw));
+      return;
+    }
 
-    const lower = text.toLowerCase();
+    const lower = raw.toLowerCase();
     const ql = query.toLowerCase();
-    let idx = lower.indexOf(ql);
-    if (idx === -1) return;
 
-    const parts = [];
+    let idx = lower.indexOf(ql);
+    if (idx === -1) {
+      el.innerHTML = nl2br(esc(raw));
+      return;
+    }
+
+    let html = "";
     let last = 0;
+
     while (idx !== -1) {
-      parts.push(document.createTextNode(text.slice(last, idx)));
-      const m = document.createElement("mark");
-      m.className = "find-hit";
-      m.textContent = text.slice(idx, idx + query.length);
-      parts.push(m);
+      html += nl2br(esc(raw.slice(last, idx)));
+      html += `<mark class="find-hit">${esc(raw.slice(idx, idx + query.length))}</mark>`;
       last = idx + query.length;
       idx = lower.indexOf(ql, last);
     }
-    parts.push(document.createTextNode(text.slice(last)));
-    el.replaceChildren(...parts);
+
+    html += nl2br(esc(raw.slice(last)));
+    el.innerHTML = html;
   }
 
   function applyFind(query) {
@@ -830,12 +965,14 @@
     });
 
     hits = Array.from(elMsgs.querySelectorAll("mark.find-hit"));
-    if (elFindCount) elFindCount.textContent = hits.length ? `1/${hits.length}` : "0/0";
 
-    if (hits.length) {
-      hitIndex = 0;
-      focusHit(hitIndex);
+    if (!hits.length) {
+      if (elFindCount) elFindCount.textContent = "0/0";
+      return;
     }
+
+    hitIndex = 0;
+    focusHit(hitIndex);
   }
 
   function focusHit(i) {
@@ -887,6 +1024,7 @@
   }
 
   let findTimer = null;
+
   elChatSearch?.addEventListener("input", () => {
     clearTimeout(findTimer);
     findTimer = setTimeout(() => {
@@ -896,6 +1034,7 @@
 
   elFindDown?.addEventListener("click", findNext);
   elFindUp?.addEventListener("click", findPrev);
+
   elChatSearch?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -903,10 +1042,14 @@
     }
   });
 
-  // sidebar search
+  // =========================
+  // Sidebar search
+  // =========================
   elQ?.addEventListener("input", renderConversations);
 
-  // notifications
+  // =========================
+  // Notifications
+  // =========================
   function requestBrowserNotifications() {
     if (!("Notification" in window)) return;
     if (Notification.permission === "default") {
@@ -916,10 +1059,18 @@
 
   requestBrowserNotifications();
 
-  // start
+  // =========================
+  // Start
+  // =========================
   setEnabledForChat(false);
   updateComposerState();
+
+  if (elMsgs && !elMsgs.innerHTML.trim()) {
+    elMsgs.innerHTML = `<div class="center-hint">Elegí una conversación para ver los mensajes.</div>`;
+  }
+
   loadConversations().catch(console.error);
+
   setInterval(async () => {
     try {
       await loadConversations();
@@ -929,4 +1080,3 @@
     }
   }, 2500);
 })();
-
