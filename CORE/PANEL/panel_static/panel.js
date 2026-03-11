@@ -289,48 +289,48 @@
   }
 
   function formatMessageHour(ts) {
-    const d = parseServerDate(ts);
-    if (!d) return "";
-    return d.toLocaleTimeString("es-AR", {
+  const d = parseServerDate(ts);
+  if (!d) return "";
+
+  return new Intl.DateTimeFormat("es-AR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "America/Argentina/Buenos_Aires"
+  }).format(d);
+}
+
+
+ function formatConversationTime(ts) {
+  const d = parseServerDate(ts);
+  if (!d) return "";
+
+  const tz = "America/Argentina/Buenos_Aires";
+
+  const now = new Date();
+  const dArg = new Date(d.toLocaleString("en-US", { timeZone: tz }));
+  const nowArg = new Date(now.toLocaleString("en-US", { timeZone: tz }));
+
+  const sameDay =
+    dArg.getDate() === nowArg.getDate() &&
+    dArg.getMonth() === nowArg.getMonth() &&
+    dArg.getFullYear() === nowArg.getFullYear();
+
+  if (sameDay) {
+    return new Intl.DateTimeFormat("es-AR", {
       hour: "2-digit",
       minute: "2-digit",
       hour12: false,
-      timeZone: CAL_TZ || "America/Argentina/Buenos_Aires",
-    });
+      timeZone: tz
+    }).format(d);
   }
 
-  function formatConversationTime(ts) {
-    const d = parseServerDate(ts);
-    if (!d) return "";
-
-    const now = new Date();
-    const tz = CAL_TZ || "America/Argentina/Buenos_Aires";
-
-    const dArg = new Date(d.toLocaleString("en-US", { timeZone: tz }));
-    const nowArg = new Date(now.toLocaleString("en-US", { timeZone: tz }));
-
-    const sameDay =
-      dArg.getDate() === nowArg.getDate() &&
-      dArg.getMonth() === nowArg.getMonth() &&
-      dArg.getFullYear() === nowArg.getFullYear();
-
-    const yesterday = new Date(nowArg);
-    yesterday.setDate(nowArg.getDate() - 1);
-
-    const isYesterday =
-      dArg.getDate() === yesterday.getDate() &&
-      dArg.getMonth() === yesterday.getMonth() &&
-      dArg.getFullYear() === yesterday.getFullYear();
-
-    if (sameDay) return formatMessageHour(ts);
-    if (isYesterday) return "AYER";
-
-    return dArg.toLocaleDateString("es-AR", {
-      day: "2-digit",
-      month: "2-digit",
-      year: "2-digit",
-    });
-  }
+  return new Intl.DateTimeFormat("es-AR", {
+    day: "2-digit",
+    month: "2-digit",
+    timeZone: tz
+  }).format(d);
+}
 
   function getConversationTime(c) {
     return (
