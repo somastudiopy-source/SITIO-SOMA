@@ -18,7 +18,8 @@ import urllib.error
 # PostgreSQL
 import psycopg2
 import psycopg2.extras
-
+import mimetypes
+import uuid
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
@@ -204,6 +205,170 @@ def wa_cloud_api_send_text(*, token: str, phone_number_id: str, to: str, body: s
         return {"ok": False, "status": int(getattr(e, "code", 500)), "error": "WHATSAPP_HTTP_ERROR", "data": parsed}
     except Exception as e:
         return {"ok": False, "status": 500, "error": f"WHATSAPP_NETWORK_ERROR: {e}"}
+
+def guess_extension(content_type: str, fallback: str = ".bin") -> str:
+    ext = mimetypes.guess_extension(content_type or "")
+    return ext or fallback
+
+
+def wa_cloud_api_upload_media(*, token: str, phone_number_id: str, file_path: str, content_type: str) -> Dict[str, Any]:
+    url = f"https://graph.facebook.com/{WA_GRAPH_VERSION}/{phone_number_id}/media"
+
+    boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
+    filename = os.path.basename(file_path)
+
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+
+    parts = []
+    parts.append(
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="messaging_product"\r\n\r\n'
+            f"whatsapp\r\n"
+        ).encode("utf-8")
+    )
+    parts.append(
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="type"\r\n\r\n'
+            f"{content_type}\r\n"
+        ).encode("utf-8")
+    )
+    parts.append(
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode("utf-8")
+    )
+    parts.append(file_bytes)
+    parts.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+
+    data = b"".join(parts)
+
+    req = urllib.request.Request(
+        url=url,
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=40) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            parsed = json.loads(raw) if raw else {}
+            return {"ok": True, "status": int(getattr(resp, "status", 200)), "data": parsed}
+    except urllib.error.HTTPError as e:
+        raw = (e.read() or b"").decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except Exception:
+            parsed = {"raw": raw}
+        return {"ok": False, "status": int(getattr(e, "code", 500)), "error": "WHATSAPP_MEDIA_UPLOAD_ERROR", "data": parsed}
+    except Exception as e:
+        return {"ok": False, "status": 500, "error": f"WHATSAPP_MEDIA_UPLOAD_NETWORK_ERROR: {e}"}
+
+
+def wa_cloud_api_send_media(*, token: str, phone_number_id: str, to: str, media_id: str, media_kind: str, caption: str = "", filename: str = "") -> Dict[str, Any]:
+    url = f"https://graph.facebook.com/{WA_GRAPH_VERSION}/{phone_number_id}/messages"
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": str(to),
+        "type": media_kind,
+        media_kind: {
+            "id": media_id,
+        },
+    }
+
+    if media_kind == "image" and caption:
+        payload["image"]["caption"] = caption
+
+    if media_kind == "document":
+        if filename:
+            payload["document"]["filename"] = filename
+        if caption:
+            payload["document"]["caption"] = caption
+
+    data = json.dumps(payload).encode("utf-8")
+
+    req = urllib.request.Request(
+        url=url,
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            parsed = json.loads(raw) if raw else {}
+            return {"ok": True, "status": int(getattr(resp, "status", 200)), "data": parsed}
+    except urllib.error.HTTPError as e:
+        raw = (e.read() or b"").decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except Exception:
+            parsed = {"raw": raw}
+        return {"ok": False, "status": int(getattr(e, "code", 500)), "error": "WHATSAPP_MEDIA_SEND_ERROR", "data": parsed}
+    except Exception as e:
+        return {"ok": False, "status": 500, "error": f"WHATSAPP_MEDIA_SEND_NETWORK_ERROR: {e}"}
+
+
+def wa_cloud_api_get_media_meta(*, token: str, media_id: str) -> Dict[str, Any]:
+    url = f"https://graph.facebook.com/{WA_GRAPH_VERSION}/{media_id}"
+
+    req = urllib.request.Request(
+        url=url,
+        method="GET",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            parsed = json.loads(raw) if raw else {}
+            return {"ok": True, "status": int(getattr(resp, "status", 200)), "data": parsed}
+    except urllib.error.HTTPError as e:
+        raw = (e.read() or b"").decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except Exception:
+            parsed = {"raw": raw}
+        return {"ok": False, "status": int(getattr(e, "code", 500)), "error": "WHATSAPP_MEDIA_META_ERROR", "data": parsed}
+    except Exception as e:
+        return {"ok": False, "status": 500, "error": f"WHATSAPP_MEDIA_META_NETWORK_ERROR: {e}"}
+
+
+def wa_cloud_api_download_media(*, token: str, download_url: str) -> Dict[str, Any]:
+    req = urllib.request.Request(
+        url=download_url,
+        method="GET",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=40) as resp:
+            content = resp.read()
+            content_type = resp.headers.get("Content-Type", "application/octet-stream")
+            return {
+                "ok": True,
+                "status": int(getattr(resp, "status", 200)),
+                "content": content,
+                "content_type": content_type,
+            }
+    except urllib.error.HTTPError as e:
+        raw = (e.read() or b"").decode("utf-8", errors="replace")
+        return {"ok": False, "status": int(getattr(e, "code", 500)), "error": "WHATSAPP_MEDIA_DOWNLOAD_ERROR", "data": raw}
+    except Exception as e:
+        return {"ok": False, "status": 500, "error": f"WHATSAPP_MEDIA_DOWNLOAD_NETWORK_ERROR: {e}"}
 
 
 # ---------------- DB helpers ----------------
@@ -788,106 +953,122 @@ async def api_upload(request: Request, file: UploadFile = File(...)):
     }
 
 
-@app.post("/api/send")
-async def api_send(request: Request):
-    u = require_user(request)
-    client_id = get_panel_client_id(u)
+@app.post("/webhook")
+async def whatsapp_webhook(request: Request):
+    data = await request.json()
 
-    con = db_connect(u.get("db_path", ""))
-    ensure_tables(con)
+    try:
+        entry = data.get("entry", [])
+        if not entry:
+            return {"ok": True}
 
-    body = await request.json()
-    to = body.get("to")
-    text = (body.get("text") or "").strip()
-    filename = body.get("filename")
-    content_type = body.get("content_type") or ""
+        changes = entry[0].get("changes", [])
+        if not changes:
+            return {"ok": True}
 
-    if not to:
-        return JSONResponse({"error": "missing to"}, status_code=400)
-    if not text and not filename:
-        return JSONResponse({"error": "missing text or file"}, status_code=400)
+        value = changes[0].get("value", {})
+        messages = value.get("messages", [])
+        if not messages:
+            return {"ok": True}
 
-    msg_type = "text"
-    raw = {}
-    if filename:
-        kind = "document"
-        msg_type = "document"
-        if (content_type or "").startswith("image/"):
-            kind = "image"
-            msg_type = "image"
-        raw = {"media": {"filename": safe_basename(filename), "kind": kind, "content_type": content_type}}
+        msg = messages[0]
 
-    with con.cursor() as cur:
-        cur.execute("""
-          INSERT INTO messages (client_id, direction, wa_peer, name, text, msg_type, wa_msg_id, ts_utc, raw_json)
-          VALUES (%s, 'out', %s, %s, %s, %s, NULL, %s, %s::jsonb)
-        """, (
-            client_id,
-            to,
-            u.get("client_name", ""),
-            text,
-            msg_type,
-            now_iso(),
-            json.dumps(raw)
-        ))
-    con.commit()
+        wa_peer = msg.get("from", "")
+        text = msg.get("text", {}).get("body", "")
+        msg_type = msg.get("type", "text")
+        wa_msg_id = msg.get("id")
+        phone_number_id = str(value.get("metadata", {}).get("phone_number_id", "")).strip()
 
-    if filename:
+        contacts = value.get("contacts", [])
+        contact_name = ""
+        if contacts:
+            contact_name = contacts[0].get("profile", {}).get("name", "")
+
+        users = load_users()
+        if not users:
+            return {"ok": False, "error": "NO_USERS"}
+
+        u = None
+        for user in users:
+            if str(user.get("phone_number_id", "")).strip() == phone_number_id:
+                u = user
+                break
+
+        if not u:
+            u = users[0]
+
+        client_id = get_panel_client_id(u)
+        cfg = get_whatsapp_config_for_user(u)
+        token = cfg.get("wa_token", "")
+
+        raw_to_store = msg
+        media_info = None
+
+        if msg_type in ("image", "document", "audio", "video", "sticker"):
+            media_obj = msg.get(msg_type, {}) or {}
+            media_id = media_obj.get("id")
+
+            if media_id and token:
+                meta_resp = wa_cloud_api_get_media_meta(token=token, media_id=media_id)
+                if meta_resp.get("ok"):
+                    meta = meta_resp.get("data") or {}
+                    download_url = meta.get("url")
+                    mime = meta.get("mime_type", "application/octet-stream")
+
+                    if download_url:
+                        bin_resp = wa_cloud_api_download_media(token=token, download_url=download_url)
+                        if bin_resp.get("ok"):
+                            abs_media = client_media_abs(u)
+                            ext = guess_extension(mime, ".bin")
+                            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            filename = f"{ts}_{media_id}{ext}"
+                            out_path = os.path.join(abs_media, filename)
+
+                            with open(out_path, "wb") as f:
+                                f.write(bin_resp["content"])
+
+                            media_kind = "document"
+                            if mime.startswith("image/"):
+                                media_kind = "image"
+                            elif mime.startswith("audio/"):
+                                media_kind = "audio"
+                            elif mime.startswith("video/"):
+                                media_kind = "video"
+
+                            media_info = {
+                                "filename": filename,
+                                "kind": media_kind,
+                                "content_type": mime,
+                                "media_id": media_id,
+                            }
+
+        if media_info:
+            raw_to_store = dict(msg)
+            raw_to_store["media"] = media_info
+
+        con = db_connect(u.get("db_path", ""))
+        ensure_tables(con)
+
+        with con.cursor() as cur:
+            cur.execute("""
+            INSERT INTO messages
+            (client_id, direction, wa_peer, name, text, msg_type, wa_msg_id, ts_utc, raw_json)
+            VALUES (%s, 'in', %s, %s, %s, %s, %s, %s, %s::jsonb)
+            """, (
+                client_id,
+                wa_peer,
+                contact_name,
+                text,
+                msg_type,
+                wa_msg_id,
+                now_iso(),
+                json.dumps(raw_to_store)
+            ))
+        con.commit()
         con.close()
-        return {
-            "ok": True,
-            "warning": "MEDIA_NOT_SENT_YET",
-            "detail": "El archivo se guardó en el panel, pero todavía no está implementado el envío de adjuntos por WhatsApp Cloud API.",
-        }
 
-    cfg = get_whatsapp_config_for_user(u)
-    token = cfg.get("wa_token", "")
-    phone_number_id = cfg.get("phone_number_id", "")
-
-    if not token or not phone_number_id:
-        con.close()
-        return JSONResponse(
-            {"ok": False, "error": "WHATSAPP_NOT_CONFIGURED", "detail": "Falta wa_token o phone_number_id en users.json (o en variables de entorno)."},
-            status_code=502,
-        )
-
-    wa_resp = wa_cloud_api_send_text(token=token, phone_number_id=phone_number_id, to=str(to), body=text)
-
-    if not wa_resp.get("ok"):
-        con.close()
-        return JSONResponse(
-            {"ok": False, "error": wa_resp.get("error", "WHATSAPP_SEND_FAILED"), "status": wa_resp.get("status", 500), "data": wa_resp.get("data")},
-            status_code=502,
-        )
-
-    con.close()
-    return {"ok": True, "whatsapp": wa_resp.get("data", {})}
-
-
-@app.post("/api/delete_conversation")
-async def api_delete_conversation(request: Request):
-    u = require_user(request)
-    client_id = get_panel_client_id(u)
-
-    con = db_connect(u.get("db_path", ""))
-    ensure_tables(con)
-
-    body = await request.json()
-    wa_peer = body.get("wa_peer")
-    if not wa_peer:
-        return JSONResponse({"error": "missing wa_peer"}, status_code=400)
-
-    with con.cursor() as cur:
-        cur.execute("""
-          DELETE FROM messages
-          WHERE client_id = %s AND wa_peer = %s
-        """, (client_id, wa_peer))
-        cur.execute("""
-          DELETE FROM conv_reads
-          WHERE client_id = %s AND wa_peer = %s
-        """, (client_id, wa_peer))
-    con.commit()
-    con.close()
+    except Exception as e:
+        print("Webhook error:", e)
 
     return {"ok": True}
 
