@@ -423,28 +423,28 @@
 
   elQ?.addEventListener("input", renderConversations);
 
-  function isImageMessage(m) {
-    const msgType = String(m.msg_type || "").toLowerCase();
-    const mediaKind = String(m.media_kind || "").toLowerCase();
-    const contentType = String(m.content_type || "").toLowerCase();
-    const mediaUrl = String(m.media_url || "").toLowerCase();
-    const text = String(m.text || "").toLowerCase();
+function isImageMessage(m) {
+  const type = String(m.msg_type || "").toLowerCase();
+  const kind = String(m.media_kind || "").toLowerCase();
+  const content = String(m.content_type || "").toLowerCase();
+  const url = String(m.media_url || "").toLowerCase();
 
-    if (msgType.includes("image")) return true;
-    if (mediaKind.includes("image")) return true;
-    if (contentType.startsWith("image/")) return true;
+  if (type === "image") return true;
+  if (kind === "image") return true;
+  if (content.startsWith("image/")) return true;
 
-    if (
-      mediaUrl.endsWith(".png") ||
-      mediaUrl.endsWith(".jpg") ||
-      mediaUrl.endsWith(".jpeg") ||
-      mediaUrl.endsWith(".webp") ||
-      mediaUrl.endsWith(".gif") ||
-      mediaUrl.includes("/image") ||
-      mediaUrl.includes("image/")
-    ) {
-      return true;
-    }
+  if (
+    url.endsWith(".png") ||
+    url.endsWith(".jpg") ||
+    url.endsWith(".jpeg") ||
+    url.endsWith(".webp") ||
+    url.endsWith(".gif")
+  ) {
+    return true;
+  }
+
+  return false;
+}
 
     if (text.includes("<imagen>") || text === "imagen") return true;
 
@@ -459,27 +459,30 @@
     b.className = "bubble " + (m.direction === "out" ? "out" : "");
 
     let mediaHtml = "";
-    if (m.media_url) {
-      if (isImageMessage(m)) {
-        mediaHtml = `
-          <img
-            class="media-preview"
-            src="${esc(m.media_url)}"
-            alt="imagen"
-            loading="lazy"
-            onerror="this.style.display='none'; this.insertAdjacentHTML('afterend','<div style=&quot;margin-bottom:8px;opacity:.8;&quot;>📷 Imagen no disponible</div>');"
-          />
-        `;
-      } else {
-        mediaHtml = `
-          <div style="margin-bottom:8px;">
-            <a href="${esc(m.media_url)}" target="_blank" rel="noopener noreferrer" style="color:inherit;opacity:.9;text-decoration:none;">
-              📎 Abrir archivo
-            </a>
-          </div>
-        `;
-      }
-    }
+if (m.media_url) {
+  if (isImageMessage(m)) {
+
+    mediaHtml = `
+      <img 
+        src="${esc(m.media_url)}"
+        class="msg-image"
+        loading="lazy"
+        style="max-width:260px;border-radius:12px;margin-bottom:6px"
+      />
+    `;
+
+  } else {
+
+    mediaHtml = `
+      <div style="margin-bottom:6px">
+        <a href="${esc(m.media_url)}" target="_blank">
+          📎 Abrir archivo
+        </a>
+      </div>
+    `;
+
+  }
+}
 
     const hour = fmtHour(m.ts_utc || m.created_at || m.timestamp);
 
