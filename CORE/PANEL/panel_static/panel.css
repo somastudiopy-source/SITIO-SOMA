@@ -17,7 +17,6 @@
   --soma-blue-900:#1f2433;
   --soma-blue-850:#252b3d;
 
-  /* âœ… WhatsApp-like green bubble */
   --wa-green: rgba(25, 210, 122, 0.22);
   --wa-green-border: rgba(25, 210, 122, 0.32);
 
@@ -42,6 +41,8 @@ body.theme-dark{
 body.theme-light{
   background:var(--light);
   color:var(--text-light);
+  --wa-green: #d9fdd3;
+  --wa-green-border: rgba(0,0,0,.06);
 }
 
 .glass{
@@ -56,7 +57,6 @@ body.theme-light .glass{
   border:1px solid var(--stroke-light);
 }
 
-/* TOPBAR */
 .topbar{
   height:64px;
   width:100%;
@@ -105,7 +105,6 @@ body.theme-light .icon-btn:hover{border-color:rgba(0,0,0,.12);}
 body.theme-light .link-pill{border:1px solid rgba(0,0,0,.12);}
 .link-pill:hover{opacity:1;}
 
-/* AUTH */
 .app.center{
   height:100vh;
   padding-top:78px;
@@ -120,7 +119,6 @@ body.theme-light .link-pill{border:1px solid rgba(0,0,0,.12);}
 .form label{font-weight:800;opacity:.8;}
 .tiny{margin-top:12px;font-size:12px;opacity:.75;}
 
-/* LAYOUT */
 .app{
   height:100vh;
   padding-top:78px;
@@ -137,7 +135,6 @@ body.theme-light .link-pill{border:1px solid rgba(0,0,0,.12);}
 }
 .sidebar,.chat{height:100%;overflow:hidden;}
 
-/* SIDEBAR */
 .sidebar{display:flex;flex-direction:column;}
 .sidebar-head{padding:14px;border-bottom:1px solid rgba(255,255,255,.10);}
 body.theme-light .sidebar-head{border-bottom:1px solid rgba(0,0,0,.10);}
@@ -181,9 +178,11 @@ body.theme-light .conv:hover{background:rgba(0,0,0,.04);}
 
 .avatar{
   height:42px;width:42px;border-radius:999px;
-  background:rgba(255,255,255,.10);
+  background:linear-gradient(135deg,#8b5cf6,#3b82f6);
   display:flex;align-items:center;justify-content:center;
   font-weight:900;
+  color:#fff;
+  flex:0 0 auto;
 }
 .conv-main{flex:1;min-width:0;}
 .conv-top{display:flex;gap:10px;align-items:baseline;}
@@ -202,7 +201,6 @@ body.theme-light .conv:hover{background:rgba(0,0,0,.04);}
 }
 .sidebar-foot{padding:12px 14px;font-size:12px;opacity:.75;}
 
-/* CHAT */
 .chat{display:flex;flex-direction:column;}
 .chat-head{
   padding:14px;
@@ -266,6 +264,10 @@ body.theme-light .nav-btn{
   flex-direction:column;
   gap:10px;
 }
+body.theme-light .msgs{
+  background:#dfdddb;
+  border-radius:18px;
+}
 .center-hint{margin-top:40px;text-align:center;opacity:.75;}
 
 .bubble-row{display:flex;}
@@ -277,20 +279,19 @@ body.theme-light .nav-btn{
   padding:10px 12px;
   border:1px solid rgba(255,255,255,.10);
   background:rgba(255,255,255,.06);
+  box-shadow:0 1px 1px rgba(0,0,0,.06);
 }
 body.theme-light .bubble{
-  border:1px solid rgba(0,0,0,.10);
-  background:rgba(0,0,0,.04);
+  border:1px solid rgba(0,0,0,.06);
+  background:#fff;
 }
-
-/* âœ… OUT en verde tipo WhatsApp */
 .bubble.out{
   background: var(--wa-green);
   border-color: var(--wa-green-border);
 }
-
-.bubble .txt{white-space:pre-wrap;font-size:14px;}
-.bubble .meta{margin-top:6px;font-size:11px;opacity:.72;}
+.bubble .txt{white-space:pre-wrap;font-size:14px;line-height:1.35;}
+.bubble .meta{margin-top:6px;font-size:11px;opacity:.72;text-align:right;}
+body.theme-light .bubble .meta{color:rgba(0,0,0,.45);}
 
 .bubble img.media-preview{
   width:320px;
@@ -298,9 +299,9 @@ body.theme-light .bubble{
   border-radius:14px;
   display:block;
   margin-bottom:8px;
+  background:rgba(255,255,255,.08);
 }
 
-/* Highlight matches */
 mark.find-hit{
   background: rgba(255, 213, 79, .35);
   border-radius:6px;
@@ -310,7 +311,6 @@ mark.find-hit.active{
   outline:2px solid rgba(255, 213, 79, .65);
 }
 
-/* COMPOSER */
 .composer{
   padding:12px 14px;
   border-top:1px solid rgba(255,255,255,.10);
@@ -431,7 +431,6 @@ body.theme-light .chip-x{border:1px solid rgba(0,0,0,.12);}
   .chat-search{width:180px;}
 }
 
-/* ---------- Calendar Modal ---------- */
 .modal{
   position:fixed;
   inset:0;
@@ -467,317 +466,80 @@ body.theme-light .modal-head{
   border-bottom:1px solid rgba(0,0,0,.10);
 }
 
-.modal-title{
-  font-weight:900;
-}
-
-.modal-actions{
-  display:flex;
-  align-items:center;
-  gap:10px;
-}
-
+.modal-title{font-weight:900;display:inline-flex;align-items:center;gap:8px;}
+.modal-actions{display:flex;align-items:center;gap:10px;}
 .cal-iframe{
   width:100%;
   height:100%;
   border:0;
-  background: transparent;
+  background:#fff;
+  border-radius:16px;
+  flex:1 1 auto;
+  min-height:520px;
 }
 
-/* ---------- Calendar Button (Topbar) ---------- */
-.calendar-pill{
-  border-color: rgba(0,97,255,.45);
-  background: rgba(0,97,255,.14);
-}
-.calendar-pill:hover{
-  background: rgba(0,97,255,.22);
-}
-body.theme-light .calendar-pill{
-  border-color: rgba(0,97,255,.35);
-  background: rgba(0,97,255,.10);
-}
-body.theme-light .calendar-pill:hover{
-  background: rgba(0,97,255,.16);
+.calendar-pill{display:inline-flex;align-items:center;gap:8px;border-color: rgba(0,97,255,.45);background: rgba(0,97,255,.14);}
+.calendar-pill:hover{background: rgba(0,97,255,.22);}
+body.theme-light .calendar-pill{border-color: rgba(0,97,255,.35);background: rgba(0,97,255,.10);}
+body.theme-light .calendar-pill:hover{background: rgba(0,97,255,.16);}
+.calendar-pill .gcal-icon,
+.modal-title .gcal-icon{
+  width:18px;height:18px;display:block;border-radius:4px;object-fit:contain;
 }
 
-/* ---------- Calendar Modal (Add Event) ---------- */
-.cal-add{
-  padding: 12px 14px;
-  border-bottom: 1px solid rgba(255,255,255,.10);
-}
-body.theme-light .cal-add{
-  border-bottom-color: rgba(0,0,0,.10);
-}
+.cal-add{padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.10);}
+body.theme-light .cal-add{background: rgba(255,255,255,.72);border-bottom-color: rgba(0,0,0,.12);}
+body.theme-dark .cal-add{background: rgba(0,0,0,.22);border-bottom-color: rgba(255,255,255,.12);}
 
-.cal-add-row{
-  display:flex;
-  gap:10px;
-  align-items:center;
-  margin-bottom:10px;
-}
+.cal-add-row{display:flex;gap:10px;align-items:center;margin-bottom:10px;}
 @media (max-width: 980px){
   .cal-add-row{ flex-direction:column; align-items:stretch; }
 }
 
-.cal-create-btn{
-  min-width: 130px;
-}
-
-.cal-hint{
-  margin-top: -2px;
-}
-
-/* =========================================================
-   CALENDAR UI — mejoras de contraste en modo claro + botones
-   (PEGAR AL FINAL DE panel.css)
-   ========================================================= */
-
-/* Fondo del panel "Agregar evento" en modo claro */
-body.theme-light .cal-add{
-  background: rgba(255,255,255,.72);
-  border-bottom-color: rgba(0,0,0,.12);
-}
-
-/* Inputs del "Agregar evento" en modo claro */
 body.theme-light .cal-add .textbox{
   background: rgba(255,255,255,.92);
   border: 1px solid rgba(0,0,0,.18);
   color: rgba(0,0,0,.86);
   box-shadow: 0 8px 18px rgba(0,0,0,.08);
 }
-
-/* Placeholder visible en modo claro */
-body.theme-light .cal-add .textbox::placeholder{
-  color: rgba(0,0,0,.45);
-}
-
-/* Botón "Crear" en modo claro (mejor contraste y look) */
-body.theme-light .cal-add .cal-create-btn{
-  box-shadow: 0 12px 26px rgba(0,0,0,.14);
-}
-
-/* =========================================================
-   Botones del modal (Semana / Mes / + Evento) más estéticos
-   Sin tocar HTML: se aplica solo a ghost-btn dentro del modal
-   ========================================================= */
-.modal .modal-actions .ghost-btn{
-  border-radius: 999px;
-  padding: 9px 14px;
-  font-weight: 900;
-  letter-spacing: .02em;
-
-  border: 1px solid rgba(255,255,255,.20);
-  background: rgba(255,255,255,.08);
-  backdrop-filter: blur(10px);
-
-  transition: transform .08s ease, background .2s ease, border-color .2s ease;
-}
-
-.modal .modal-actions .ghost-btn:hover{
-  background: rgba(255,255,255,.14);
-  border-color: rgba(255,255,255,.28);
-}
-
-.modal .modal-actions .ghost-btn:active{
-  transform: scale(.98);
-}
-
-/* En modo claro: mismos botones pero con contraste */
-body.theme-light .modal .modal-actions .ghost-btn{
-  border: 1px solid rgba(0,0,0,.16);
-  background: rgba(255,255,255,.70);
-}
-
-body.theme-light .modal .modal-actions .ghost-btn:hover{
-  background: rgba(255,255,255,.92);
-  border-color: rgba(0,0,0,.22);
-}
-
-/* Botón "+ Evento" un poco más “call to action” */
-.modal .modal-actions #calAddToggleBtn{
-  border-color: rgba(191,15,255,.38);
-  background: rgba(191,15,255,.16);
-}
-
-.modal .modal-actions #calAddToggleBtn:hover{
-  background: rgba(191,15,255,.24);
-  border-color: rgba(191,15,255,.55);
-}
-
-body.theme-light .modal .modal-actions #calAddToggleBtn{
-  border-color: rgba(191,15,255,.28);
-  background: rgba(191,15,255,.12);
-}
-
-body.theme-light .modal .modal-actions #calAddToggleBtn:hover{
-  background: rgba(191,15,255,.18);
-}
-
-/* =========================
-   Google Calendar UI tweaks
-   ========================= */
-
-/* Icono Google Calendar en botón topbar */
-.calendar-pill{
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-.calendar-pill .gcal-icon{
-  width: 18px;
-  height: 18px;
-  display: block;
-  border-radius: 4px;
-}
-
-/* MODO OSCURO: inputs con texto blanco y placeholders visibles */
-body.theme-dark .cal-add{
-  background: rgba(0,0,0,.22);
-  border-bottom-color: rgba(255,255,255,.12);
-}
-
+body.theme-light .cal-add .textbox::placeholder{color: rgba(0,0,0,.45);}
 body.theme-dark .cal-add .textbox{
   background: rgba(255,255,255,.08);
   border: 1px solid rgba(255,255,255,.18);
   color: rgba(255,255,255,.92);
 }
+body.theme-dark .cal-add .textbox::placeholder{color: rgba(255,255,255,.55);}
 
-body.theme-dark .cal-add .textbox::placeholder{
-  color: rgba(255,255,255,.55);
+.modal .modal-actions .ghost-btn{
+  border-radius: 999px;
+  padding: 9px 14px;
+  font-weight: 900;
+  letter-spacing: .02em;
+  border: 1px solid rgba(255,255,255,.20);
+  background: rgba(255,255,255,.08);
+  backdrop-filter: blur(10px);
+  transition: transform .08s ease, background .2s ease, border-color .2s ease;
 }
+.modal .modal-actions .ghost-btn:hover{background: rgba(255,255,255,.14);border-color: rgba(255,255,255,.28);}
+.modal .modal-actions .ghost-btn:active{transform: scale(.98);}
+body.theme-light .modal .modal-actions .ghost-btn{border: 1px solid rgba(0,0,0,.16);background: rgba(255,255,255,.70);}
+body.theme-light .modal .modal-actions .ghost-btn:hover{background: rgba(255,255,255,.92);border-color: rgba(0,0,0,.22);}
 
-/* Botón + Evento más llamativo en oscuro */
+.modal .modal-actions #calAddToggleBtn{border-color: rgba(191,15,255,.38);background: rgba(191,15,255,.16);}
+.modal .modal-actions #calAddToggleBtn:hover{background: rgba(191,15,255,.24);border-color: rgba(191,15,255,.55);}
+body.theme-light .modal .modal-actions #calAddToggleBtn{border-color: rgba(191,15,255,.28);background: rgba(191,15,255,.12);}
+body.theme-light .modal .modal-actions #calAddToggleBtn:hover{background: rgba(191,15,255,.18);}
 body.theme-dark .modal .modal-actions #calAddToggleBtn{
   border: 1px solid rgba(191,15,255,.55);
   background: linear-gradient(90deg, rgba(191,15,255,.35), rgba(0,97,255,.28));
   box-shadow: 0 10px 26px rgba(191,15,255,.18);
 }
-
 body.theme-dark .modal .modal-actions #calAddToggleBtn:hover{
   background: linear-gradient(90deg, rgba(191,15,255,.45), rgba(0,97,255,.36));
   border-color: rgba(191,15,255,.75);
   box-shadow: 0 14px 34px rgba(191,15,255,.24);
 }
 
-/* ===== Google Calendar: forzar visibilidad del iframe ===== */
-#calFrame.cal-iframe{
-  display: block !important;
-  width: 100% !important;
-  height: 70vh !important;
-  min-height: 520px !important;
-  border: 0 !important;
-  background: #fff !important;
-  border-radius: 16px !important;
-}
-
-/* El modal debe ser columna para que el iframe tenga espacio */
-#calModal .modal-card{
-  display: flex !important;
-  flex-direction: column !important;
-}
-
-/* Evita que el header empuje todo */
-#calModal .modal-head{
-  flex: 0 0 auto !important;
-}
-
-/* El iframe ocupa el resto del modal */
-#calModal .cal-iframe{
-  flex: 1 1 auto !important;
-}
-
-/* FIX icono: NO gigante (solo el icono del título/botón) */
-.modal-title .gcal-icon,
-.calendar-pill .gcal-icon{
-  width: 18px !important;
-  height: 18px !important;
-  max-width: 18px !important;
-  max-height: 18px !important;
-  object-fit: contain !important;
-  display: inline-block !important;
-  vertical-align: middle !important;
-}
-
-.modal-title{
-  display: inline-flex !important;
-  align-items: center !important;
-  gap: 8px !important;
-}
-
-/* ============================= */
-/*      WHATSAPP MODO CLARO     */
-/* ============================= */
-
-body.theme-light .chat-messages{
-  background: #efeae2 !important; /* fondo gris WhatsApp */
-}
-
-/* Mensaje enviado (verde WhatsApp real) */
-body.theme-light .bubble.out{
-  background: #d9fdd3 !important;
-  color: #111 !important;
-  border: 1px solid rgba(0,0,0,0.05) !important;
-  box-shadow: 0 1px 1px rgba(0,0,0,0.06);
-}
-
-/* Hora del mensaje enviado */
-body.theme-light .bubble.out .meta{
-  color: rgba(0,0,0,0.45) !important;
-}
-
-/* Mensaje recibido (blanco WhatsApp) */
-body.theme-light .bubble.in{
-  background: #ffffff !important;
-  color: #111 !important;
-  border: 1px solid rgba(0,0,0,0.05) !important;
-  box-shadow: 0 1px 1px rgba(0,0,0,0.06);
-}
-
-/* Hora mensaje recibido */
-body.theme-light .bubble.in .meta{
-  color: rgba(0,0,0,0.45) !important;
-}
-
-
-/* ============================= */
-/*  WHATSAPP REAL (SOLO MODO CLARO) */
-/* ============================= */
-
-body.theme-light{
-  /* verde WhatsApp enviado */
-  --wa-green: #d9fdd3 !important;
-  --wa-green-border: rgba(0,0,0,.06) !important;
-}
-
-/* fondo gris tipo WhatsApp */
-body.theme-light .msgs{
-  background: #dfdddb !important;
-  border-radius: 18px;
-}
-
-/* recibidos (izquierda) blancos */
-body.theme-light .bubble-row.in .bubble{
-  background: #ffffff !important;
-  border-color: rgba(0,0,0,.06) !important;
-  color: #111 !important;
-}
-
-/* enviados (derecha) texto oscuro + meta */
-body.theme-light .bubble-row.out .bubble{
-  color: #111 !important;
-}
-body.theme-light .bubble-row.out .bubble .meta,
-body.theme-light .bubble-row.in  .bubble .meta{
-  color: rgba(0,0,0,.45) !important;
-}
-
-/* ============================= */
-/*  TOP BAR estilo "Radio"       */
-/*  (modo claro + oscuro)        */
-/* ============================= */
-
-/* Ajustá este selector si tu header tiene otro id/clase.
-   Probá primero con .topbar, .header o header */
 header .top-actions,
 .top-actions,
 .topbar-actions,
@@ -790,7 +552,6 @@ header .top-actions,
   backdrop-filter: blur(10px);
 }
 
-/* Botón base (píldora) */
 header .top-actions button,
 .top-actions button,
 .topbar-actions button,
@@ -814,15 +575,13 @@ header .top-actions a,
   text-decoration: none;
 }
 
-/* ===== MODO OSCURO ===== */
 body.theme-dark header .top-actions,
 body.theme-dark .top-actions,
 body.theme-dark .topbar-actions,
 body.theme-dark .panel-actions{
-  background: rgba(13, 17, 23, .55); /* similar a tu estética */
+  background: rgba(13, 17, 23, .55);
   border: 1px solid rgba(255,255,255,.08);
 }
-
 body.theme-dark header .top-actions button,
 body.theme-dark .top-actions button,
 body.theme-dark .topbar-actions button,
@@ -830,10 +589,7 @@ body.theme-dark .panel-actions button,
 body.theme-dark header .top-actions a,
 body.theme-dark .top-actions a,
 body.theme-dark .topbar-actions a,
-body.theme-dark .panel-actions a{
-  color: rgba(255,255,255,.90);
-}
-
+body.theme-dark .panel-actions a{color: rgba(255,255,255,.90);}
 body.theme-dark header .top-actions button:hover,
 body.theme-dark .top-actions button:hover,
 body.theme-dark .topbar-actions button:hover,
@@ -841,12 +597,8 @@ body.theme-dark .panel-actions button:hover,
 body.theme-dark header .top-actions a:hover,
 body.theme-dark .top-actions a:hover,
 body.theme-dark .topbar-actions a:hover,
-body.theme-dark .panel-actions a:hover{
-  background: rgba(255,255,255,.08);
-  transform: translateY(-1px);
-}
+body.theme-dark .panel-actions a:hover{background: rgba(255,255,255,.08);transform: translateY(-1px);}
 
-/* ===== MODO CLARO ===== */
 body.theme-light header .top-actions,
 body.theme-light .top-actions,
 body.theme-light .topbar-actions,
@@ -854,7 +606,6 @@ body.theme-light .panel-actions{
   background: rgba(255,255,255,.55);
   border: 1px solid rgba(0,0,0,.08);
 }
-
 body.theme-light header .top-actions button,
 body.theme-light .top-actions button,
 body.theme-light .topbar-actions button,
@@ -862,10 +613,7 @@ body.theme-light .panel-actions button,
 body.theme-light header .top-actions a,
 body.theme-light .top-actions a,
 body.theme-light .topbar-actions a,
-body.theme-light .panel-actions a{
-  color: rgba(0,0,0,.78);
-}
-
+body.theme-light .panel-actions a{color: rgba(0,0,0,.78);}
 body.theme-light header .top-actions button:hover,
 body.theme-light .top-actions button:hover,
 body.theme-light .topbar-actions button:hover,
@@ -873,13 +621,8 @@ body.theme-light .panel-actions button:hover,
 body.theme-light header .top-actions a:hover,
 body.theme-light .top-actions a:hover,
 body.theme-light .topbar-actions a:hover,
-body.theme-light .panel-actions a:hover{
-  background: rgba(0,0,0,.06);
-  transform: translateY(-1px);
-}
+body.theme-light .panel-actions a:hover{background: rgba(0,0,0,.06);transform: translateY(-1px);}
 
-/* ===== Item ACTIVO (como el "value:focus/active") ===== */
-/* IMPORTANTE: marcá el activo con class="is-active" o aria-current="page" */
 header .top-actions .is-active,
 .top-actions .is-active,
 .topbar-actions .is-active,
@@ -888,112 +631,6 @@ header .top-actions [aria-current="page"],
 .top-actions [aria-current="page"],
 .topbar-actions [aria-current="page"],
 .panel-actions [aria-current="page"]{
-  background: rgba(124, 58, 237, .18);     /* violeta marca (como tu +Evento) */
+  background: rgba(124, 58, 237, .18);
   border-color: rgba(124, 58, 237, .45);
-}
-
-/* Barra lateral de selección (como ::before azul del ejemplo) */
-header .top-actions .is-active::before,
-.top-actions .is-active::before,
-.topbar-actions .is-active::before,
-.panel-actions .is-active::before,
-header .top-actions [aria-current="page"]::before,
-.top-actions [aria-current="page"]::before,
-.topbar-actions [aria-current="page"]::before,
-.panel-actions [aria-current="page"]::before{
-  content: "";
-  width: 6px;
-  height: 18px;
-  border-radius: 999px;
-  background: linear-gradient(180deg, #2563eb, #7c3aed);
-  display: inline-block;
-}
-
-/* Iconos dentro */
-header .top-actions img,
-.top-actions img,
-.topbar-actions img,
-.panel-actions img{
-  width: 18px !important;
-  height: 18px !important;
-  object-fit: contain !important;
-}
-
-/* ================================= */
-/*        TOP ACTIONS STYLE          */
-/* ================================= */
-
-.top-actions{
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 6px;
-  border-radius: 16px;
-  backdrop-filter: blur(12px);
-}
-
-/* BOTÓN BASE */
-.top-btn{
-  appearance: none;
-  border: 1px solid transparent;
-  background: transparent;
-  padding: 10px 16px;
-  border-radius: 999px;
-  font-weight: 700;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  transition: all .18s ease;
-}
-
-/* ICONO */
-.top-btn img{
-  width: 18px;
-  height: 18px;
-  object-fit: contain;
-}
-
-/* ===================== */
-/*       MODO OSCURO     */
-/* ===================== */
-
-body.theme-dark .top-actions{
-  background: rgba(15,18,25,.6);
-  border: 1px solid rgba(255,255,255,.08);
-}
-
-body.theme-dark .top-btn{
-  color: rgba(255,255,255,.85);
-}
-
-body.theme-dark .top-btn:hover{
-  background: rgba(255,255,255,.08);
-}
-
-body.theme-dark .top-btn[aria-current="page"]{
-  background: linear-gradient(90deg,#2563eb,#7c3aed);
-  color: white;
-}
-
-/* ===================== */
-/*       MODO CLARO      */
-/* ===================== */
-
-body.theme-light .top-actions{
-  background: rgba(255,255,255,.7);
-  border: 1px solid rgba(0,0,0,.08);
-}
-
-body.theme-light .top-btn{
-  color: rgba(0,0,0,.75);
-}
-
-body.theme-light .top-btn:hover{
-  background: rgba(0,0,0,.06);
-}
-
-body.theme-light .top-btn[aria-current="page"]{
-  background: linear-gradient(90deg,#2563eb,#7c3aed);
-  color: white;
 }
