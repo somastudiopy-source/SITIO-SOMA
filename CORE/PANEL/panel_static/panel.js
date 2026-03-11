@@ -268,39 +268,40 @@
     return String(str || "").replace(/\n/g, "<br>");
   }
 
-  function parseServerDate(ts) {
-    if (!ts) return null;
+function parseServerDate(ts) {
+  if (!ts) return null;
 
-    if (ts instanceof Date && Number.isFinite(ts.getTime())) return ts;
+  if (ts instanceof Date && Number.isFinite(ts.getTime())) return ts;
 
-    if (typeof ts === "number") {
-      const dNum = new Date(ts);
-      if (Number.isFinite(dNum.getTime())) return dNum;
+  if (typeof ts === "number") {
+    const n = ts < 1000000000000 ? ts * 1000 : ts;
+    const dNum = new Date(n);
+    if (Number.isFinite(dNum.getTime())) return dNum;
+  }
+
+  if (typeof ts === "string") {
+    const s = ts.trim();
+
+    if (/^\d+$/.test(s)) {
+      const n = Number(s);
+      const normalized = s.length <= 10 ? n * 1000 : n;
+      const dUnix = new Date(normalized);
+      if (Number.isFinite(dUnix.getTime())) return dUnix;
     }
 
-    const direct = new Date(ts);
+    const direct = new Date(s);
     if (Number.isFinite(direct.getTime())) return direct;
 
-    if (typeof ts === "string") {
-      const s = ts.trim();
+    const fixed1 = s.replace(" ", "T");
+    const d1 = new Date(fixed1);
+    if (Number.isFinite(d1.getTime())) return d1;
 
-      const fixed1 = s.replace(" ", "T");
-      const d1 = new Date(fixed1);
-      if (Number.isFinite(d1.getTime())) return d1;
-
-      const d2 = new Date(fixed1 + "Z");
-      if (Number.isFinite(d2.getTime())) return d2;
-
-      const onlyDigits = /^\d+$/.test(s);
-      if (onlyDigits) {
-        const n = Number(s);
-        const d3 = new Date(n);
-        if (Number.isFinite(d3.getTime())) return d3;
-      }
-    }
-
-    return null;
+    const d2 = new Date(fixed1 + "Z");
+    if (Number.isFinite(d2.getTime())) return d2;
   }
+
+  return null;
+}
 
   function formatMessageHour(ts) {
     const d = parseServerDate(ts);
@@ -365,27 +366,25 @@
   }
 
   function getMessageTimestamp(m) {
-    return (
-      m.ts_utc ||
-      m.timestamp ||
-      m.created_at ||
-      m.sent_at ||
-      m.ts ||
-      m.date ||
-      m.datetime ||
-      m.raw_ts ||
-      (m.raw_json && (
-        m.raw_json.ts_utc ||
-        m.raw_json.timestamp ||
-        m.raw_json.created_at ||
-        m.raw_json.sent_at ||
-        m.raw_json.ts ||
-        m.raw_json.date
-      )) ||
-      null
-    );
-  }
-
+  return (
+    m.ts_utc ||
+    m.timestamp ||
+    m.created_at ||
+    m.sent_at ||
+    m.ts ||
+    m.date ||
+    m.datetime ||
+    m.raw_ts ||
+    m.raw_json?.ts_utc ||
+    m.raw_json?.timestamp ||
+    m.raw_json?.created_at ||
+    m.raw_json?.sent_at ||
+    m.raw_json?.ts ||
+    m.raw_json?.date ||
+    null
+  );
+}
+  
   function getMediaUrl(m) {
     const candidates = [
       m.media_url,
