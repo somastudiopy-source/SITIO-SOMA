@@ -648,7 +648,7 @@ async function saveAppointmentDraft(waId, waPhone, draft) {
       normalizePhone(d.telefono_contacto || waPhone || "") || null,
       d.servicio || null,
       d.notas || null,
-      d.fecha || null,
+      normalizeDateForDB(d.fecha) || null,
       d.hora || null,
       Number(d.duracion_min || 60) || 60,
       !!d.wants_color_confirmation,
@@ -727,7 +727,7 @@ async function createAppointmentRecord({ waId, waPhone, merged, status, calendar
       normalizePhone(merged.telefono_contacto || waPhone || "") || null,
       merged.servicio || null,
       merged.notas || null,
-      merged.fecha || null,
+      normalizeDateForDB(merged.fecha) || null,
       merged.hora || null,
       Number(merged.duracion_min || 60) || 60,
       status || "booked",
@@ -746,6 +746,7 @@ async function createAppointmentRecord({ waId, waPhone, merged, status, calendar
 }
 
 async function finalizeAppointmentFlow({ waId, phone, merged }) {
+  merged.fecha = normalizeDateForDB(merged?.fecha || "");
   if (!merged?.servicio || !merged?.fecha || !merged?.hora) return { type: "missing_core" };
   if (!merged?.cliente_full) return { type: "need_name" };
   if (merged.payment_status !== "paid_verified") return { type: "need_payment" };
@@ -1061,6 +1062,28 @@ function ymdToDMY(ymd) {
   return `${m[3]}/${m[2]}/${m[1]}`;
 }
 
+function normalizeDateForDB(dateStr) {
+  const s = String(dateStr || "").trim();
+  if (!s) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+  const direct = toYMD(s);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(direct)) return direct;
+
+  const parsed = new Date(s);
+  if (Number.isNaN(parsed.getTime())) return "";
+
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(parsed);
+  const get = (t) => parts.find((p) => p.type === t)?.value || "";
+  const ymd = `${get("year")}-${get("month")}-${get("day")}`;
+  return /^\d{4}-\d{2}-\d{2}$/.test(ymd) ? ymd : "";
+}
+
 // Acepta "DD/MM/YYYY", "DD-MM-YYYY", "YYYY-MM-DD" y devuelve siempre "YYYY-MM-DD" (si puede).
 function toYMD(dateStr) {
   const s = String(dateStr || "").trim();
@@ -1086,7 +1109,20 @@ function toYMD(dateStr) {
     return `${yyyy}-${mm}-${dd}`;
   }
 
-  return s;
+  const parsed = new Date(s);
+  if (!Number.isNaN(parsed.getTime())) {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: TIMEZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(parsed);
+    const get = (t) => parts.find((p) => p.type === t)?.value || "";
+    const ymd = `${get("year")}-${get("month")}-${get("day")}`;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return ymd;
+  }
+
+  return "";
 }
 
 async function ensureDailySheet(spreadsheetId, sheetName) {
