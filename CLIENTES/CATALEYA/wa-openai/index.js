@@ -44,7 +44,79 @@ const MEDIA_DIR = process.env.MEDIA_DIR || path.join(__dirname, "media");
 try { fs.mkdirSync(MEDIA_DIR, { recursive: true }); } catch {}
 
 async function ensureDb() {
+async function ensureAppointmentTables() {
   await db.query(`
+  CREATE TABLE IF NOT EXISTS appointment_drafts (
+    wa_id TEXT PRIMARY KEY,
+    wa_phone TEXT NOT NULL,
+    client_name TEXT,
+    contact_phone TEXT,
+    service_name TEXT,
+    service_notes TEXT,
+    appointment_date DATE,
+    appointment_time TIME,
+    duration_min INTEGER NOT NULL DEFAULT 60,
+    wants_color_confirmation BOOLEAN NOT NULL DEFAULT FALSE,
+    payment_status TEXT NOT NULL DEFAULT 'not_paid',
+    payment_amount NUMERIC(10,2),
+    payment_sender TEXT,
+    payment_receiver TEXT,
+    payment_proof_text TEXT,
+    payment_proof_media_id TEXT,
+    payment_proof_filename TEXT,
+    awaiting_contact BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  `);
+
+  await db.query(`
+  CREATE TABLE IF NOT EXISTS appointments (
+    id BIGSERIAL PRIMARY KEY,
+    wa_id TEXT NOT NULL,
+    wa_phone TEXT NOT NULL,
+    client_name TEXT,
+    contact_phone TEXT,
+    service_name TEXT,
+    service_notes TEXT,
+    appointment_date DATE,
+    appointment_time TIME,
+    duration_min INTEGER NOT NULL DEFAULT 60,
+    status TEXT NOT NULL DEFAULT 'pending_payment',
+    payment_status TEXT NOT NULL DEFAULT 'not_paid',
+    payment_amount NUMERIC(10,2),
+    payment_sender TEXT,
+    payment_receiver TEXT,
+    payment_proof_text TEXT,
+    payment_proof_media_id TEXT,
+    payment_proof_filename TEXT,
+    calendar_event_id TEXT,
+    is_color_service BOOLEAN NOT NULL DEFAULT FALSE,
+    stylist_notified_at TIMESTAMPTZ,
+    reminder_client_24h_at TIMESTAMPTZ,
+    reminder_client_2h_at TIMESTAMPTZ,
+    reminder_stylist_24h_at TIMESTAMPTZ,
+    reminder_stylist_2h_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  `);
+
+  await db.query(`
+  CREATE TABLE IF NOT EXISTS appointment_notifications (
+    id BIGSERIAL PRIMARY KEY,
+    appointment_id BIGINT NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
+    notification_type TEXT NOT NULL,
+    recipient_phone TEXT NOT NULL,
+    template_name TEXT,
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    wa_message_id TEXT,
+    payload JSONB
+  );
+  `);
+}
+  
+  await db.query(`
+  
     CREATE TABLE IF NOT EXISTS messages (
       id BIGSERIAL PRIMARY KEY,
       direction TEXT NOT NULL,
@@ -2725,7 +2797,13 @@ setInterval(() => {
 }, 60000);
 
 // ===================== START =====================
+
 const PORT = process.env.PORT || 3000;
+
+// Crear tablas si no existen
+ensureDb();
+ensureAppointmentTables();
+
 app.listen(PORT, () => {
   console.log("🚀 Bot de estética activo");
   console.log(`Webhook: http://localhost:${PORT}/webhook`);
