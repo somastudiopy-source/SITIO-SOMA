@@ -98,9 +98,16 @@ async function ensureAppointmentTables() {
       payment_proof_media_id TEXT,
       payment_proof_filename TEXT,
       awaiting_contact BOOLEAN NOT NULL DEFAULT FALSE,
+      flow_step TEXT,
+      last_intent TEXT,
+      last_service_name TEXT,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+
+  await db.query(`ALTER TABLE appointment_drafts ADD COLUMN IF NOT EXISTS flow_step TEXT`);
+  await db.query(`ALTER TABLE appointment_drafts ADD COLUMN IF NOT EXISTS last_intent TEXT`);
+  await db.query(`ALTER TABLE appointment_drafts ADD COLUMN IF NOT EXISTS last_service_name TEXT`);
 
   await db.query(`
     CREATE TABLE IF NOT EXISTS appointments (
@@ -588,6 +595,9 @@ function mapDraftRowToTurno(row) {
     payment_proof_media_id: row.payment_proof_media_id || "",
     payment_proof_filename: row.payment_proof_filename || "",
     awaiting_contact: !!row.awaiting_contact,
+    flow_step: row.flow_step || "",
+    last_intent: row.last_intent || "",
+    last_service_name: row.last_service_name || row.service_name || "",
     wa_phone: row.wa_phone || "",
   };
 }
@@ -605,9 +615,9 @@ async function saveAppointmentDraft(waId, waPhone, draft) {
       appointment_date, appointment_time, duration_min, wants_color_confirmation,
       payment_status, payment_amount, payment_sender, payment_receiver,
       payment_proof_text, payment_proof_media_id, payment_proof_filename,
-      awaiting_contact, updated_at
+      awaiting_contact, flow_step, last_intent, last_service_name, updated_at
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW()
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW()
     )
     ON CONFLICT (wa_id) DO UPDATE SET
       wa_phone = EXCLUDED.wa_phone,
@@ -627,6 +637,9 @@ async function saveAppointmentDraft(waId, waPhone, draft) {
       payment_proof_media_id = EXCLUDED.payment_proof_media_id,
       payment_proof_filename = EXCLUDED.payment_proof_filename,
       awaiting_contact = EXCLUDED.awaiting_contact,
+      flow_step = EXCLUDED.flow_step,
+      last_intent = EXCLUDED.last_intent,
+      last_service_name = EXCLUDED.last_service_name,
       updated_at = NOW()`,
     [
       waId,
@@ -647,6 +660,9 @@ async function saveAppointmentDraft(waId, waPhone, draft) {
       d.payment_proof_media_id || null,
       d.payment_proof_filename || null,
       !!d.awaiting_contact,
+      d.flow_step || null,
+      d.last_intent || null,
+      d.last_service_name || d.servicio || null,
     ]
   );
 }
@@ -1907,8 +1923,62 @@ function formatCoursesReply(matches, mode) {
   return `${header}\n${lines.join("\n")}\n\nSi quiere, le paso requisitos e inscripción.`.trim();
 }
 
+
+async function getRecentDbMessages(waPeer, limit = 12) {
+  const peerNorm = normalizePhone(waPeer);
+  const r = await db.query(
+    `SELECT direction, text
+       FROM messages
+      WHERE client_id = $1 AND wa_peer = $2 AND COALESCE(text, '') <> ''
+      ORDER BY ts_utc DESC
+      LIMIT $3`,
+    [CLIENT_ID, peerNorm, limit]
+  );
+  return r.rows.reverse().map((row) => ({
+    role: row.direction === 'out' ? 'assistant' : 'user',
+    content: String(row.text || '').trim(),
+  })).filter((x) => x.content);
+}
+
+function mergeConversationForAI(dbMessages, localMessages) {
+  const merged = [];
+  const seen = new Set();
+  for (const m of [...(dbMessages || []), ...(localMessages || [])]) {
+    const key = `${m.role}::${String(m.content || '').trim()}`;
+    if (!m?.content || seen.has(key)) continue;
+    seen.add(key);
+    merged.push({ role: m.role, content: String(m.content || '').trim() });
+  }
+  return merged.slice(-20);
+}
+
+function getLastKnownService(waId, draft) {
+  const fromDraft = draft?.servicio || draft?.last_service_name || '';
+  if (fromDraft) return { nombre: fromDraft, ts: Date.now() };
+  const fromMap = lastServiceByUser.get(waId);
+  if (fromMap && fromMap.nombre && (Date.now() - (fromMap.ts || 0)) < LAST_SERVICE_TTL_MS) return fromMap;
+  return null;
+}
+
+function looksLikeAppointmentIntent(text, { pendingDraft, lastService } = {}) {
+  const t = normalize(text || '');
+  if (/(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b)/i.test(t)) return true;
+  if (pendingDraft && /(si|sí|dale|ok|oka|quiero|quiero seguir|continuar|confirmar|bien|perfecto)/i.test(t)) return true;
+  if (lastService && /(quiero( ese| el)? turno|bien,? quiero el turno|dale|ok|me gustaria sacar turno|me gustaria un turno|reservame|agendame)/i.test(t)) return true;
+  return false;
+}
+
+function inferDraftFlowStep(base) {
+  if (!base?.servicio) return 'awaiting_service';
+  if (!base?.fecha) return 'awaiting_date';
+  if (!base?.hora) return 'awaiting_time';
+  if (!base?.cliente_full) return 'awaiting_name';
+  if (base?.payment_status !== 'paid_verified') return 'awaiting_payment';
+  return 'ready_to_book';
+}
+
 // ===================== INTENCIÓN =====================
-async function classifyAndExtract(text) {
+async function classifyAndExtract(text, context = {}) {
   const completion = await openai.chat.completions.create({
     model: PRIMARY_MODEL,
     messages: [
@@ -1926,9 +1996,22 @@ Además:
 - query: lo que hay que buscar (nombre o categoría)
 - mode: LIST si pide opciones/lista; DETAIL si pide algo puntual.
 
+Tené en cuenta el contexto previo:
+- servicio_actual: si existe, mensajes como "quiero el turno", "dale", "quiero ese", "bien" suelen referirse a ese servicio.
+- flujo_actual: si el cliente ya estaba hablando de reservar, priorizá continuidad y no lo mandes a catálogo de nuevo.
+
 Respondé SOLO JSON.`
       },
-      { role: "user", content: text }
+      {
+        role: "user",
+        content: JSON.stringify({
+          mensaje: text,
+          servicio_actual: context.lastServiceName || "",
+          flujo_actual: context.flowStep || "",
+          tiene_borrador_turno: !!context.hasDraft,
+          historial_reciente: context.historySnippet || "",
+        })
+      }
     ],
     response_format: { type: "json_object" },
   });
@@ -2428,6 +2511,9 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
 
     // ===================== ✅ TURNOS (Calendar + Railway Postgres) =====================
     const pendingDraft = await getAppointmentDraft(waId);
+    const recentDbMessages = await getRecentDbMessages(phone, 12);
+    const convForAI = mergeConversationForAI(recentDbMessages, ensureConv(waId).messages || []);
+    const lastKnownService = getLastKnownService(waId, pendingDraft);
 
     async function askForMissingTurnoData(base) {
       const pedir = [];
@@ -2441,7 +2527,7 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
     }
 
     async function askForName(base) {
-      const toSave = { ...base, awaiting_contact: true };
+      const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_name', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
       const msgSoloNombre = `Para registrar el turno, por favor envíe:
 • Nombre completo (nombre y apellido)`;
@@ -2451,7 +2537,7 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
     }
 
     async function askForPayment(base) {
-      await saveAppointmentDraft(waId, phone, { ...base, awaiting_contact: false });
+      await saveAppointmentDraft(waId, phone, { ...base, awaiting_contact: false, flow_step: 'awaiting_payment', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' });
       const msgPago = buildPaymentPendingMessage();
       pushHistory(waId, "assistant", msgPago);
       await sendWhatsAppText(phone, msgPago);
@@ -2535,6 +2621,9 @@ Estado: *SEÑA VERIFICADA* ✅`.trim();
       merged = await tryApplyPaymentToDraft(merged, { text, mediaMeta });
 
       if (!merged.servicio || !merged.fecha || !merged.hora) {
+        merged.flow_step = inferDraftFlowStep(merged);
+        merged.last_intent = 'book_appointment';
+        merged.last_service_name = merged.servicio || merged.last_service_name || '';
         await saveAppointmentDraft(waId, phone, merged);
         await askForMissingTurnoData(merged);
         return;
@@ -2545,45 +2634,57 @@ Estado: *SEÑA VERIFICADA* ✅`.trim();
       if (handled) return;
     }
 
-    const looksLikeTurno = /(turno|reserv\w*|agend\w*|cita)/i.test(text);
+    const looksLikeTurno = looksLikeAppointmentIntent(text, { pendingDraft, lastService: lastKnownService });
     if (looksLikeTurno && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
-      const turno = await extractTurnoFromText({ text, customerName: name, context: {} });
-      if (turno?.ok) {
+      const turno = await extractTurnoFromText({
+        text,
+        customerName: name,
+        context: {
+          servicio: pendingDraft?.servicio || lastKnownService?.nombre || "",
+          fecha: pendingDraft?.fecha || "",
+          hora: pendingDraft?.hora || "",
+          duracion_min: pendingDraft?.duracion_min || 60,
+          notas: pendingDraft?.notas || "",
+        }
+      });
+
+      if (turno?.ok || pendingDraft || lastKnownService) {
         const merged = {
-          fecha: toYMD(turno.fecha || ""),
-          hora: turno.hora || "",
-          servicio: turno.servicio || "",
-          duracion_min: Number(turno.duracion_min || 60) || 60,
-          notas: turno.notas || "",
-          cliente_full: "",
-          telefono_contacto: normalizePhone(phone || ""),
-          payment_status: "not_paid",
-          payment_amount: null,
-          payment_sender: "",
-          payment_receiver: "",
-          payment_proof_text: "",
-          payment_proof_media_id: "",
-          payment_proof_filename: "",
-          awaiting_contact: false,
+          fecha: toYMD(turno?.fecha || pendingDraft?.fecha || ""),
+          hora: turno?.hora || pendingDraft?.hora || "",
+          servicio: turno?.servicio || pendingDraft?.servicio || lastKnownService?.nombre || "",
+          duracion_min: Number(turno?.duracion_min || pendingDraft?.duracion_min || 60) || 60,
+          notas: turno?.notas || pendingDraft?.notas || "",
+          cliente_full: pendingDraft?.cliente_full || "",
+          telefono_contacto: normalizePhone(pendingDraft?.telefono_contacto || phone || ""),
+          payment_status: pendingDraft?.payment_status || "not_paid",
+          payment_amount: pendingDraft?.payment_amount ?? null,
+          payment_sender: pendingDraft?.payment_sender || "",
+          payment_receiver: pendingDraft?.payment_receiver || "",
+          payment_proof_text: pendingDraft?.payment_proof_text || "",
+          payment_proof_media_id: pendingDraft?.payment_proof_media_id || "",
+          payment_proof_filename: pendingDraft?.payment_proof_filename || "",
+          awaiting_contact: !!pendingDraft?.awaiting_contact,
+          flow_step: pendingDraft?.flow_step || "",
+          last_intent: "book_appointment",
+          last_service_name: pendingDraft?.last_service_name || lastKnownService?.nombre || "",
         };
 
-        const falt = new Set(turno.faltantes || []);
+        const falt = new Set(turno?.faltantes || []);
         if (!merged.fecha) falt.add("fecha");
         if (!merged.hora) falt.add("hora");
         if (!merged.servicio) falt.add("servicio");
 
-        if (falt.has("servicio")) {
-          const lastSvc = lastServiceByUser.get(waId);
-          if (lastSvc && (Date.now() - (lastSvc.ts || 0)) < LAST_SERVICE_TTL_MS) {
-            merged.servicio = merged.servicio || lastSvc.nombre || "";
-            if (merged.servicio) falt.delete("servicio");
-          }
-        }
-
         Object.assign(merged, mergeContactIntoTurno({ turno: merged, text, waPhone: phone }));
         const mergedWithPayment = await tryApplyPaymentToDraft(merged, { text, mediaMeta });
+        mergedWithPayment.flow_step = inferDraftFlowStep(mergedWithPayment);
+        mergedWithPayment.last_intent = "book_appointment";
+        mergedWithPayment.last_service_name = mergedWithPayment.servicio || mergedWithPayment.last_service_name || "";
 
         if (falt.size) {
+          mergedWithPayment.flow_step = inferDraftFlowStep(mergedWithPayment);
+          mergedWithPayment.last_intent = 'book_appointment';
+          mergedWithPayment.last_service_name = mergedWithPayment.servicio || mergedWithPayment.last_service_name || '';
           await saveAppointmentDraft(waId, phone, mergedWithPayment);
           await askForMissingTurnoData(mergedWithPayment);
           return;
@@ -2595,7 +2696,12 @@ Estado: *SEÑA VERIFICADA* ✅`.trim();
       }
     }
 
-    const intent = await classifyAndExtract(text);
+    const intent = await classifyAndExtract(text, {
+      lastServiceName: lastKnownService?.nombre || '',
+      flowStep: pendingDraft?.flow_step || '',
+      hasDraft: !!pendingDraft,
+      historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1600),
+    });
 
     // ✅ actualizar tipo de intención para el seguimiento
     const ctx1 = lastCloseContext.get(waId);
@@ -2701,9 +2807,21 @@ Estado: *SEÑA VERIFICADA* ✅`.trim();
       const replyCatalog = formatServicesReply(matches, intent.mode);
 
       if (replyCatalog) {
-        // ✅ Guardamos "último servicio" para cuando luego pidan turno
-        if (matches.length && intent.mode !== "LIST") {
-          lastServiceByUser.set(waId, { nombre: matches[0].nombre, ts: Date.now() });
+        // ✅ Guardamos "último servicio" para continuidad de la charla y toma de turnos
+        if (matches.length) {
+          const selectedService = matches[0]?.nombre || '';
+          if (selectedService) {
+            lastServiceByUser.set(waId, { nombre: selectedService, ts: Date.now() });
+            if (pendingDraft) {
+              await saveAppointmentDraft(waId, phone, {
+                ...pendingDraft,
+                servicio: pendingDraft.servicio || selectedService,
+                last_service_name: selectedService,
+                last_intent: 'service_consultation',
+                flow_step: pendingDraft.flow_step || inferDraftFlowStep({ ...pendingDraft, servicio: pendingDraft.servicio || selectedService }),
+              });
+            }
+          }
         }
 
         pushHistory(waId, "assistant", replyCatalog);
@@ -2742,15 +2860,22 @@ ${some}
 
     // fallback
     const model = pickModelForText(text);
-    const conv = ensureConv(waId);
 
     const messages = [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "system", content: `Fecha y hora actual: ${nowARString()} (${TIMEZONE}).` },
+      { role: "system", content: `Contexto del turno actual: ${JSON.stringify({
+        servicio_actual: pendingDraft?.servicio || lastKnownService?.nombre || '',
+        fecha_actual: pendingDraft?.fecha || '',
+        hora_actual: pendingDraft?.hora || '',
+        nombre_cliente: pendingDraft?.cliente_full || name || '',
+        estado_pago: pendingDraft?.payment_status || 'not_paid',
+        paso_actual: pendingDraft?.flow_step || '',
+      })}` },
     ];
     if (name) messages.push({ role: "system", content: `Nombre del cliente: ${name}.` });
 
-    for (const m of conv.messages) messages.push(m);
+    for (const m of convForAI) messages.push(m);
     messages.push({ role: "user", content: text });
 
     const reply = await openai.chat.completions.create({ model, messages });
