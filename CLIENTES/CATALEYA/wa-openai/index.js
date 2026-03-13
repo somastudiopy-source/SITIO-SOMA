@@ -569,6 +569,38 @@ function normalizeMoney(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function extractMoneyAmountFromText(text) {
+  const raw = String(text || "");
+  if (!raw) return null;
+
+  const candidates = [];
+
+  const reCurrency = /\$\s*([0-9]{1,3}(?:[\.,][0-9]{3})+|[0-9]{4,6})(?:([\.,][0-9]{1,2}))?/g;
+  for (const m of raw.matchAll(reCurrency)) {
+    const whole = [m[1] || "", m[2] || ""].join("");
+    const n = normalizeMoney(whole);
+    if (Number.isFinite(n)) candidates.push(n);
+  }
+
+  const rePlain = /(?:monto|importe|total|transferencia(?:\s+recibida)?|seña|senia)\s*[:\-]?\s*([0-9]{1,3}(?:[\.,][0-9]{3})+|[0-9]{4,6})(?:([\.,][0-9]{1,2}))?/gi;
+  for (const m of raw.matchAll(rePlain)) {
+    const whole = [m[1] || "", m[2] || ""].join("");
+    const n = normalizeMoney(whole);
+    if (Number.isFinite(n)) candidates.push(n);
+  }
+
+  if (!candidates.length) return null;
+  if (candidates.includes(10000)) return 10000;
+
+  const reasonable = candidates.find((n) => n >= 1000 && n <= 200000);
+  return reasonable ?? candidates[0] ?? null;
+}
+
+function looksLikePaymentProofText(text) {
+  const t = normalize(text || "");
+  return /(transferencia|transferencia recibida|comprobante|mercado pago|aprobado|operacion|operacion nro|nro de operacion|alias|cvu|dinero disponible|monica pacheco|cataleya178|seña|senia)/i.test(t);
+}
+
 function isExpectedReceiver(receiver) {
   const r = normalize(receiver || "");
   return !!r && (
@@ -648,7 +680,7 @@ async function saveAppointmentDraft(waId, waPhone, draft) {
       normalizePhone(d.telefono_contacto || waPhone || "") || null,
       d.servicio || null,
       d.notas || null,
-      normalizeDateForDB(d.fecha) || null,
+      d.fecha || null,
       d.hora || null,
       Number(d.duracion_min || 60) || 60,
       !!d.wants_color_confirmation,
@@ -683,24 +715,26 @@ Envíe por favor la foto/captura o PDF del comprobante.`;
 async function tryApplyPaymentToDraft(base, { text, mediaMeta } = {}) {
   const next = { ...(base || {}) };
   const rawText = String(text || "").trim();
-  const maybeProof = !!mediaMeta || detectSenaPaid({ text: rawText });
+  const maybeProof = !!mediaMeta || detectSenaPaid({ text: rawText }) || looksLikePaymentProofText(rawText);
   if (!maybeProof) return next;
 
   const info = await extractPagoInfoWithAI(rawText);
-  const amount = normalizeMoney(info?.monto || rawText);
+  const amount = normalizeMoney(info?.monto) ?? extractMoneyAmountFromText(rawText) ?? next.payment_amount ?? null;
   const receiver = String(info?.receptor || "").trim();
-  const isProof = !!info?.es_comprobante;
+  const sender = String(info?.pagador || "").trim();
+  const isProof = !!info?.es_comprobante || looksLikePaymentProofText(rawText);
   const receiverOk = isExpectedReceiver(receiver) || isExpectedReceiver(rawText);
-  const amountOk = amount === 10000;
+  const amountOk = Number(amount) === 10000;
+  const mediaLooksProof = !!mediaMeta && looksLikePaymentProofText(rawText);
 
   next.payment_amount = amount ?? next.payment_amount ?? null;
-  next.payment_sender = String(info?.pagador || next.payment_sender || "").trim();
+  next.payment_sender = sender || next.payment_sender || "";
   next.payment_receiver = receiver || next.payment_receiver || "";
   next.payment_proof_text = rawText || next.payment_proof_text || "";
   next.payment_proof_media_id = mediaMeta?.id || next.payment_proof_media_id || "";
   next.payment_proof_filename = mediaMeta?.filename || mediaMeta?.file_name || next.payment_proof_filename || "";
 
-  if (isProof && amountOk && receiverOk) {
+  if (amountOk && receiverOk && (isProof || mediaLooksProof)) {
     next.payment_status = "paid_verified";
   } else if (rawText || mediaMeta) {
     next.payment_status = next.payment_status === "paid_verified" ? "paid_verified" : "payment_review";
@@ -727,7 +761,7 @@ async function createAppointmentRecord({ waId, waPhone, merged, status, calendar
       normalizePhone(merged.telefono_contacto || waPhone || "") || null,
       merged.servicio || null,
       merged.notas || null,
-      normalizeDateForDB(merged.fecha) || null,
+      merged.fecha || null,
       merged.hora || null,
       Number(merged.duracion_min || 60) || 60,
       status || "booked",
@@ -746,7 +780,6 @@ async function createAppointmentRecord({ waId, waPhone, merged, status, calendar
 }
 
 async function finalizeAppointmentFlow({ waId, phone, merged }) {
-  merged.fecha = normalizeDateForDB(merged?.fecha || "");
   if (!merged?.servicio || !merged?.fecha || !merged?.hora) return { type: "missing_core" };
   if (!merged?.cliente_full) return { type: "need_name" };
   if (merged.payment_status !== "paid_verified") return { type: "need_payment" };
@@ -1062,28 +1095,6 @@ function ymdToDMY(ymd) {
   return `${m[3]}/${m[2]}/${m[1]}`;
 }
 
-function normalizeDateForDB(dateStr) {
-  const s = String(dateStr || "").trim();
-  if (!s) return "";
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-
-  const direct = toYMD(s);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(direct)) return direct;
-
-  const parsed = new Date(s);
-  if (Number.isNaN(parsed.getTime())) return "";
-
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: TIMEZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(parsed);
-  const get = (t) => parts.find((p) => p.type === t)?.value || "";
-  const ymd = `${get("year")}-${get("month")}-${get("day")}`;
-  return /^\d{4}-\d{2}-\d{2}$/.test(ymd) ? ymd : "";
-}
-
 // Acepta "DD/MM/YYYY", "DD-MM-YYYY", "YYYY-MM-DD" y devuelve siempre "YYYY-MM-DD" (si puede).
 function toYMD(dateStr) {
   const s = String(dateStr || "").trim();
@@ -1109,20 +1120,7 @@ function toYMD(dateStr) {
     return `${yyyy}-${mm}-${dd}`;
   }
 
-  const parsed = new Date(s);
-  if (!Number.isNaN(parsed.getTime())) {
-    const parts = new Intl.DateTimeFormat("en-CA", {
-      timeZone: TIMEZONE,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).formatToParts(parsed);
-    const get = (t) => parts.find((p) => p.type === t)?.value || "";
-    const ymd = `${get("year")}-${get("month")}-${get("day")}`;
-    if (/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return ymd;
-  }
-
-  return "";
+  return s;
 }
 
 async function ensureDailySheet(spreadsheetId, sheetName) {
@@ -2594,6 +2592,16 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
         return true;
       }
       if (result.type === "need_payment") {
+        if (base.payment_status === 'payment_review' && (base.payment_proof_media_id || base.payment_proof_text)) {
+          const msgRev = `Recibí el comprobante. Estoy validándolo con los datos del turno. Si todo coincide, le confirmo la reserva enseguida.
+
+Si quiere agilizarlo, también puede escribir el monto y el nombre del titular que figura en el comprobante.`;
+          await saveAppointmentDraft(waId, phone, { ...base, awaiting_contact: false, flow_step: 'payment_review', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' });
+          pushHistory(waId, 'assistant', msgRev);
+          await sendWhatsAppText(phone, msgRev);
+          scheduleInactivityFollowUp(waId, phone);
+          return true;
+        }
         await askForPayment(base);
         return true;
       }
