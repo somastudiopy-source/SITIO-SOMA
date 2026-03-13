@@ -712,33 +712,45 @@ A nombre de ${TURNOS_ALIAS_TITULAR}.
 Envíe por favor la foto/captura o PDF del comprobante.`;
 }
 
+function detectMonto10000(text) {
+  const t = normalize(String(text || ""));
+  return /(^|\D)10[\.,\s]?000(\D|$)/.test(t) || /(^|\D)10000(\D|$)/.test(t);
+}
+
+function detectTitularMonicaPacheco(text) {
+  const t = normalize(String(text || ""));
+  return t.includes("monica pacheco") || t.includes("monica pachecho");
+}
+
+function isValidComprobanteSimple(text) {
+  const t = String(text || "");
+  return detectMonto10000(t) && detectTitularMonicaPacheco(t);
+}
+
 async function tryApplyPaymentToDraft(base, { text, mediaMeta } = {}) {
   const next = { ...(base || {}) };
   const rawText = String(text || "").trim();
   const maybeProof = !!mediaMeta || detectSenaPaid({ text: rawText }) || looksLikePaymentProofText(rawText);
   if (!maybeProof) return next;
 
-  const info = await extractPagoInfoWithAI(rawText);
-  const amount = normalizeMoney(info?.monto) ?? extractMoneyAmountFromText(rawText) ?? next.payment_amount ?? null;
-  const receiver = String(info?.receptor || "").trim();
-  const sender = String(info?.pagador || "").trim();
-  const isProof = !!info?.es_comprobante || looksLikePaymentProofText(rawText);
-  const receiverOk = isExpectedReceiver(receiver) || isExpectedReceiver(rawText);
-  const amountOk = Number(amount) === 10000;
-  const mediaLooksProof = !!mediaMeta && looksLikePaymentProofText(rawText);
-
-  next.payment_amount = amount ?? next.payment_amount ?? null;
-  next.payment_sender = sender || next.payment_sender || "";
-  next.payment_receiver = receiver || next.payment_receiver || "";
   next.payment_proof_text = rawText || next.payment_proof_text || "";
   next.payment_proof_media_id = mediaMeta?.id || next.payment_proof_media_id || "";
   next.payment_proof_filename = mediaMeta?.filename || mediaMeta?.file_name || next.payment_proof_filename || "";
 
-  if (amountOk && receiverOk && (isProof || mediaLooksProof)) {
+  const comprobanteOk = isValidComprobanteSimple(rawText);
+
+  if (comprobanteOk) {
     next.payment_status = "paid_verified";
-  } else if (rawText || mediaMeta) {
-    next.payment_status = next.payment_status === "paid_verified" ? "paid_verified" : "payment_review";
+    next.payment_amount = 10000;
+    next.payment_receiver = "Monica Pacheco";
+  } else {
+    next.payment_status = next.payment_status === "paid_verified" ? "paid_verified" : "not_paid";
+    if (next.payment_status !== "paid_verified") {
+      next.payment_amount = null;
+      next.payment_receiver = "";
+    }
   }
+
   return next;
 }
 
