@@ -549,6 +549,231 @@ function mergeContactIntoTurno({ turno, text, waPhone }) {
   return out;
 }
 
+
+function normalizeMoney(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const cleaned = raw.replace(/[^\d,.-]/g, "");
+  if (!cleaned) return null;
+  const normalized = cleaned.includes(",")
+    ? cleaned.replace(/\./g, "").replace(",", ".")
+    : cleaned;
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n : null;
+}
+
+function isExpectedReceiver(receiver) {
+  const r = normalize(receiver || "");
+  return !!r && (
+    r.includes(normalize(TURNOS_ALIAS)) ||
+    r.includes(normalize(TURNOS_ALIAS_TITULAR))
+  );
+}
+
+function mapDraftRowToTurno(row) {
+  if (!row) return null;
+  return {
+    fecha: row.appointment_date ? String(row.appointment_date).slice(0, 10) : "",
+    hora: row.appointment_time ? String(row.appointment_time).slice(0, 5) : "",
+    servicio: row.service_name || "",
+    duracion_min: Number(row.duration_min || 60) || 60,
+    notas: row.service_notes || "",
+    cliente_full: row.client_name || "",
+    telefono_contacto: row.contact_phone || row.wa_phone || "",
+    payment_status: row.payment_status || "not_paid",
+    payment_amount: row.payment_amount == null ? null : Number(row.payment_amount),
+    payment_sender: row.payment_sender || "",
+    payment_receiver: row.payment_receiver || "",
+    payment_proof_text: row.payment_proof_text || "",
+    payment_proof_media_id: row.payment_proof_media_id || "",
+    payment_proof_filename: row.payment_proof_filename || "",
+    awaiting_contact: !!row.awaiting_contact,
+    wa_phone: row.wa_phone || "",
+  };
+}
+
+async function getAppointmentDraft(waId) {
+  const r = await db.query(`SELECT * FROM appointment_drafts WHERE wa_id = $1 LIMIT 1`, [waId]);
+  return mapDraftRowToTurno(r.rows[0]);
+}
+
+async function saveAppointmentDraft(waId, waPhone, draft) {
+  const d = draft || {};
+  await db.query(
+    `INSERT INTO appointment_drafts (
+      wa_id, wa_phone, client_name, contact_phone, service_name, service_notes,
+      appointment_date, appointment_time, duration_min, wants_color_confirmation,
+      payment_status, payment_amount, payment_sender, payment_receiver,
+      payment_proof_text, payment_proof_media_id, payment_proof_filename,
+      awaiting_contact, updated_at
+    ) VALUES (
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW()
+    )
+    ON CONFLICT (wa_id) DO UPDATE SET
+      wa_phone = EXCLUDED.wa_phone,
+      client_name = EXCLUDED.client_name,
+      contact_phone = EXCLUDED.contact_phone,
+      service_name = EXCLUDED.service_name,
+      service_notes = EXCLUDED.service_notes,
+      appointment_date = EXCLUDED.appointment_date,
+      appointment_time = EXCLUDED.appointment_time,
+      duration_min = EXCLUDED.duration_min,
+      wants_color_confirmation = EXCLUDED.wants_color_confirmation,
+      payment_status = EXCLUDED.payment_status,
+      payment_amount = EXCLUDED.payment_amount,
+      payment_sender = EXCLUDED.payment_sender,
+      payment_receiver = EXCLUDED.payment_receiver,
+      payment_proof_text = EXCLUDED.payment_proof_text,
+      payment_proof_media_id = EXCLUDED.payment_proof_media_id,
+      payment_proof_filename = EXCLUDED.payment_proof_filename,
+      awaiting_contact = EXCLUDED.awaiting_contact,
+      updated_at = NOW()`,
+    [
+      waId,
+      normalizePhone(waPhone || d.telefono_contacto || ""),
+      d.cliente_full || null,
+      normalizePhone(d.telefono_contacto || waPhone || "") || null,
+      d.servicio || null,
+      d.notas || null,
+      d.fecha || null,
+      d.hora || null,
+      Number(d.duracion_min || 60) || 60,
+      !!d.wants_color_confirmation,
+      d.payment_status || "not_paid",
+      d.payment_amount == null ? null : Number(d.payment_amount),
+      d.payment_sender || null,
+      d.payment_receiver || null,
+      d.payment_proof_text || null,
+      d.payment_proof_media_id || null,
+      d.payment_proof_filename || null,
+      !!d.awaiting_contact,
+    ]
+  );
+}
+
+async function deleteAppointmentDraft(waId) {
+  await db.query(`DELETE FROM appointment_drafts WHERE wa_id = $1`, [waId]);
+}
+
+function buildPaymentPendingMessage() {
+  return `Para confirmar el turno, debe dejar una seña obligatoria de ${TURNOS_SENA_TXT}.
+
+Alias para transferir: ${TURNOS_ALIAS}
+A nombre de ${TURNOS_ALIAS_TITULAR}.
+
+Envíe por favor la foto/captura o PDF del comprobante.`;
+}
+
+async function tryApplyPaymentToDraft(base, { text, mediaMeta } = {}) {
+  const next = { ...(base || {}) };
+  const rawText = String(text || "").trim();
+  const maybeProof = !!mediaMeta || detectSenaPaid({ text: rawText });
+  if (!maybeProof) return next;
+
+  const info = await extractPagoInfoWithAI(rawText);
+  const amount = normalizeMoney(info?.monto || rawText);
+  const receiver = String(info?.receptor || "").trim();
+  const isProof = !!info?.es_comprobante;
+  const receiverOk = isExpectedReceiver(receiver) || isExpectedReceiver(rawText);
+  const amountOk = amount === 10000;
+
+  next.payment_amount = amount ?? next.payment_amount ?? null;
+  next.payment_sender = String(info?.pagador || next.payment_sender || "").trim();
+  next.payment_receiver = receiver || next.payment_receiver || "";
+  next.payment_proof_text = rawText || next.payment_proof_text || "";
+  next.payment_proof_media_id = mediaMeta?.id || next.payment_proof_media_id || "";
+  next.payment_proof_filename = mediaMeta?.filename || mediaMeta?.file_name || next.payment_proof_filename || "";
+
+  if (isProof && amountOk && receiverOk) {
+    next.payment_status = "paid_verified";
+  } else if (rawText || mediaMeta) {
+    next.payment_status = next.payment_status === "paid_verified" ? "paid_verified" : "payment_review";
+  }
+  return next;
+}
+
+async function createAppointmentRecord({ waId, waPhone, merged, status, calendarEventId }) {
+  const r = await db.query(
+    `INSERT INTO appointments (
+      wa_id, wa_phone, client_name, contact_phone, service_name, service_notes,
+      appointment_date, appointment_time, duration_min, status, payment_status,
+      payment_amount, payment_sender, payment_receiver, payment_proof_text,
+      payment_proof_media_id, payment_proof_filename, calendar_event_id, is_color_service,
+      created_at, updated_at
+    ) VALUES (
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+      $12,$13,$14,$15,$16,$17,$18,$19,NOW(),NOW()
+    ) RETURNING id`,
+    [
+      waId,
+      normalizePhone(waPhone || merged.telefono_contacto || ""),
+      merged.cliente_full || null,
+      normalizePhone(merged.telefono_contacto || waPhone || "") || null,
+      merged.servicio || null,
+      merged.notas || null,
+      merged.fecha || null,
+      merged.hora || null,
+      Number(merged.duracion_min || 60) || 60,
+      status || "booked",
+      merged.payment_status || "paid_verified",
+      merged.payment_amount == null ? null : Number(merged.payment_amount),
+      merged.payment_sender || null,
+      merged.payment_receiver || null,
+      merged.payment_proof_text || null,
+      merged.payment_proof_media_id || null,
+      merged.payment_proof_filename || null,
+      calendarEventId || null,
+      isColorOrTinturaService(merged.servicio || merged.notas || ""),
+    ]
+  );
+  return r.rows[0];
+}
+
+async function finalizeAppointmentFlow({ waId, phone, merged }) {
+  if (!merged?.servicio || !merged?.fecha || !merged?.hora) return { type: "missing_core" };
+  if (!merged?.cliente_full) return { type: "need_name" };
+  if (merged.payment_status !== "paid_verified") return { type: "need_payment" };
+
+  const busy = await calendarHasConflict({
+    dateYMD: merged.fecha,
+    startHM: merged.hora,
+    durationMin: Number(merged.duracion_min || 60) || 60,
+  });
+  if (busy) return { type: "busy" };
+
+  if (isColorOrTinturaService(`${merged.servicio} ${merged.notas || ""}`)) {
+    await createAppointmentRecord({
+      waId,
+      waPhone: phone,
+      merged,
+      status: "pending_stylist_confirmation",
+      calendarEventId: null,
+    });
+    await deleteAppointmentDraft(waId);
+    return { type: "pending_stylist_confirmation" };
+  }
+
+  const ev = await createCalendarTurno({
+    dateYMD: merged.fecha,
+    startHM: merged.hora,
+    durationMin: Number(merged.duracion_min || 60) || 60,
+    cliente: merged.cliente_full || "",
+    telefono: normalizePhone(merged.telefono_contacto || phone || ""),
+    servicio: merged.servicio || "",
+    notas: merged.notas || "",
+  });
+
+  await createAppointmentRecord({
+    waId,
+    waPhone: phone,
+    merged,
+    status: "booked",
+    calendarEventId: ev?.eventId || null,
+  });
+  await deleteAppointmentDraft(waId);
+  return { type: "booked", eventId: ev?.eventId || null };
+}
+
 function isColorOrTinturaService(text) {
   const t = normalize(text);
   return /(\bcolor\b|tintur|tinte|mecha|balayage|decolor|reflej|raic|raiz|ilumin|tonaliz)/i.test(t);
