@@ -680,7 +680,7 @@ async function saveAppointmentDraft(waId, waPhone, draft) {
       normalizePhone(d.telefono_contacto || waPhone || "") || null,
       d.servicio || null,
       d.notas || null,
-      d.fecha || null,
+      toYMD(d.fecha) || null,
       d.hora || null,
       Number(d.duracion_min || 60) || 60,
       !!d.wants_color_confirmation,
@@ -761,7 +761,7 @@ async function createAppointmentRecord({ waId, waPhone, merged, status, calendar
       normalizePhone(merged.telefono_contacto || waPhone || "") || null,
       merged.servicio || null,
       merged.notas || null,
-      merged.fecha || null,
+      toYMD(merged.fecha) || null,
       merged.hora || null,
       Number(merged.duracion_min || 60) || 60,
       status || "booked",
@@ -780,6 +780,7 @@ async function createAppointmentRecord({ waId, waPhone, merged, status, calendar
 }
 
 async function finalizeAppointmentFlow({ waId, phone, merged }) {
+  merged.fecha = toYMD(merged.fecha);
   if (!merged?.servicio || !merged?.fecha || !merged?.hora) return { type: "missing_core" };
   if (!merged?.cliente_full) return { type: "need_name" };
   if (merged.payment_status !== "paid_verified") return { type: "need_payment" };
@@ -1099,10 +1100,8 @@ function ymdToDMY(ymd) {
 function toYMD(dateStr) {
   const s = String(dateStr || "").trim();
   if (!s) return "";
-  // ya viene en YMD
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
 
-  // DD/MM/YYYY o DD-MM-YYYY
   let m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
   if (m) {
     const dd = String(m[1]).padStart(2, "0");
@@ -1111,7 +1110,6 @@ function toYMD(dateStr) {
     return `${yyyy}-${mm}-${dd}`;
   }
 
-  // DD/MM o DD-MM (asumimos año actual en TIMEZONE)
   m = s.match(/^(\d{1,2})[\/\-](\d{1,2})$/);
   if (m) {
     const dd = String(m[1]).padStart(2, "0");
@@ -1120,7 +1118,34 @@ function toYMD(dateStr) {
     return `${yyyy}-${mm}-${dd}`;
   }
 
-  return s;
+  const rel = normalize(s);
+  if (rel === "hoy") return todayYMDInTZ();
+  if (rel === "manana" || rel === "mañana") {
+    const now = new Date();
+    const dt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    return dt.toISOString().slice(0, 10);
+  }
+
+  const monthMap = {
+    jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+    jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12'
+  };
+  const cleaned = s.replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
+  m = cleaned.match(/^(?:sun|mon|tue|wed|thu|fri|sat)\s+([A-Za-z]{3})\s+(\d{1,2})(?:\s+(\d{4}))?$/i)
+    || cleaned.match(/^([A-Za-z]{3})\s+(\d{1,2})(?:\s+(\d{4}))?$/i);
+  if (m) {
+    const mon = monthMap[String(m[1]).slice(0,3).toLowerCase()];
+    const dd = String(m[2]).padStart(2, '0');
+    const yyyy = String(m[3] || todayYMDInTZ().slice(0, 4));
+    if (mon) return `${yyyy}-${mon}-${dd}`;
+  }
+
+  const jsDate = new Date(s);
+  if (!isNaN(jsDate.getTime())) {
+    return jsDate.toISOString().slice(0, 10);
+  }
+
+  return "";
 }
 
 async function ensureDailySheet(spreadsheetId, sheetName) {
