@@ -803,7 +803,6 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
     durationMin: Number(merged.duracion_min || 60) || 60,
   });
   if (busy) return { type: "busy" };
-  if (merged.payment_status !== "paid_verified") return { type: "need_payment" };
 
   if (isColorOrTinturaService(`${merged.servicio} ${merged.notas || ""}`)) {
     await createAppointmentRecord({
@@ -1025,7 +1024,6 @@ async function createCalendarTurno({ dateYMD, startHM, durationMin, cliente, tel
   const description = [
     telefono ? `Tel: ${normalizePhone(telefono)}` : "",
     servicio ? `Servicio: ${servicio}` : "",
-    "Seña: $10.000 verificada",
     notas ? `Notas: ${notas}` : "",
   ].filter(Boolean).join("\n");
 
@@ -1793,18 +1791,6 @@ async function getServicesCatalog() {
   return rows;
 }
 
-async function getServiceRowByName(serviceName) {
-  const rows = await getServicesCatalog();
-  const matches = findServices(rows, serviceName || "", "DETAIL");
-  return matches[0] || null;
-}
-
-function formatSingleServiceForTurn(serviceRow) {
-  if (!serviceRow) return "";
-  const priceTxt = serviceRow.precio ? moneyOrConsult(serviceRow.precio) : "consultar";
-  return `Servicio: *${serviceRow.nombre}*\nPrecio: *${priceTxt}*`;
-}
-
 async function getCoursesCatalog() {
   const now = Date.now();
   if (catalogCache.courses.rows.length && (now - catalogCache.courses.loadedAt) < CATALOG_CACHE_TTL_MS) {
@@ -1983,20 +1969,16 @@ function formatStockListAll(rows, chunkSize = 12) {
 
 function formatServicesReply(matches, mode) {
   if (!matches.length) return null;
-  const limited = mode === "LIST" ? matches.slice(0, 8) : matches.slice(0, 1);
-
-  if (mode === "DETAIL") {
-    const s = limited[0];
-    const priceTxt = s.precio ? moneyOrConsult(s.precio) : "consultar";
-    return `*${s.nombre}*\nPrecio: *${priceTxt}*`;
-  }
+  const limited = mode === "LIST" ? matches.slice(0, 10) : matches.slice(0, 3);
 
   const lines = limited.map(s => {
-    const priceTxt = s.precio ? moneyOrConsult(s.precio) : "consultar";
-    return `• ${s.nombre} — *${priceTxt}*`;
+    const priceTxt = moneyOrConsult(s.precio);
+    const durTxt = s.duracion ? ` | ${s.duracion}` : "";
+    return `• ${s.nombre}: *${priceTxt}*${durTxt}`;
   });
 
-  return `Servicios disponibles:\n${lines.join("\n")}`.trim();
+  const header = mode === "LIST" ? `Servicios:` : `Precio del servicio:`;
+  return `${header}\n${lines.join("\n")}`.trim();
 }
 
 function textAsksForServicesList(text) {
@@ -2649,18 +2631,7 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
       if (!base.servicio) pedir.push("• ¿Qué servicio desea? (Escríbalo como figura en nuestra lista. Ej: Alisado)");
       if (!base.fecha) pedir.push("• ¿Para qué fecha? (ej: 20/02 o mañana)");
       if (!base.hora) pedir.push("• ¿En qué horario? (ej: 10:30)");
-
-      let encabezado = "";
-      if (base.servicio) {
-        const serviceRow = await getServiceRowByName(base.servicio);
-        if (serviceRow) encabezado = formatSingleServiceForTurn(serviceRow) + "
-
-";
-      }
-
-      const msgFalt = `${encabezado}Para avanzar con el turno necesito:
-${pedir.join("
-")}`.trim();
+      const msgFalt = `${maybeTurnoInfoBlock(waId)}\n\nPara reservar el turno necesito:\n${pedir.join("\n")}`.trim();;
       pushHistory(waId, "assistant", msgFalt);
       await sendWhatsAppText(phone, msgFalt);
       scheduleInactivityFollowUp(waId, phone);
@@ -2670,8 +2641,7 @@ ${pedir.join("
       const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_name', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
       const msgSoloNombre = `Para registrar el turno, por favor envíe:
-• Nombre completo (nombre y apellido)
-• Número de teléfono de contacto`;
+• Nombre completo (nombre y apellido)`;
       pushHistory(waId, "assistant", msgSoloNombre);
       await sendWhatsAppText(phone, msgSoloNombre);
       scheduleInactivityFollowUp(waId, phone);
@@ -2689,12 +2659,7 @@ ${pedir.join("
 
     async function askForPayment(base) {
       await saveAppointmentDraft(waId, phone, { ...base, awaiting_contact: false, flow_step: 'awaiting_payment', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' });
-      const diaOk = weekdayEsFromYMD(base.fecha);
-      const msgPago = `Ese horario está disponible:
-• ${base.servicio}
-• ${diaOk} ${ymdToDMY(base.fecha)} ${base.hora}
-
-${buildPaymentPendingMessage()}`.trim();
+      const msgPago = buildPaymentPendingMessage();
       pushHistory(waId, "assistant", msgPago);
       await sendWhatsAppText(phone, msgPago);
       scheduleInactivityFollowUp(waId, phone);
@@ -3008,77 +2973,42 @@ Estado: *SEÑA VERIFICADA* ✅`.trim();
     // SERVICE
     if (intent.type === "SERVICE") {
       const services = await getServicesCatalog();
-
-      if (intent.mode === "LIST" && (!intent.query || /(servicios|que servicios|qué servicios|que ofrecen|qué ofrecen|lista)/i.test(normalize(text)))) {
-        const parts = formatServicesListAll(services, 8);
-        for (const part of parts.slice(0, 3)) {
-          pushHistory(waId, "assistant", part);
-          await sendWhatsAppText(phone, part);
-        }
-        scheduleInactivityFollowUp(waId, phone);
-        return;
-      }
-
       const matches = intent.query ? findServices(services, intent.query, intent.mode) : [];
       const replyCatalog = formatServicesReply(matches, intent.mode);
 
-      if (matches.length) {
-        const selectedService = matches[0]?.nombre || '';
-        if (selectedService) {
-          lastServiceByUser.set(waId, { nombre: selectedService, ts: Date.now() });
-        }
-      }
-
-      const wantsTurnForService = /(turno|reserv|agend|cita)/i.test(normalize(text || ""));
-
-      if (matches.length && wantsTurnForService) {
-        const selectedService = matches[0];
-        const draftBase = {
-          ...(pendingDraft || {}),
-          servicio: pendingDraft?.servicio || selectedService.nombre,
-          duracion_min: pendingDraft?.duracion_min || 60,
-          last_service_name: selectedService.nombre,
-          last_intent: 'book_appointment',
-          flow_step: inferDraftFlowStep({ ...(pendingDraft || {}), servicio: pendingDraft?.servicio || selectedService.nombre }),
-        };
-        await saveAppointmentDraft(waId, phone, draftBase);
-        const priceTxt = selectedService.precio ? moneyOrConsult(selectedService.precio) : "consultar";
-        const msgTurnoServicio = `*${selectedService.nombre}*
-Precio: *${priceTxt}*
-
-¿Para qué fecha y horario le gustaría el turno?`;
-        pushHistory(waId, "assistant", msgTurnoServicio);
-        await sendWhatsAppText(phone, msgTurnoServicio);
-        scheduleInactivityFollowUp(waId, phone);
-        return;
-      }
-
       if (replyCatalog) {
-        if (matches.length && pendingDraft) {
+        // ✅ Guardamos "último servicio" para continuidad de la charla y toma de turnos
+        if (matches.length) {
           const selectedService = matches[0]?.nombre || '';
           if (selectedService) {
-            await saveAppointmentDraft(waId, phone, {
-              ...pendingDraft,
-              servicio: pendingDraft.servicio || selectedService,
-              last_service_name: selectedService,
-              last_intent: 'service_consultation',
-              flow_step: pendingDraft.flow_step || inferDraftFlowStep({ ...pendingDraft, servicio: pendingDraft.servicio || selectedService }),
-            });
+            lastServiceByUser.set(waId, { nombre: selectedService, ts: Date.now() });
+            if (pendingDraft) {
+              await saveAppointmentDraft(waId, phone, {
+                ...pendingDraft,
+                servicio: pendingDraft.servicio || selectedService,
+                last_service_name: selectedService,
+                last_intent: 'service_consultation',
+                flow_step: pendingDraft.flow_step || inferDraftFlowStep({ ...pendingDraft, servicio: pendingDraft.servicio || selectedService }),
+              });
+            }
           }
         }
 
         pushHistory(waId, "assistant", replyCatalog);
         await sendWhatsAppText(phone, replyCatalog);
+        // ✅ INACTIVIDAD
         scheduleInactivityFollowUp(waId, phone);
         return;
       }
 
-      const some = services.slice(0, 8).map(s => `• ${s.nombre} — *${s.precio ? moneyOrConsult(s.precio) : "consultar"}*`).join("
-");
+      // ✅ Evitar inventar servicios: si no está en el Excel, lo decimos y mostramos opciones reales
+      const some = services.slice(0, 12).map(s => `• ${s.nombre}`).join("\n");
       const msgNo = `No encuentro ese servicio en nuestra lista.
 
-Servicios disponibles:
-${some}`;
+Servicios disponibles (algunos):
+${some}
+
+¿Con cuál desea sacar turno o consultar precio?`;
       pushHistory(waId, "assistant", msgNo);
       await sendWhatsAppText(phone, msgNo);
       scheduleInactivityFollowUp(waId, phone);
