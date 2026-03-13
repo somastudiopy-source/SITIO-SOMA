@@ -795,7 +795,6 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
   if (!merged?.servicio || !merged?.fecha || !merged?.hora) return { type: "missing_core" };
   if (!merged?.cliente_full) return { type: "need_name" };
   if (!merged?.telefono_contacto) return { type: "need_phone" };
-  if (merged.payment_status !== "paid_verified") return { type: "need_payment" };
 
   const busy = await calendarHasConflict({
     dateYMD: merged.fecha,
@@ -803,6 +802,7 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
     durationMin: Number(merged.duracion_min || 60) || 60,
   });
   if (busy) return { type: "busy" };
+  if (merged.payment_status !== "paid_verified") return { type: "need_payment" };
 
   if (isColorOrTinturaService(`${merged.servicio} ${merged.notas || ""}`)) {
     await createAppointmentRecord({
@@ -1024,6 +1024,7 @@ async function createCalendarTurno({ dateYMD, startHM, durationMin, cliente, tel
   const description = [
     telefono ? `Tel: ${normalizePhone(telefono)}` : "",
     servicio ? `Servicio: ${servicio}` : "",
+    "Seña: $10.000 verificada",
     notas ? `Notas: ${notas}` : "",
   ].filter(Boolean).join("\n");
 
@@ -1789,6 +1790,19 @@ async function getServicesCatalog() {
 
   catalogCache.services = { loadedAt: now, rows };
   return rows;
+}
+
+
+async function getServiceRowByName(serviceName) {
+  const rows = await getServicesCatalog();
+  const matches = findServices(rows, serviceName || "", "DETAIL");
+  return matches[0] || null;
+}
+
+function formatSingleServiceForTurn(serviceRow) {
+  if (!serviceRow) return "";
+  const priceTxt = serviceRow.precio ? moneyOrConsult(serviceRow.precio) : "consultar";
+  return `Servicio: *${serviceRow.nombre}*\nPrecio: *${priceTxt}*`;
 }
 
 async function getCoursesCatalog() {
@@ -2631,7 +2645,16 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
       if (!base.servicio) pedir.push("• ¿Qué servicio desea? (Escríbalo como figura en nuestra lista. Ej: Alisado)");
       if (!base.fecha) pedir.push("• ¿Para qué fecha? (ej: 20/02 o mañana)");
       if (!base.hora) pedir.push("• ¿En qué horario? (ej: 10:30)");
-      const msgFalt = `${maybeTurnoInfoBlock(waId)}\n\nPara reservar el turno necesito:\n${pedir.join("\n")}`.trim();;
+      let encabezado = "";
+      if (base.servicio) {
+        const serviceRow = await getServiceRowByName(base.servicio);
+        if (serviceRow) encabezado = formatSingleServiceForTurn(serviceRow) + "
+
+";
+      }
+      const msgFalt = `${encabezado}Para avanzar con el turno necesito:
+${pedir.join("
+")}`.trim();
       pushHistory(waId, "assistant", msgFalt);
       await sendWhatsAppText(phone, msgFalt);
       scheduleInactivityFollowUp(waId, phone);
@@ -2659,7 +2682,8 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
 
     async function askForPayment(base) {
       await saveAppointmentDraft(waId, phone, { ...base, awaiting_contact: false, flow_step: 'awaiting_payment', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' });
-      const msgPago = buildPaymentPendingMessage();
+      const diaOk = weekdayEsFromYMD(base.fecha);
+      const msgPago = `Ese horario está disponible:\n• ${base.servicio}\n• ${diaOk} ${ymdToDMY(base.fecha)} ${base.hora}\n\n${buildPaymentPendingMessage()}`.trim();
       pushHistory(waId, "assistant", msgPago);
       await sendWhatsAppText(phone, msgPago);
       scheduleInactivityFollowUp(waId, phone);
