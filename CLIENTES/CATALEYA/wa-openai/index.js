@@ -512,11 +512,9 @@ Si ya realizó la transferencia, envíe la captura del comprobante y lo dejo com
   );
 }
 
-function detectSenaPaid({ text, msgType }) {
+function detectSenaPaid({ text }) {
   const t = normalize(text || "");
-  if (/(comprobant|transfer|transferi|transferí|señad|seña|pagu|pago|abon|abono)/i.test(t)) return true;
-  if (msgType && (msgType === "image" || msgType === "document")) return true;
-  return false;
+  return /(comprobant|transfer|transferi|transferí|señad|seña|pagu|pago|abon|abono|mercado pago|alias|cvu)/i.test(t);
 }
 
 function extractContactInfo(text) {
@@ -2203,133 +2201,152 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
       return;
     }
 
-    // ===================== ✅ TURNOS (agendar + planilla) =====================
-    // 1) Si hay una reserva "en curso" (faltaban datos), este mensaje puede ser solo fecha/hora/servicio
-    if (pendingTurnos.has(waId) && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
-      const prev = pendingTurnos.get(waId) || {};
-const turno = await extractTurnoFromText({ text, customerName: name, context: prev });
+    // ===================== ✅ TURNOS (Calendar + Railway Postgres) =====================
+    const pendingDraft = await getAppointmentDraft(waId);
 
-// ✅ Si estábamos esperando nombre/teléfono (y el mensaje no parece "pedido de turno"), igual lo tomamos
-if (!turno?.ok && prev?.awaiting_contact) {
-  const ci0 = extractContactInfo(text);
-  const merged0 = {
-    ...prev,
-    cliente_full: prev.cliente_full || (ci0.nombre || ""),
-    telefono_contacto: prev.telefono_contacto || (ci0.telefono || ""),
-    senado: Boolean(prev.senado) || detectSenaPaid({ text, msgType: msg.type }),
-  };
-
-  if (!merged0.cliente_full || !merged0.telefono_contacto) {
-    pendingTurnos.set(waId, merged0);
-    const msgDatos2 = `${maybeTurnoInfoBlock(waId)}${pedirDatosRegistroTurnoBlock()}`.trim();
-    pushHistory(waId, "assistant", msgDatos2);
-    await sendWhatsAppText(phone, msgDatos2);
-    scheduleInactivityFollowUp(waId, phone);
-    return;
-  }
-
-  // Ya tenemos todo: registramos el turno usando lo que había quedado guardado
-  const isColorJob0 = isColorOrTinturaService(merged0.servicio) || isColorOrTinturaService(merged0.notas || "");
-  const servicioToSave0 = isColorJob0 ? `${merged0.servicio} (A CONFIRMAR)` : merged0.servicio;
-
-  // Conflicto de Calendar
-  try {
-    const conflict0 = await calendarHasConflict({
-      dateYMD: merged0.fecha,
-      startHM: merged0.hora,
-      durationMin: merged0.duracion_min,
-    });
-    if (conflict0) {
-      const diaC0 = weekdayEsFromYMD(merged0.fecha);
-      const msgBusy0 = `Ese horario ya está ocupado (${diaC0} ${merged0.fecha} ${merged0.hora}). ¿Le sirve otro horario?`;
-      pushHistory(waId, "assistant", msgBusy0);
-      await sendWhatsAppText(phone, msgBusy0);
+    async function askForMissingTurnoData(base) {
+      const pedir = [];
+      if (!base.servicio) pedir.push("• ¿Qué servicio desea? (Escríbalo como figura en nuestra lista. Ej: Alisado)");
+      if (!base.fecha) pedir.push("• ¿Para qué fecha? (ej: 20/02 o mañana)");
+      if (!base.hora) pedir.push("• ¿En qué horario? (ej: 10:30)");
+      const msgFalt = `${maybeTurnoInfoBlock(waId)}\n\nPara reservar el turno necesito:\n${pedir.join("\n")}`.trim();;
+      pushHistory(waId, "assistant", msgFalt);
+      await sendWhatsAppText(phone, msgFalt);
       scheduleInactivityFollowUp(waId, phone);
-      return;
     }
-  } catch (e) {
-    console.error("Error chequeando conflicto de calendar:", e?.response?.data || e?.message || e);
-  }
 
-  // Crear evento si NO es color/tintura
-  let eventId0 = "";
-  if (!isColorJob0) {
-    try {
-      const created0 = await createCalendarTurno({
-        dateYMD: merged0.fecha,
-        startHM: merged0.hora,
-        durationMin: merged0.duracion_min,
-        cliente: merged0.cliente_full || name || "",
-        telefono: merged0.telefono_contacto || phone,
-        servicio: merged0.servicio,
-        notas: merged0.notas || "",
-      });
-      eventId0 = created0?.eventId || "";
-    } catch (e) {
-      console.error("❌ Error creando evento en calendar:", e?.response?.data || e?.message || e);
+    async function askForName(base) {
+      const toSave = { ...base, awaiting_contact: true };
+      await saveAppointmentDraft(waId, phone, toSave);
+      const msgSoloNombre = `Para registrar el turno, por favor envíe:
+• Nombre completo (nombre y apellido)`;
+      pushHistory(waId, "assistant", msgSoloNombre);
+      await sendWhatsAppText(phone, msgSoloNombre);
+      scheduleInactivityFollowUp(waId, phone);
     }
-  }
 
-  // Guardar en sheet
-  try {
-    const dia0 = weekdayEsFromYMD(merged0.fecha);
-    await appendTurnoRow({
-      fechaYMD: merged0.fecha,
-      dia: dia0,
-      horaHM: merged0.hora,
-      cliente: merged0.cliente_full || name || "",
-      telefono: merged0.telefono_contacto || phone,
-      servicio: merged0.senado ? `${servicioToSave0} - SEÑADO` : servicioToSave0,
-      duracionMin: merged0.duracion_min,
-      calendarEventId: eventId0,
-    });
-  } catch (e) {
-    console.error("❌ Error guardando turno en sheet:", e?.response?.data || e?.message || e);
-    await sendWhatsAppText(phone, "Tuve un problema registrando el turno en la planilla. ¿Me confirma fecha, hora y servicio para reintentar?");
-    scheduleInactivityFollowUp(waId, phone);
-    return;
-  }
+    async function askForPayment(base) {
+      await saveAppointmentDraft(waId, phone, { ...base, awaiting_contact: false });
+      const msgPago = buildPaymentPendingMessage();
+      pushHistory(waId, "assistant", msgPago);
+      await sendWhatsAppText(phone, msgPago);
+      scheduleInactivityFollowUp(waId, phone);
+    }
 
-  pendingTurnos.delete(waId);
-  const diaOk0 = weekdayEsFromYMD(merged0.fecha);
-  const extra0 = !CALENDAR_ID
-    ? "\n\nQuedó registrado. Si quiere, también le confirmo el turno por acá el mismo día."
-    : "";
-  if (isColorJob0) {
-    const senaTag0 = merged0.senado ? "\n\nEstado: *SEÑADO* ✅" : "";
-    const msgPend0 = `🕒 Solicitud de turno recibida (color/tintura):\n• ${merged0.servicio}\n• ${diaOk0} ${merged0.fecha} ${merged0.hora}${senaTag0}\n\nQueda en confirmar: reviso con la estilista ${TURNOS_STYLIST_NAME} si puede en ese horario y le aviso por acá.${maybeTurnoInfoBlock(waId)}`.trim();
-    pushHistory(waId, "assistant", msgPend0);
-    await sendWhatsAppText(phone, msgPend0);
-    scheduleInactivityFollowUp(waId, phone);
-    return;
-  }
+    async function respondFinalizeResult(base, result) {
+      if (result.type === "busy") {
+        const diaC = weekdayEsFromYMD(base.fecha);
+        const msgBusy = `Ese horario ya está ocupado (${diaC} ${ymdToDMY(base.fecha)} ${base.hora}). ¿Le sirve otro horario?`;
+        pushHistory(waId, "assistant", msgBusy);
+        await sendWhatsAppText(phone, msgBusy);
+        scheduleInactivityFollowUp(waId, phone);
+        return true;
+      }
+      if (result.type === "need_name") {
+        await askForName(base);
+        return true;
+      }
+      if (result.type === "need_payment") {
+        await askForPayment(base);
+        return true;
+      }
+      if (result.type === "missing_core") {
+        await askForMissingTurnoData(base);
+        return true;
+      }
+      if (result.type === "pending_stylist_confirmation") {
+        const diaOk = weekdayEsFromYMD(base.fecha);
+        const msgPend = `🕒 Solicitud de turno recibida (color/tintura):
+• ${base.servicio}
+• ${diaOk} ${ymdToDMY(base.fecha)} ${base.hora}
 
-  const senaTagOk0 = merged0.senado ? "\n\nEstado: *SEÑADO* ✅" : "";
-  const msgOk0 = `✅ Turno reservado:\n• ${merged0.servicio}\n• ${diaOk0} ${merged0.fecha} ${merged0.hora}${extra0}${senaTagOk0}${maybeTurnoInfoBlock(waId)}`.trim();
-  pushHistory(waId, "assistant", msgOk0);
-  await sendWhatsAppText(phone, msgOk0);
-  scheduleInactivityFollowUp(waId, phone);
-  return;
-}
+Seña verificada: *Sí* ✅
 
-if (turno?.ok) {
-        const merged = {
-          fecha: turno.fecha || prev.fecha || "",
-          hora: turno.hora || prev.hora || "",
-          servicio: turno.servicio || prev.servicio || "",
-          duracion_min: Number(turno.duracion_min || prev.duracion_min || 60) || 60,
-          notas: turno.notas || prev.notas || "",
+Queda en confirmar: reviso con la estilista ${TURNOS_STYLIST_NAME} si puede en ese horario y le aviso por acá.`.trim();
+        pushHistory(waId, "assistant", msgPend);
+        await sendWhatsAppText(phone, msgPend);
+        scheduleInactivityFollowUp(waId, phone);
+        return true;
+      }
+      if (result.type === "booked") {
+        const diaOk = weekdayEsFromYMD(base.fecha);
+        const msgOk = `✅ Turno reservado:
+• ${base.servicio}
+• ${diaOk} ${ymdToDMY(base.fecha)} ${base.hora}
+
+Estado: *SEÑA VERIFICADA* ✅`.trim();
+        pushHistory(waId, "assistant", msgOk);
+        await sendWhatsAppText(phone, msgOk);
+        scheduleInactivityFollowUp(waId, phone);
+        return true;
+      }
+      return false;
+    }
+
+    if (pendingDraft && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
+      const turno = await extractTurnoFromText({ text, customerName: name, context: pendingDraft });
+      let merged = {
+        ...pendingDraft,
+        fecha: pendingDraft.fecha || "",
+        hora: pendingDraft.hora || "",
+        servicio: pendingDraft.servicio || "",
+        duracion_min: Number(pendingDraft.duracion_min || 60) || 60,
+        notas: pendingDraft.notas || "",
+      };
+
+      if (turno?.ok) {
+        merged = {
+          ...merged,
+          fecha: turno.fecha || merged.fecha || "",
+          hora: turno.hora || merged.hora || "",
+          servicio: turno.servicio || merged.servicio || "",
+          duracion_min: Number(turno.duracion_min || merged.duracion_min || 60) || 60,
+          notas: turno.notas || merged.notas || "",
         };
+      }
 
-        merged.fecha = toYMD(merged.fecha);
+      merged.fecha = toYMD(merged.fecha);
+      Object.assign(merged, mergeContactIntoTurno({ turno: merged, text, waPhone: phone }));
+      merged = await tryApplyPaymentToDraft(merged, { text, mediaMeta });
+
+      if (!merged.servicio || !merged.fecha || !merged.hora) {
+        await saveAppointmentDraft(waId, phone, merged);
+        await askForMissingTurnoData(merged);
+        return;
+      }
+
+      const result = await finalizeAppointmentFlow({ waId, phone, name, merged });
+      const handled = await respondFinalizeResult(merged, result);
+      if (handled) return;
+    }
+
+    const looksLikeTurno = /(turno|reserv\w*|agend\w*|cita)/i.test(text);
+    if (looksLikeTurno && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
+      const turno = await extractTurnoFromText({ text, customerName: name, context: {} });
+      if (turno?.ok) {
+        const merged = {
+          fecha: toYMD(turno.fecha || ""),
+          hora: turno.hora || "",
+          servicio: turno.servicio || "",
+          duracion_min: Number(turno.duracion_min || 60) || 60,
+          notas: turno.notas || "",
+          cliente_full: "",
+          telefono_contacto: normalizePhone(phone || ""),
+          payment_status: "not_paid",
+          payment_amount: null,
+          payment_sender: "",
+          payment_receiver: "",
+          payment_proof_text: "",
+          payment_proof_media_id: "",
+          payment_proof_filename: "",
+          awaiting_contact: false,
+        };
 
         const falt = new Set(turno.faltantes || []);
         if (!merged.fecha) falt.add("fecha");
         if (!merged.hora) falt.add("hora");
         if (!merged.servicio) falt.add("servicio");
 
-
-        // ✅ Autocompletar servicio si el cliente lo consultó recién
         if (falt.has("servicio")) {
           const lastSvc = lastServiceByUser.get(waId);
           if (lastSvc && (Date.now() - (lastSvc.ts || 0)) < LAST_SERVICE_TTL_MS) {
@@ -2338,293 +2355,18 @@ if (turno?.ok) {
           }
         }
 
-// ✅ Capturar nombre/teléfono y estado de seña (si lo manda en cualquier orden)
-const ci = extractContactInfo(text);
-merged.cliente_full = merged.cliente_full || prev.cliente_full || (ci.nombre || "");
-merged.telefono_contacto = merged.telefono_contacto || prev.telefono_contacto || (ci.telefono || "");
-merged.senado = Boolean(prev.senado) || detectSenaPaid({ text, msgType: msg.type });
+        Object.assign(merged, mergeContactIntoTurno({ turno: merged, text, waPhone: phone }));
+        const mergedWithPayment = await tryApplyPaymentToDraft(merged, { text, mediaMeta });
 
         if (falt.size) {
-          pendingTurnos.set(waId, merged);
-          const pedir = [];
-          if (falt.has("servicio")) pedir.push("• ¿Qué servicio desea? (Escríbalo como figura en nuestra lista. Ej: Alisado)");
-          if (falt.has("fecha")) pedir.push("• ¿Para qué fecha? (ej: 20/02 o mañana)");
-          if (falt.has("hora")) pedir.push("• ¿En qué horario? (ej: 10:30)");
-          const msgFalt = `${maybeTurnoInfoBlock(waId)}\n\nPara reservar el turno necesito:\n${pedir.join("\n")}`.trim();
-          pushHistory(waId, "assistant", msgFalt);
-          await sendWhatsAppText(phone, msgFalt);
-          scheduleInactivityFollowUp(waId, phone);
+          await saveAppointmentDraft(waId, phone, mergedWithPayment);
+          await askForMissingTurnoData(mergedWithPayment);
           return;
         }
 
-
-// ✅ Antes de registrar, pedir nombre completo y teléfono de contacto
-// Nota: el teléfono lo tomamos del WhatsApp si no lo envía explícito.
-merged.telefono_contacto = merged.telefono_contacto || phone || "";
-merged.cliente_full = merged.cliente_full || name || "";
-
-// Solo pedimos nombre si realmente falta (evita repetir mensajes)
-if (!merged.cliente_full) {
-  pendingTurnos.set(waId, { ...merged, awaiting_contact: true });
-  const msgSoloNombre = `Para registrar el turno, por favor envíe:\n• Nombre completo (nombre y apellido)`;
-  pushHistory(waId, "assistant", msgSoloNombre);
-  await sendWhatsAppText(phone, msgSoloNombre);
-  scheduleInactivityFollowUp(waId, phone);
-  return;
-}
-
-
-        const isColorJob = isColorOrTinturaService(merged.servicio) || isColorOrTinturaService(merged.notas);
-        const servicioToSave = isColorJob ? `${merged.servicio} (A CONFIRMAR)` : merged.servicio;
-
-        // 1) Chequeo de conflicto en Calendar (si está configurado)
-        try {
-          const conflict = await calendarHasConflict({
-            dateYMD: merged.fecha,
-            startHM: merged.hora,
-            durationMin: merged.duracion_min,
-          });
-          if (conflict) {
-            const diaC = weekdayEsFromYMD(merged.fecha);
-            const msgBusy = `Ese horario ya está ocupado (${diaC} ${ymdToDMY(merged.fecha)} ${merged.hora}). ¿Le sirve otro horario?`;
-            pushHistory(waId, "assistant", msgBusy);
-            await sendWhatsAppText(phone, msgBusy);
-            scheduleInactivityFollowUp(waId, phone);
-            return;
-          }
-        } catch (e) {
-          console.error("Error chequeando conflicto de calendar:", e?.response?.data || e?.message || e);
-        }
-
-        // 2) Crear evento (si NO es color/tintura)
-        let eventId = "";
-        if (!isColorJob) {
-          try {
-            const created = await createCalendarTurno({
-              dateYMD: merged.fecha,
-              startHM: merged.hora,
-              durationMin: merged.duracion_min,
-              cliente: name || "",
-              telefono: phone,
-              servicio: merged.servicio,
-              notas: merged.notas,
-            });
-            eventId = created?.eventId || "";
-          } catch (e) {
-            console.error("❌ Error creando evento en calendar:", e?.response?.data || e?.message || e);
-          }
-        }
-
-        // 3) Anotar en planilla
-        try {
-  const dia = weekdayEsFromYMD(merged.fecha);
-  await appendTurnoRow({
-    fechaYMD: merged.fecha,
-    dia,
-    horaHM: merged.hora,
-    cliente: merged.cliente_full || name || "",
-    telefono: merged.telefono_contacto || phone,
-    servicio: merged.senado ? `${servicioToSave} - SEÑADO` : servicioToSave,
-    duracionMin: merged.duracion_min,
-    calendarEventId: eventId,
-  });
-} catch (e) {
-  console.error("❌ Error guardando turno en sheet:", e?.response?.data || e?.message || e);
-}
-        
-
-        pendingTurnos.delete(waId);
-        const diaOk = weekdayEsFromYMD(merged.fecha);
-        const extra = !CALENDAR_ID
-          ? "\n\nQuedó registrado. Si quiere, también le confirmo el turno por acá el mismo día."
-          : "";
-        if (isColorJob) {
-          const senaTag = merged.senado ? "\n\nEstado: *SEÑADO* ✅" : "";
-          const msgPend = `🕒 Solicitud de turno recibida (color/tintura):\n• ${merged.servicio}\n• ${diaOk} ${ymdToDMY(merged.fecha)} ${merged.hora}${senaTag}\n\nQueda en confirmar: reviso con la estilista ${TURNOS_STYLIST_NAME} si puede en ese horario y le aviso por acá.${maybeTurnoInfoBlock(waId)}`.trim();
-          pushHistory(waId, "assistant", msgPend);
-          await sendWhatsAppText(phone, msgPend);
-          scheduleInactivityFollowUp(waId, phone);
-          return;
-        }
-
-        const senaTag2 = merged.senado ? "\n\nEstado: *SEÑADO* ✅" : "";
-        const msgOk = `✅ Turno reservado:\n• ${merged.servicio}\n• ${diaOk} ${ymdToDMY(merged.fecha)} ${merged.hora}${extra}${senaTag2}${maybeTurnoInfoBlock(waId)}`.trim();
-        pushHistory(waId, "assistant", msgOk);
-        await sendWhatsAppText(phone, msgOk);
-        scheduleInactivityFollowUp(waId, phone);
-        return;
-      }
-    }
-
-    // 2) Nuevo pedido de turno (mensaje que menciona turno/reserva/agendar)
-    const looksLikeTurno = /(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b)/i.test(text);
-    if (looksLikeTurno && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
-      const turno = await extractTurnoFromText({ text, customerName: name, context: {} });
-      if (turno?.ok) {
-        const falt = new Set(turno.faltantes || []);
-        if (!turno.fecha) falt.add("fecha");
-        if (!turno.hora) falt.add("hora");
-        if (!turno.servicio) falt.add("servicio");
-
-
-        // ✅ Si el cliente recién consultó precio de un servicio, lo usamos como default
-        if (falt.has("servicio")) {
-          const lastSvc = lastServiceByUser.get(waId);
-          if (lastSvc && (Date.now() - (lastSvc.ts || 0)) < LAST_SERVICE_TTL_MS) {
-            turno.servicio = turno.servicio || lastSvc.nombre || "";
-            if (turno.servicio) falt.delete("servicio");
-          }
-        }
-        if (falt.size) {
-          pendingTurnos.set(waId, {
-            fecha: turno.fecha || "",
-            hora: turno.hora || "",
-            servicio: turno.servicio || "",
-            duracion_min: Number(turno.duracion_min || 60) || 60,
-            notas: turno.notas || "",
-            cliente_full: "",
-            telefono_contacto: "",
-            senado: detectSenaPaid({ text, msgType: msg.type }),
-            awaiting_contact: false,
-          });
-          const pedir = [];
-          if (falt.has("servicio")) pedir.push("• ¿Qué servicio desea? (Escríbalo como figura en nuestra lista. Ej: Alisado)");
-          if (falt.has("fecha")) pedir.push("• ¿Para qué fecha? (ej: 20/02 o mañana)");
-          if (falt.has("hora")) pedir.push("• ¿En qué horario? (ej: 10:30)");
-          const msgFalt = `${maybeTurnoInfoBlock(waId)}\n\nPara reservar el turno necesito:\n${pedir.join("\n")}`.trim();
-          pushHistory(waId, "assistant", msgFalt);
-          await sendWhatsAppText(phone, msgFalt);
-          scheduleInactivityFollowUp(waId, phone);
-          return;
-        }
-
-        // Si ya vino completo en un solo mensaje, lo procesamos reutilizando el flujo de "pending".
-        pendingTurnos.set(waId, {
-          fecha: turno.fecha,
-          hora: turno.hora,
-          servicio: turno.servicio,
-          duracion_min: turno.duracion_min,
-          notas: turno.notas,
-        });
-
-        // Re-ejecutamos el bloque de arriba con el mismo texto (completísimo) sin duplicar código:
-        // → simulamos que “hay pending” y seguimos inmediatamente.
-        const prev = pendingTurnos.get(waId) || {};
-        const merged = {
-          fecha: prev.fecha || "",
-          hora: prev.hora || "",
-          servicio: prev.servicio || "",
-          duracion_min: Number(prev.duracion_min || 60) || 60,
-          notas: prev.notas || "",
-        };
-
-        merged.fecha = toYMD(merged.fecha);
-
-
-// ✅ Antes de registrar, pedir nombre completo y teléfono de contacto
-// ✅ Completar datos de contacto automáticamente (si no los mandó, usamos el número de WhatsApp)
-Object.assign(merged, mergeContactIntoTurno({ turno: merged, text, waPhone: phone }));
-
-// ✅ IA: si el mensaje parece comprobante (imagen/PDF/texto), marcar SEÑADO y guardar nombre si aparece
-if (!merged.senado) {
-  const pagoAI = await extractPagoInfoWithAI(text);
-  if (pagoAI?.es_comprobante) {
-    merged.senado = true;
-    if (pagoAI.pagador && !merged.cliente_full) merged.cliente_full = pagoAI.pagador;
-  }
-}
-
-
-if (!merged.cliente_full || !merged.telefono_contacto) {
-  pendingTurnos.set(waId, { ...merged, awaiting_contact: true });
-  const msgDatos = `${maybeTurnoInfoBlock(waId)}${pedirDatosRegistroTurnoBlock()}`.trim();
-  pushHistory(waId, "assistant", msgDatos);
-  await sendWhatsAppText(phone, msgDatos);
-  scheduleInactivityFollowUp(waId, phone);
-  return;
-}
-
-        const isColorJob = isColorOrTinturaService(merged.servicio) || isColorOrTinturaService(merged.notas);
-        const servicioToSave = isColorJob ? `${merged.servicio} (A CONFIRMAR)` : merged.servicio;
-
-        // Conflicto Calendar
-        try {
-          const conflict = await calendarHasConflict({
-            dateYMD: merged.fecha,
-            startHM: merged.hora,
-            durationMin: merged.duracion_min,
-          });
-          if (conflict) {
-            const diaC = weekdayEsFromYMD(merged.fecha);
-            const msgBusy = `Ese horario ya está ocupado (${diaC} ${ymdToDMY(merged.fecha)} ${merged.hora}). ¿Le sirve otro horario?`;
-            pushHistory(waId, "assistant", msgBusy);
-            await sendWhatsAppText(phone, msgBusy);
-            scheduleInactivityFollowUp(waId, phone);
-            return;
-          }
-        } catch (e) {
-          console.error("Error chequeando conflicto de calendar:", e?.response?.data || e?.message || e);
-        }
-
-        // Crear evento (si NO es color/tintura)
-        let eventId = "";
-        if (!isColorJob) {
-          try {
-            const created = await createCalendarTurno({
-              dateYMD: merged.fecha,
-              startHM: merged.hora,
-              durationMin: merged.duracion_min,
-              cliente: name || "",
-              telefono: phone,
-              servicio: merged.servicio,
-              notas: merged.notas,
-            });
-            eventId = created?.eventId || "";
-          } catch (e) {
-            console.error("❌ Error creando evento en calendar:", e?.response?.data || e?.message || e);
-          }
-        }
-
-        // Guardar en sheet
-        try {
-          const dia = weekdayEsFromYMD(merged.fecha);
-          await appendTurnoRow({
-            fechaYMD: merged.fecha,
-            dia,
-            horaHM: merged.hora,
-            cliente: merged.cliente_full || name || "",
-            telefono: merged.telefono_contacto || phone,
-            servicio: merged.senado ? `${servicioToSave} - SEÑADO` : servicioToSave,
-            duracionMin: merged.duracion_min,
-            calendarEventId: eventId,
-          });
-        } catch (e) {
-          console.error("❌ Error guardando turno en sheet:", e?.response?.data || e?.message || e);
-          await sendWhatsAppText(phone, "Tuve un problema registrando el turno en la planilla. ¿Me confirma fecha, hora y servicio para reintentar?");
-          scheduleInactivityFollowUp(waId, phone);
-          return;
-        }
-
-        pendingTurnos.delete(waId);
-        const diaOk = weekdayEsFromYMD(merged.fecha);
-        const extra = !CALENDAR_ID
-          ? "\n\nQuedó registrado. Si quiere, también le confirmo el turno por acá el mismo día."
-          : "";
-        if (isColorJob) {
-          const senaTag = merged.senado ? "\n\nEstado: *SEÑADO* ✅" : "";
-        const msgPend = `🕒 Solicitud de turno recibida (color/tintura):\n• ${merged.servicio}\n• ${diaOk} ${ymdToDMY(merged.fecha)} ${merged.hora}${senaTag}\n\nQueda en confirmar: reviso con la estilista ${TURNOS_STYLIST_NAME} si puede en ese horario y le aviso por acá.${maybeTurnoInfoBlock(waId)}`.trim();
-          pushHistory(waId, "assistant", msgPend);
-          await sendWhatsAppText(phone, msgPend);
-          scheduleInactivityFollowUp(waId, phone);
-          return;
-        }
-
-        const senaTag2 = merged.senado ? "\n\nEstado: *SEÑADO* ✅" : "";
-      const msgOk = `✅ Turno reservado:\n• ${merged.servicio}\n• ${diaOk} ${ymdToDMY(merged.fecha)} ${merged.hora}${extra}${senaTag2}${maybeTurnoInfoBlock(waId)}`.trim();
-        pushHistory(waId, "assistant", msgOk);
-        await sendWhatsAppText(phone, msgOk);
-        scheduleInactivityFollowUp(waId, phone);
-        return;
+        const result = await finalizeAppointmentFlow({ waId, phone, name, merged: mergedWithPayment });
+        const handled = await respondFinalizeResult(mergedWithPayment, result);
+        if (handled) return;
       }
     }
 
