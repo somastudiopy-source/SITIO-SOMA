@@ -793,9 +793,6 @@ async function createAppointmentRecord({ waId, waPhone, merged, status, calendar
 async function finalizeAppointmentFlow({ waId, phone, merged }) {
   merged.fecha = toYMD(merged.fecha);
   if (!merged?.servicio || !merged?.fecha || !merged?.hora) return { type: "missing_core" };
-  if (!merged?.cliente_full) return { type: "need_name" };
-  if (!merged?.telefono_contacto) return { type: "need_phone" };
-  if (merged.payment_status !== "paid_verified") return { type: "need_payment" };
 
   const busy = await calendarHasConflict({
     dateYMD: merged.fecha,
@@ -803,6 +800,10 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
     durationMin: Number(merged.duracion_min || 60) || 60,
   });
   if (busy) return { type: "busy" };
+
+  if (merged.payment_status !== "paid_verified") return { type: "need_payment" };
+  if (!merged?.cliente_full) return { type: "need_name" };
+  if (!merged?.telefono_contacto) return { type: "need_phone" };
 
   if (isColorOrTinturaService(`${merged.servicio} ${merged.notas || ""}`)) {
     await createAppointmentRecord({
@@ -2082,9 +2083,9 @@ function inferDraftFlowStep(base) {
   if (!base?.servicio) return 'awaiting_service';
   if (!base?.fecha) return 'awaiting_date';
   if (!base?.hora) return 'awaiting_time';
+  if (base?.payment_status !== 'paid_verified') return 'awaiting_payment';
   if (!base?.cliente_full) return 'awaiting_name';
   if (!base?.telefono_contacto) return 'awaiting_phone';
-  if (base?.payment_status !== 'paid_verified') return 'awaiting_payment';
   return 'ready_to_book';
 }
 
@@ -2659,7 +2660,21 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
 
     async function askForPayment(base) {
       await saveAppointmentDraft(waId, phone, { ...base, awaiting_contact: false, flow_step: 'awaiting_payment', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' });
-      const msgPago = buildPaymentPendingMessage();
+      const diaOk = base.fecha ? weekdayEsFromYMD(base.fecha) : '';
+      const lines = [
+        'Horario disponible ✅',
+        '',
+        `Servicio: ${base.servicio}`,
+        `Fecha: ${diaOk ? `${diaOk} ` : ''}${base.fecha ? ymdToDMY(base.fecha) : ''}`.trim(),
+        `Hora: ${base.hora}`,
+        '',
+        `Para confirmar el turno, debe dejar una seña obligatoria de ${TURNOS_SENA_TXT}.`,
+        `Alias para transferir: ${TURNOS_ALIAS}`,
+        `Titular: ${TURNOS_ALIAS_TITULAR}`,
+        '',
+        'Envíe por favor la foto/captura o PDF del comprobante.',
+      ];
+      const msgPago = lines.join('\n').trim();
       pushHistory(waId, "assistant", msgPago);
       await sendWhatsAppText(phone, msgPago);
       scheduleInactivityFollowUp(waId, phone);
@@ -2833,7 +2848,7 @@ Estado: *SEÑA VERIFICADA* ✅`.trim();
 
     if (textAsksForServicesList(text)) {
       const services = await getServicesCatalog();
-      const parts = formatServicesListAll(services, 12);
+      const parts = formatServicesListAll(services, 6);
       for (const part of parts.slice(0, 3)) {
         pushHistory(waId, "assistant", part);
         await sendWhatsAppText(phone, part);
@@ -2848,6 +2863,19 @@ Estado: *SEÑA VERIFICADA* ✅`.trim();
       let priceMatches = findServiceByContext(services, text, ctxService);
 
       if (priceMatches.length) {
+        const selectedService = priceMatches[0];
+        if (selectedService?.nombre) {
+          lastServiceByUser.set(waId, { nombre: selectedService.nombre, ts: Date.now() });
+          if (pendingDraft) {
+            await saveAppointmentDraft(waId, phone, {
+              ...pendingDraft,
+              servicio: pendingDraft.servicio || selectedService.nombre,
+              last_service_name: selectedService.nombre,
+              last_intent: 'service_consultation',
+              flow_step: pendingDraft.flow_step || inferDraftFlowStep({ ...pendingDraft, servicio: pendingDraft.servicio || selectedService.nombre }),
+            });
+          }
+        }
         const replyPrice = formatServicesReply(priceMatches, "DETAIL");
         if (replyPrice) {
           pushHistory(waId, "assistant", replyPrice);
