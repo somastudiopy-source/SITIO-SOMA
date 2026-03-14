@@ -273,7 +273,7 @@ TURNOS:
   - Horarios de turnos: Lunes a Sábados de 10 a 12 hs y de 17 a 20 hs.
   - Para CONFIRMAR TURNO, se requiere seña obligatoria de $10.000. Si no lo abona, no se guardará el turno.
   - Alias para transferir: Cataleya178
-  sale a nombre Monica Pacheco. Luego debe enviar foto/captura del comprobante.
+  sale a nombre Monica Pachecho. Luego debe enviar foto/captura del comprobante.
 
   - Si el cliente pide turno para color/tintura/teñirse/retocar: luego de elegir día y horario, responder que queda en confirmar y que se consulta con la estilista.
   - Al registrar un turno, solicitar nombre completo y teléfono de contacto. Si ya pagó seña, marcar como SEÑADO.
@@ -593,30 +593,82 @@ function detectSenaPaid({ text }) {
   return /(comprobant|transfer|transferi|transferí|señad|seña|pagu|pago|abon|abono|mercado pago|alias|cvu)/i.test(t);
 }
 
+function isLikelyPaymentText(text) {
+  const t = normalize(text || "");
+  return /(transfer|comprobante|mercado pago|mp|cvu|cbu|alias|titular|operacion|operación|seña|senia|pago|abon)/i.test(t);
+}
+
+function sanitizePossiblePhone(raw) {
+  let digits = String(raw || '').replace(/[^\d+]/g, '');
+  if (!digits) return '';
+  const plus = digits.startsWith('+');
+  digits = digits.replace(/[^\d]/g, '');
+  if (digits.startsWith('549')) digits = '54' + digits.slice(3);
+  if (digits.startsWith('0')) digits = digits.replace(/^0+/, '');
+  if (digits.length < 8 || digits.length > 15) return '';
+  return plus ? `+${digits}` : `+${digits}`;
+}
+
 function extractContactInfo(text) {
   const raw = String(text || "").trim();
+  const norm = normalize(raw);
 
-  const mPhone = raw.match(/(\+?\d[\d\s().-]{6,}\d)/);
   let telefono = "";
-  if (mPhone) {
-    telefono = mPhone[1].replace(/[^\d+]/g, "");
-    if (!telefono.startsWith("+")) telefono = `+${telefono}`;
+  if (!isLikelyPaymentText(raw)) {
+    const phoneMatches = raw.match(/(\+?\d[\d\s().-]{6,}\d)/g) || [];
+    for (const cand of phoneMatches) {
+      const cleanPhone = sanitizePossiblePhone(cand);
+      if (cleanPhone) {
+        telefono = cleanPhone;
+        break;
+      }
+    }
+
+    const explicitPhone = raw.match(/(?:telefono|tel|cel|celular|whatsapp|wsp|numero|número)\s*(?:es|:)?\s*(\+?\d[\d\s().-]{6,}\d)/i);
+    if (explicitPhone) {
+      const cleanPhone = sanitizePossiblePhone(explicitPhone[1]);
+      if (cleanPhone) telefono = cleanPhone;
+    }
   }
 
   let nombre = "";
-  const cleaned = raw.replace(/\s+/g, " ").trim();
-  const candidate = cleaned.replace(/^(me llamo|soy|mi nombre es)\s+/i, "").trim();
-  if (candidate && !/\d/.test(candidate) && candidate.split(" ").length >= 2 && candidate.length >= 5) {
-    nombre = candidate;
+  if (!isLikelyPaymentText(raw)) {
+    const explicitName = raw.match(/(?:me llamo|mi nombre es|soy)\s+([A-Za-zÁÉÍÓÚÑáéíóúñ' ]{5,60})/i);
+    if (explicitName) {
+      const cand = explicitName[1].replace(/\s+/g, ' ').trim();
+      if (!/\d/.test(cand) && cand.split(' ').length >= 2) nombre = cand;
+    }
+
+    if (!nombre) {
+      const cleaned = raw.replace(/\s+/g, ' ').trim();
+      const looksLikePureName = (
+        !/\d/.test(cleaned) &&
+        cleaned.split(' ').length >= 2 &&
+        cleaned.length >= 5 &&
+        cleaned.length <= 60 &&
+        !/(quiero|turno|mañana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|servicio|producto|hora|hs|alisado|botox|keratina)/i.test(norm)
+      );
+      if (looksLikePureName) nombre = cleaned;
+    }
   }
 
   return { nombre, telefono };
 }
 
-function mergeContactIntoTurno({ turno, text, waPhone }) {
-  const info = extractContactInfo(text);
+function shouldExtractContactNow(turno, text) {
+  const flow = String(turno?.flow_step || '');
+  if (['awaiting_contact', 'awaiting_name', 'awaiting_phone', 'ready_to_book'].includes(flow)) return true;
+  const raw = String(text || '').trim();
+  if (!raw || isLikelyPaymentText(raw)) return false;
+  if (/(me llamo|mi nombre es|soy|telefono|tel|cel|celular|whatsapp|wsp|numero|número)/i.test(raw)) return true;
+  return false;
+}
 
+function mergeContactIntoTurno({ turno, text, waPhone }) {
   const out = { ...(turno || {}) };
+  if (!shouldExtractContactNow(out, text)) return out;
+
+  const info = extractContactInfo(text);
 
   if (info.nombre && !out.cliente_full) out.cliente_full = info.nombre;
   if (info.telefono) out.telefono_contacto = normalizePhone(info.telefono);
@@ -882,9 +934,9 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
   });
   if (busy) return { type: "busy" };
 
-  if (merged.payment_status !== "paid_verified") return { type: "need_payment" };
   if (!merged?.cliente_full) return { type: "need_name" };
   if (!merged?.telefono_contacto) return { type: "need_phone" };
+  if (merged.payment_status !== "paid_verified") return { type: "need_payment" };
 
   if (isColorOrTinturaService(`${merged.servicio} ${merged.notas || ""}`)) {
     await createAppointmentRecord({
@@ -2307,9 +2359,10 @@ function inferDraftFlowStep(base) {
   if (!base?.servicio) return 'awaiting_service';
   if (!base?.fecha) return 'awaiting_date';
   if (!base?.hora) return 'awaiting_time';
-  if (base?.payment_status !== 'paid_verified') return 'awaiting_payment';
+  if (!base?.cliente_full && !base?.telefono_contacto) return 'awaiting_contact';
   if (!base?.cliente_full) return 'awaiting_name';
   if (!base?.telefono_contacto) return 'awaiting_phone';
+  if (base?.payment_status !== 'paid_verified') return 'awaiting_payment';
   return 'ready_to_book';
 }
 
@@ -2938,8 +2991,9 @@ Servicio: ${servicioTxt}
         return;
       }
 
-      const fechaTxt = ymdToDMY(base.fecha);
-      const msgFalt = `Perfecto 😊
+      if (!base?.hora) {
+        const fechaTxt = ymdToDMY(base.fecha);
+        const msgFalt = `Perfecto 😊
 
 Servicio: ${servicioTxt}
 📅 Día: ${fechaTxt}
@@ -2948,9 +3002,31 @@ Servicio: ${servicioTxt}
 
 • 10:00 a 12:00
 • 17:00 a 20:00`;
-      pushHistory(waId, "assistant", msgFalt);
-      await sendWhatsAppText(phone, msgFalt);
-      scheduleInactivityFollowUp(waId, phone);
+        pushHistory(waId, "assistant", msgFalt);
+        await sendWhatsAppText(phone, msgFalt);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+
+      if (!base?.cliente_full && !base?.telefono_contacto) {
+        await askForContactData(base);
+        return;
+      }
+
+      if (!base?.cliente_full) {
+        await askForName(base);
+        return;
+      }
+
+      if (!base?.telefono_contacto) {
+        await askForPhone(base);
+        return;
+      }
+
+      if (base?.payment_status !== 'paid_verified') {
+        await askForPayment(base);
+        return;
+      }
     }
 
     async function askForContactData(base) {
