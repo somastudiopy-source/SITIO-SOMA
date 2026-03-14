@@ -1867,6 +1867,12 @@ function userAsksForPhoto(text) {
   return /(foto|fotos|imagen|imagenes|mostrame|mandame|enviame|ver)/.test(t);
 }
 
+function userAsksForAllPhotos(text) {
+  const t = normalize(text);
+  if (!userAsksForPhoto(t)) return false;
+  return /(de todo|de todos|de todas|de esas|de esos|de estas|de estos|todos|todas|todas las opciones|todas las que tengas|todas las fotos|todo eso|de todo eso|de los productos|de las opciones|de todo lo que me mostraste|de todo lo que me mostras|de todo lo que me mostro)/.test(t);
+}
+
 function pickModelForText(userText) {
   const t = String(userText || "");
   const long = t.length > 350;
@@ -3339,50 +3345,129 @@ return { text: "", kind: `ignored_${msg.type}` };
 }
 
 // ===================== ENVIAR FOTO DEL PRODUCTO (DESCARGA DRIVE -> SUBE WHATSAPP) =====================
-async function maybeSendProductPhoto(phone, product, userText) {
-  if (!product) return false;
-  if (!userAsksForPhoto(userText)) return false;
+async function sendProductPhotoDirect(phone, product) {
+  if (!product) return { ok: false, reason: 'no_product' };
 
   const driveFileId = extractDriveFileId(product.foto);
-
   if (!driveFileId) {
-    await sendWhatsAppText(
-      phone,
-      "No tengo la foto vinculada correctamente en la columna “Foto del producto”. Si quiere, le paso alternativas o la descripción."
-    );
-    return true;
+    return { ok: false, reason: 'missing_link' };
   }
 
   const tmpPath = path.join(getTmpDir(), `prod-${driveFileId}.jpg`);
 
   try {
     await downloadDriveFileToPath(driveFileId, tmpPath);
+    const mediaId = await uploadMediaToWhatsApp(tmpPath, 'image/jpeg');
 
-    const mediaId = await uploadMediaToWhatsApp(tmpPath, "image/jpeg");
-
-    // ✅ copiar a media para el panel
     try {
       const savedName = `out-${mediaId}.jpg`;
       fs.copyFileSync(tmpPath, path.join(MEDIA_DIR, savedName));
     } catch {}
 
     const caption = [
-      product.nombre || "Producto",
-      product.precio ? `Precio: ${moneyOrConsult(product.precio)}` : "",
-    ].filter(Boolean).join(" | ");
+      product.nombre || 'Producto',
+      product.precio ? `Precio: ${moneyOrConsult(product.precio)}` : '',
+    ].filter(Boolean).join(' | ');
 
     await sendWhatsAppImageById(phone, mediaId, caption);
-    return true;
+    return { ok: true };
   } catch (e) {
-    console.error("❌ Error enviando foto:", e?.response?.data || e?.message || e);
-    await sendWhatsAppText(
-      phone,
-      "No pude enviar la foto en este momento. Revise que la imagen de Drive esté compartida con el service account."
-    );
-    return true;
+    console.error('❌ Error enviando foto:', e?.response?.data || e?.message || e);
+    return { ok: false, reason: 'send_error', error: e };
   } finally {
     try { fs.unlinkSync(tmpPath); } catch {}
   }
+}
+
+function resolveProductsByNames(rows, names = []) {
+  if (!Array.isArray(rows) || !rows.length || !Array.isArray(names) || !names.length) return [];
+  const used = new Set();
+  const out = [];
+
+  for (const rawName of names) {
+    const target = normalizeCatalogSearchText(rawName || '');
+    if (!target) continue;
+
+    const match = rows.find((row) => normalizeCatalogSearchText(row?.nombre || '') === target);
+    if (!match) continue;
+
+    const key = normalizeCatalogSearchText(`${match?.nombre || ''} ${match?.marca || ''}`);
+    if (used.has(key)) continue;
+    used.add(key);
+    out.push(match);
+  }
+
+  return out;
+}
+
+async function maybeSendMultipleProductPhotos(phone, products, userText) {
+  if (!Array.isArray(products) || !products.length) return false;
+  if (!userAsksForPhoto(userText)) return false;
+
+  const unique = [];
+  const seen = new Set();
+  for (const product of products) {
+    const key = normalizeCatalogSearchText(`${product?.nombre || ''} ${product?.marca || ''}`);
+    if (!product?.nombre || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(product);
+  }
+
+  const limited = unique.slice(0, 8);
+  if (!limited.length) return false;
+
+  if (limited.length > 1) {
+    await sendWhatsAppText(phone, 'Le paso las fotos de estas opciones 😊');
+  }
+
+  let sentCount = 0;
+  const missing = [];
+  const failed = [];
+
+  for (const product of limited) {
+    const result = await sendProductPhotoDirect(phone, product);
+    if (result.ok) {
+      sentCount += 1;
+    } else if (result.reason === 'missing_link') {
+      missing.push(product.nombre || 'Producto');
+    } else {
+      failed.push(product.nombre || 'Producto');
+    }
+  }
+
+  if (missing.length) {
+    await sendWhatsAppText(phone, `No tengo la foto vinculada correctamente de: ${missing.join(', ')}.`);
+  }
+
+  if (failed.length && !sentCount) {
+    await sendWhatsAppText(phone, 'No pude enviar las fotos en este momento. Revise que las imágenes de Drive estén compartidas con el service account.');
+  } else if (failed.length) {
+    await sendWhatsAppText(phone, `No pude enviar algunas fotos ahora mismo: ${failed.join(', ')}.`);
+  }
+
+  return sentCount > 0 || missing.length > 0 || failed.length > 0;
+}
+
+async function maybeSendProductPhoto(phone, product, userText) {
+  if (!product) return false;
+  if (!userAsksForPhoto(userText)) return false;
+
+  const result = await sendProductPhotoDirect(phone, product);
+  if (result.ok) return true;
+
+  if (result.reason === 'missing_link') {
+    await sendWhatsAppText(
+      phone,
+      'No tengo la foto vinculada correctamente en la columna “Foto del producto”. Si quiere, le paso alternativas o la descripción.'
+    );
+    return true;
+  }
+
+  await sendWhatsAppText(
+    phone,
+    'No pude enviar la foto en este momento. Revise que la imagen de Drive esté compartida con el service account.'
+  );
+  return true;
 }
 
 app.get("/ping", (req, res) => {
@@ -3492,8 +3577,20 @@ if (interest) dailyLeads.set(phone, { name, interest });
 const ctx0 = lastCloseContext.get(waId);
 if (ctx0) ctx0.interest = interest || ctx0.interest;
 
-    // Si piden foto sin decir cuál: usar último producto
+    // Si piden foto sin decir cuál: usar el último producto o las últimas opciones listadas
     if (userAsksForPhoto(text)) {
+      const stockForPhotos = await getStockCatalog();
+      const lastCtxForPhotos = getLastProductContext(waId);
+
+      if (userAsksForAllPhotos(text) && lastCtxForPhotos?.lastOptions?.length) {
+        const optionProducts = resolveProductsByNames(stockForPhotos, lastCtxForPhotos.lastOptions);
+        const sentAll = await maybeSendMultipleProductPhotos(phone, optionProducts, text);
+        if (sentAll) {
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
+      }
+
       const last = lastProductByUser.get(waId);
       if (last) {
         const sent = await maybeSendProductPhoto(phone, last, text);
@@ -4251,14 +4348,24 @@ Seña recibida ✔`.trim();
 
       if (productMode === 'LIST') {
         if (related.length) {
+          const relatedSlice = related.slice(0, 12);
           setLastProductContext(waId, {
             family: resolvedFamily || detectProductFamily(resolvedQuery) || '',
             hairType: resolvedHairType || '',
             need: resolvedNeed || '',
             useType: resolvedUseType || '',
             mode: 'list',
-            lastOptions: related.slice(0, 12).map((x) => x.nombre),
+            lastOptions: relatedSlice.map((x) => x.nombre),
           });
+
+          if (userAsksForAllPhotos(text)) {
+            const sentAll = await maybeSendMultipleProductPhotos(phone, relatedSlice, text);
+            if (sentAll) {
+              scheduleInactivityFollowUp(waId, phone);
+              return;
+            }
+          }
+
           const parts = formatStockRelatedListAll(related, {
             familyLabel: resolvedFamily || detectProductFamily(resolvedQuery),
             chunkSize: 8,
@@ -4294,6 +4401,14 @@ Seña recibida ✔`.trim();
           });
         }
 
+        if (userAsksForAllPhotos(text) && matches.length > 1) {
+          const sentAll = await maybeSendMultipleProductPhotos(phone, matches, text);
+          if (sentAll) {
+            scheduleInactivityFollowUp(waId, phone);
+            return;
+          }
+        }
+
         if ((productAI?.wants_photo || userAsksForPhoto(text)) && matches.length === 1) {
           const sent = await maybeSendProductPhoto(phone, matches[0], text);
           if (sent) {
@@ -4312,14 +4427,24 @@ Seña recibida ✔`.trim();
       }
 
       if (broader.length) {
+        const broaderSlice = broader.slice(0, 12);
         setLastProductContext(waId, {
           family: resolvedFamily || detectProductFamily(resolvedQuery) || '',
           hairType: resolvedHairType || '',
           need: resolvedNeed || '',
           useType: resolvedUseType || '',
           mode: 'list',
-          lastOptions: broader.slice(0, 12).map((x) => x.nombre),
+          lastOptions: broaderSlice.map((x) => x.nombre),
         });
+
+        if (userAsksForAllPhotos(text)) {
+          const sentAll = await maybeSendMultipleProductPhotos(phone, broaderSlice, text);
+          if (sentAll) {
+            scheduleInactivityFollowUp(waId, phone);
+            return;
+          }
+        }
+
         const parts = formatStockRelatedListAll(broader, {
           familyLabel: resolvedFamily || detectProductFamily(resolvedQuery),
           chunkSize: 8,
