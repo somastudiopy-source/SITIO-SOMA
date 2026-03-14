@@ -468,7 +468,7 @@ const TURNOS_TAB = process.env.TURNOS_TAB || "TURNOS";
 
 // Calendar ID (compartir el calendario con el service account)
 // Si no se configura, igual se anota en la planilla.
-const CALENDAR_ID = process.env.CALENDAR_ID || process.env.GCALENDAR_ID || process.env.GOOGLE_CALENDAR_ID || process.env.GOOGLE_CALENDAR || process.env.CATALEYA_CALENDAR_ID || "";
+const CALENDAR_ID = process.env.CALENDAR_ID || process.env.GCALENDAR_ID || "";
 
 const TURNOS_HEADERS = [
   "FECHA",
@@ -494,22 +494,16 @@ const TURNOS_ALIAS_TITULAR = "Monica Pachecho";
 
 function turnoInfoBlock() {
   return (
-`✨ Información para turnos
+`ℹ️ Información para turnos:
 
-💇‍♀️ Estilista: ${TURNOS_STYLIST_NAME}
-📅 Horarios: ${TURNOS_HORARIOS_TXT}
+Estilista ${TURNOS_STYLIST_NAME} 💇‍♀️
+- Horarios disponibles para turnos: de ${TURNOS_HORARIOS_TXT}.
 
-Para confirmar el turno se solicita una seña obligatoria de ${TURNOS_SENA_TXT}.
+📆 Para CONFIRMAR TURNO, debe dejar *una seña obligatoria de ${TURNOS_SENA_TXT} PESOS. Si no lo abona, no se guardará el turno*.
 
-💳 Datos para la transferencia
-
-Alias:
-${TURNOS_ALIAS}
-
-Titular:
-${TURNOS_ALIAS_TITULAR}
-
-Cuando la realice, envíe por favor la foto o captura del comprobante 📩`
+Alias para transferir: ${TURNOS_ALIAS}
+A nombre ${TURNOS_ALIAS_TITULAR}.
+*Debe enviar foto/captura del comprobante por favor*`
   );
 }
 
@@ -517,11 +511,11 @@ function pedirDatosRegistroTurnoBlock() {
   return (
 `
 
-Para dejar el turno listo, envíe por favor:
-• Nombre completo
+Para registrar el turno, por favor envíe:
+• Nombre completo (nombre y apellido)
 • Número de teléfono de contacto
 
-Si ya realizó la transferencia, puede enviar la captura del comprobante y lo dejo como *SEÑADO* ✅`
+Si ya realizó la transferencia, envíe la captura del comprobante y lo dejo como *SEÑADO* ✅`
   );
 }
 
@@ -709,17 +703,12 @@ async function deleteAppointmentDraft(waId) {
 }
 
 function buildPaymentPendingMessage() {
-  return `Para confirmar el turno se solicita una seña de ${TURNOS_SENA_TXT}.
+  return `Para confirmar el turno, debe dejar una seña obligatoria de ${TURNOS_SENA_TXT}.
 
-💳 Datos para la transferencia
+Alias para transferir: ${TURNOS_ALIAS}
+A nombre de ${TURNOS_ALIAS_TITULAR}.
 
-Alias:
-${TURNOS_ALIAS}
-
-Titular:
-${TURNOS_ALIAS_TITULAR}.
-
-Cuando la realice, envíe por favor la foto, captura o PDF del comprobante 📩`;
+Envíe por favor la foto/captura o PDF del comprobante.`;
 }
 
 function detectMonto10000(text) {
@@ -837,23 +826,6 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
     servicio: merged.servicio || "",
     notas: merged.notas || "",
   });
-
-  try {
-    if (TURNOS_SHEET_ID) {
-      await appendTurnoRow({
-        fechaYMD: merged.fecha,
-        dia: weekdayEsFromYMD(merged.fecha),
-        horaHM: merged.hora,
-        cliente: merged.cliente_full || "",
-        telefono: normalizePhone(merged.telefono_contacto || ""),
-        servicio: merged.servicio || "",
-        duracionMin: Number(merged.duracion_min || 60) || 60,
-        calendarEventId: ev?.eventId || "",
-      });
-    }
-  } catch (e) {
-    console.error("Error guardando turno en planilla:", e?.response?.data || e?.message || e);
-  }
 
   await createAppointmentRecord({
     waId,
@@ -1043,10 +1015,7 @@ async function calendarHasConflict({ dateYMD, startHM, durationMin }) {
 }
 
 async function createCalendarTurno({ dateYMD, startHM, durationMin, cliente, telefono, servicio, notas }) {
-  if (!CALENDAR_ID) {
-    console.warn("CALENDAR_ID no configurado. Se omite alta en Google Calendar.");
-    return { eventId: "", skipped: true };
-  }
+  if (!CALENDAR_ID) return { eventId: "", skipped: true };
 
   const cal = await getCalendarClient();
   const startLocal = { ymd: dateYMD, hm: startHM };
@@ -1057,7 +1026,6 @@ async function createCalendarTurno({ dateYMD, startHM, durationMin, cliente, tel
     telefono ? `Tel: ${normalizePhone(telefono)}` : "",
     servicio ? `Servicio: ${servicio}` : "",
     notas ? `Notas: ${notas}` : "",
-    `Seña registrada: ${TURNOS_SENA_TXT}`,
   ].filter(Boolean).join("\n");
 
   const event = {
@@ -1067,19 +1035,15 @@ async function createCalendarTurno({ dateYMD, startHM, durationMin, cliente, tel
     end: { dateTime: `${endLocal.ymd}T${endLocal.hm}:00`, timeZone: TIMEZONE },
   };
 
-  try {
-    const inserted = await cal.events.insert({
-      calendarId: CALENDAR_ID,
-      requestBody: event,
-    });
-    return { eventId: inserted?.data?.id || "", skipped: false };
-  } catch (e) {
-    console.error("Error creando evento en Google Calendar:", e?.response?.data || e?.message || e);
-    throw e;
-  }
+  const inserted = await cal.events.insert({
+    calendarId: CALENDAR_ID,
+    requestBody: event,
+  });
+
+  return { eventId: inserted?.data?.id || "", skipped: false };
 }
 
-// ===================== FECHAS =====================// ===================== FECHAS =====================
+// ===================== FECHAS =====================
 function nowARString() {
   return new Date().toLocaleString("es-AR", { timeZone: TIMEZONE });
 }
@@ -2008,28 +1972,14 @@ function formatServicesReply(matches, mode) {
   if (!matches.length) return null;
   const limited = mode === "LIST" ? matches.slice(0, 10) : matches.slice(0, 3);
 
-  if (mode !== "LIST" && limited.length === 1) {
-    const svc = limited[0];
-    const lines = [
-      `✨ ${svc.nombre}`,
-      `💲 Precio: ${moneyOrConsult(svc.precio)}`,
-    ];
-    if (svc.duracion) lines.push(`⏱️ Duración: ${svc.duracion}`);
-    if (svc.observaciones) lines.push(`${svc.observaciones}`);
-    lines.push("", "Si desea, también puedo ayudarle a sacar turno 😊");
-    return lines.join("\n").trim();
-  }
-
-  const lines = limited.map(svc => {
-    const priceTxt = moneyOrConsult(svc.precio);
-    const durTxt = svc.duracion ? ` — ${svc.duracion}` : "";
-    return `• ${svc.nombre} — *${priceTxt}*${durTxt}`;
+  const lines = limited.map(s => {
+    const priceTxt = moneyOrConsult(s.precio);
+    const durTxt = s.duracion ? ` | ${s.duracion}` : "";
+    return `• ${s.nombre}: *${priceTxt}*${durTxt}`;
   });
 
-  const header = mode === "LIST" ? "✨ Servicios disponibles:" : "✨ Opciones encontradas:";
-  return `${header}
-
-${lines.join("\n")}`.trim();
+  const header = mode === "LIST" ? `Servicios:` : `Precio del servicio:`;
+  return `${header}\n${lines.join("\n")}`.trim();
 }
 
 function textAsksForServicesList(text) {
@@ -2045,17 +1995,16 @@ function textAsksForServicePrice(text) {
 function formatServicesListAll(rows, chunkSize = 12) {
   const items = Array.isArray(rows) ? rows.filter(r => r?.nombre) : [];
   if (!items.length) return [];
-
   const chunks = [];
   for (let i = 0; i < items.length; i += chunkSize) {
     const part = items.slice(i, i + chunkSize);
-    const lines = part.map(svc => {
-      const priceTxt = svc.precio ? moneyOrConsult(svc.precio) : "consultar";
-      return `• ${svc.nombre} — *${priceTxt}*`;
+    const lines = part.map(s => {
+      const priceTxt = s.precio ? moneyOrConsult(s.precio) : "consultar";
+      const durTxt = s.duracion ? ` | ${s.duracion}` : "";
+      return `• ${s.nombre}: *${priceTxt}*${durTxt}`;
     });
-    const header = i === 0 ? "✨ Servicios disponibles:" : "✨ Más servicios:";
-    const footer = i === 0 ? "\n\nSi quiere, le paso más opciones o le ayudo con un turno 😊" : "";
-    chunks.push(`${header}\n\n${lines.join("\n")}${footer}`.trim());
+    const header = i === 0 ? "Servicios disponibles:" : "Más servicios:";
+    chunks.push(`${header}\n${lines.join("\n")}`.trim());
   }
   return chunks;
 }
@@ -2692,9 +2641,7 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
     async function askForName(base) {
       const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_name', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
-      const msgSoloNombre = `Perfecto 😊
-
-Para continuar, envíe por favor:
+      const msgSoloNombre = `Para registrar el turno, por favor envíe:
 • Nombre completo (nombre y apellido)`;
       pushHistory(waId, "assistant", msgSoloNombre);
       await sendWhatsAppText(phone, msgSoloNombre);
@@ -2704,9 +2651,7 @@ Para continuar, envíe por favor:
     async function askForPhone(base) {
       const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_phone', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
-      const msgTelefono = `Gracias 😊
-
-Ahora envíe por favor:
+      const msgTelefono = `Perfecto. Ahora envíe por favor:
 • Número de teléfono de contacto`;
       pushHistory(waId, "assistant", msgTelefono);
       await sendWhatsAppText(phone, msgTelefono);
@@ -2717,23 +2662,17 @@ Ahora envíe por favor:
       await saveAppointmentDraft(waId, phone, { ...base, awaiting_contact: false, flow_step: 'awaiting_payment', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' });
       const diaOk = base.fecha ? weekdayEsFromYMD(base.fecha) : '';
       const lines = [
-        '✨ El horario está disponible',
+        'Horario disponible ✅',
         '',
         `Servicio: ${base.servicio}`,
         `Fecha: ${diaOk ? `${diaOk} ` : ''}${base.fecha ? ymdToDMY(base.fecha) : ''}`.trim(),
         `Hora: ${base.hora}`,
         '',
-        `Para confirmar el turno se solicita una seña de ${TURNOS_SENA_TXT}.`,
+        `Para confirmar el turno, debe dejar una seña obligatoria de ${TURNOS_SENA_TXT}.`,
+        `Alias para transferir: ${TURNOS_ALIAS}`,
+        `Titular: ${TURNOS_ALIAS_TITULAR}`,
         '',
-        '💳 Datos para la transferencia',
-        '',
-        'Alias:',
-        `${TURNOS_ALIAS}`,
-        '',
-        'Titular:',
-        `${TURNOS_ALIAS_TITULAR}`,
-        '',
-        'Cuando la realice, envíe por favor la foto, captura o PDF del comprobante 📩',
+        'Envíe por favor la foto/captura o PDF del comprobante.',
       ];
       const msgPago = lines.join('\n').trim();
       pushHistory(waId, "assistant", msgPago);
@@ -2744,11 +2683,7 @@ Ahora envíe por favor:
     async function respondFinalizeResult(base, result) {
       if (result.type === "busy") {
         const diaC = weekdayEsFromYMD(base.fecha);
-        const msgBusy = `Ese horario ya está ocupado 😔
-
-(${diaC} ${ymdToDMY(base.fecha)} ${base.hora})
-
-Si quiere, le ayudo a elegir otro horario 😊`;
+        const msgBusy = `Ese horario ya está ocupado (${diaC} ${ymdToDMY(base.fecha)} ${base.hora}). ¿Le sirve otro horario?`;
         pushHistory(waId, "assistant", msgBusy);
         await sendWhatsAppText(phone, msgBusy);
         scheduleInactivityFollowUp(waId, phone);
@@ -2764,9 +2699,7 @@ Si quiere, le ayudo a elegir otro horario 😊`;
       }
       if (result.type === "need_payment") {
         if (base.payment_status === 'payment_review' && (base.payment_proof_media_id || base.payment_proof_text)) {
-          const msgRev = `Recibí el comprobante 😊
-
-Estoy validándolo con los datos del turno. Si todo coincide, le confirmo la reserva enseguida.
+          const msgRev = `Recibí el comprobante. Estoy validándolo con los datos del turno. Si todo coincide, le confirmo la reserva enseguida.
 
 Si quiere agilizarlo, también puede escribir el monto y el nombre del titular que figura en el comprobante.`;
           await saveAppointmentDraft(waId, phone, { ...base, awaiting_contact: false, flow_step: 'payment_review', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' });
@@ -2784,15 +2717,13 @@ Si quiere agilizarlo, también puede escribir el monto y el nombre del titular q
       }
       if (result.type === "pending_stylist_confirmation") {
         const diaOk = weekdayEsFromYMD(base.fecha);
-        const msgPend = `✨ Solicitud de turno recibida
-
-Servicio: ${base.servicio}
-Fecha: ${diaOk} ${ymdToDMY(base.fecha)}
-Hora: ${base.hora}
+        const msgPend = `🕒 Solicitud de turno recibida (color/tintura):
+• ${base.servicio}
+• ${diaOk} ${ymdToDMY(base.fecha)} ${base.hora}
 
 Seña verificada: *Sí* ✅
 
-Como es un servicio de color, lo reviso con la estilista ${TURNOS_STYLIST_NAME} y le aviso por acá apenas me confirme 😊`.trim();
+Queda en confirmar: reviso con la estilista ${TURNOS_STYLIST_NAME} si puede en ese horario y le aviso por acá.`.trim();
         pushHistory(waId, "assistant", msgPend);
         await sendWhatsAppText(phone, msgPend);
         scheduleInactivityFollowUp(waId, phone);
@@ -2800,15 +2731,11 @@ Como es un servicio de color, lo reviso con la estilista ${TURNOS_STYLIST_NAME} 
       }
       if (result.type === "booked") {
         const diaOk = weekdayEsFromYMD(base.fecha);
-        const msgOk = `✅ Turno reservado
+        const msgOk = `✅ Turno reservado:
+• ${base.servicio}
+• ${diaOk} ${ymdToDMY(base.fecha)} ${base.hora}
 
-Servicio: ${base.servicio}
-Fecha: ${diaOk} ${ymdToDMY(base.fecha)}
-Hora: ${base.hora}
-
-Estado: *SEÑA VERIFICADA* ✅
-
-¡Gracias! La esperamos 💖`.trim();
+Estado: *SEÑA VERIFICADA* ✅`.trim();
         pushHistory(waId, "assistant", msgOk);
         await sendWhatsAppText(phone, msgOk);
         scheduleInactivityFollowUp(waId, phone);
