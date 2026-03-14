@@ -2810,10 +2810,14 @@ function formatServicesReply(matches, mode, opts = {}) {
     }
 
     const footer = options.showDuration || options.showDescription
-      ? `\n\nSi quiere, también puedo ayudarle a sacar un turno 😊`
-      : `\n\nSi quiere, también le digo cuánto demora o le ayudo a sacar un turno 😊`;
+      ? `
 
-    return `${parts.join("\\n")}${footer}`.trim();
+Si quiere, también puedo ayudarle a sacar un turno 😊`
+      : `
+
+Si quiere, también le digo cuánto demora o le ayudo a sacar un turno 😊`;
+
+    return `${parts.join("\n")}${footer}`.trim();
   }
 
   const blocks = limited.map((s) => {
@@ -2821,10 +2825,10 @@ function formatServicesReply(matches, mode, opts = {}) {
     return [
       `✨ *${s.nombre}*`,
       `• Precio: *${priceTxt}*`,
-    ].join("\\n");
+    ].join("\n");
   });
 
-  return `✨ Estos son algunos servicios disponibles:\\n\\n${blocks.join("\\n\\n— — —\\n\\n")}\\n\\nSi quiere, también le digo cuánto demora cada uno 😊`.trim();
+  return `✨ Estos son algunos servicios disponibles:\n\n${blocks.join("\n\n— — —\n\n")}\n\nSi quiere, también le digo cuánto demora cada uno 😊`.trim();
 }
 
 function textAsksForServicesList(text) {
@@ -2854,15 +2858,19 @@ function formatServicesListAll(rows, chunkSize = 6) {
       return [
         `✨ *${s.nombre}*`,
         `• Precio: *${priceTxt}*`,
-      ].join("\\n");
+      ].join("\n");
     });
 
     const header = i === 0 ? "✨ Servicios disponibles:" : "✨ Más servicios:";
     const footer = (i + chunkSize) >= items.length
-      ? `\n\nSi quiere, también le digo cuánto demora cada uno 😊`
-      : `\n\n(Sigo con más servicios…)`;
+      ? `
 
-    chunks.push(`${header}\\n\\n${blocks.join("\\n\\n— — —\\n\\n")}${footer}`.trim());
+Si quiere, también le digo cuánto demora cada uno 😊`
+      : `
+
+(Sigo con más servicios…)`;
+
+    chunks.push(`${header}\n\n${blocks.join("\n\n— — —\n\n")}${footer}`.trim());
   }
   return chunks;
 }
