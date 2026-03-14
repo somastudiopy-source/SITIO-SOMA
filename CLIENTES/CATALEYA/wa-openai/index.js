@@ -390,6 +390,41 @@ function scheduleInactivityFollowUp(waId, phone) {
 
 // Último producto por usuario (para “mandame foto” sin repetir nombre)
 const lastProductByUser = new Map();
+// ✅ Contexto de producto por usuario (para continuar la charla de forma fluida)
+const lastProductContextByUser = new Map();
+const PRODUCT_CONTEXT_TTL_MS = Number(process.env.PRODUCT_CONTEXT_TTL_MS || 45 * 60 * 1000);
+
+function getLastProductContext(waId) {
+  const ctx = lastProductContextByUser.get(waId);
+  if (!ctx) return null;
+  if ((Date.now() - (ctx.ts || 0)) > PRODUCT_CONTEXT_TTL_MS) {
+    lastProductContextByUser.delete(waId);
+    return null;
+  }
+  return ctx;
+}
+
+function setLastProductContext(waId, patch = {}) {
+  if (!waId) return null;
+  const prev = getLastProductContext(waId) || {};
+  const next = {
+    ...prev,
+    ...patch,
+    ts: Date.now(),
+  };
+  lastProductContextByUser.set(waId, next);
+  return next;
+}
+
+function clearLastProductContext(waId) {
+  lastProductContextByUser.delete(waId);
+}
+
+function looksLikeProductPreferenceReply(text) {
+  const t = normalize(text || '');
+  if (!t) return false;
+  return /(cabello|pelo|rulos|rizado|lacio|liso|rubio|decolorado|canas|canoso|seco|graso|fino|grueso|quebradizo|dañado|danado|frizz|hidrata|hidratar|hidratacion|hidratación|reparar|reparacion|reparación|alisar|alisado|matizar|antiamarillo|violeta|uso personal|para trabajar|profesional|personal|me conviene|cual me recomendas|cuál me recomendás|recomendame|recomendáme|quiero opciones|que me recomendas|qué me recomendás)/i.test(t);
+}
 // ✅ Último servicio consultado por usuario (para no repetir pregunta en turnos)
 const lastServiceByUser = new Map();
 // ===================== ✅ ANTI-SPAM (evita repetir el mismo texto) =====================
@@ -2328,7 +2363,7 @@ async function extractProductIntentWithAI(text, context = {}) {
         {
           role: 'system',
           content:
-`Analizá si el cliente está consultando PRODUCTOS del catálogo (stock, precios, opciones o fotos).
+`Analizá si el cliente está consultando PRODUCTOS del catálogo (stock, precios, opciones, fotos o recomendación).
 Devolvé SOLO JSON con estas claves:
 - is_product_query: boolean
 - family: string (una de estas o vacío: shampoo, acondicionador, baño de crema, tratamiento, serum, aceite, tintura, oxidante, decolorante, matizador, keratina, protector, spray, gel, cera, botox, alisado, secador, plancha, otro)
@@ -2337,12 +2372,17 @@ Devolvé SOLO JSON con estas claves:
 - wants_all_related: boolean
 - wants_photo: boolean
 - wants_price: boolean
+- wants_recommendation: boolean
 - hair_type: string
 - need: string
+- use_type: string (personal, profesional o vacío)
+
 Reglas:
 - Si pregunta genéricamente por una familia de productos, wants_all_related=true.
 - Si pide stock, precios, lista, catálogo, opciones o qué hay de una familia, is_product_query=true.
 - Si pide foto o precio de un producto puntual, specific_name debe contener ese producto.
+- Si el mensaje trae un tipo de cabello, una necesidad o dice “cuál me conviene”, wants_recommendation=true.
+- Si existe familia_actual y el cliente responde solo con datos como “tengo el pelo seco”, “es para trabajar”, “quiero algo anti frizz”, seguí la continuidad y marcá is_product_query=true.
 - Si parece servicio/turno y no producto, is_product_query=false.
 - No inventes nombres de productos.`,
         },
@@ -2352,6 +2392,10 @@ Reglas:
             mensaje: raw,
             ultimo_producto: context.lastProductName || '',
             ultimo_servicio: context.lastServiceName || '',
+            familia_actual: context.lastFamily || '',
+            cabello_actual: context.lastHairType || '',
+            necesidad_actual: context.lastNeed || '',
+            uso_actual: context.lastUseType || '',
           }),
         },
       ],
@@ -2367,12 +2411,200 @@ Reglas:
       wants_all_related: !!obj.wants_all_related,
       wants_photo: !!obj.wants_photo,
       wants_price: !!obj.wants_price,
+      wants_recommendation: !!obj.wants_recommendation,
       hair_type: String(obj.hair_type || '').trim(),
       need: String(obj.need || '').trim(),
+      use_type: String(obj.use_type || '').trim(),
     };
   } catch {
     return null;
   }
+}
+
+function compactProductDescription(desc, maxLen = 260) {
+  const clean = String(desc || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return '';
+  if (clean.length <= maxLen) return clean;
+  return `${clean.slice(0, maxLen - 1).trim()}…`;
+}
+
+function normalizeUseType(value) {
+  const t = normalize(value || '');
+  if (!t) return '';
+  if (/profes|trabaj/.test(t)) return 'profesional';
+  if (/personal|casa|hogar/.test(t)) return 'personal';
+  return '';
+}
+
+function deriveProductTags(row) {
+  const bag = normalizeCatalogSearchText(`${row?.nombre || ''} ${row?.categoria || ''} ${row?.marca || ''} ${row?.descripcion || ''}`);
+  const tags = [];
+  const checks = [
+    ['rubio', /(rubio|platin|decolorad|canas|canoso|gris)/],
+    ['anti frizz', /(frizz|anti frizz|encresp)/],
+    ['hidratación', /(hidrata|hidratacion|hidratación|nutric)/],
+    ['reparación', /(repar|dañado|danado|quebrad|elasticidad)/],
+    ['rulos', /(rulos|ondas|riz)/],
+    ['alisado', /(alisad|liso|keratina|plastificado|laminado|botox)/],
+    ['color', /(color|tintura|oxidante|decolorante|matizador|reflejos|canas)/],
+    ['barbería', /(barba|afeitad|barber|shaving|after shave)/],
+    ['profesional', /(uso profesional|profesional|salon|salón)/],
+    ['personal', /(uso personal|personal|hogar|casa)/],
+  ];
+  for (const [label, rx] of checks) {
+    if (rx.test(bag)) tags.push(label);
+  }
+  return tags;
+}
+
+function buildProductAICandidate(row) {
+  return {
+    nombre: row.nombre,
+    categoria: row.categoria || '',
+    marca: row.marca || '',
+    precio: row.precio || '',
+    descripcion: compactProductDescription(row.descripcion || ''),
+    tags: deriveProductTags(row),
+  };
+}
+
+function scoreProductCandidate(row, { query = '', family = '', hairType = '', need = '', useType = '' } = {}) {
+  const hay = buildStockHaystack(row);
+  let score = 0;
+
+  if (query) {
+    score += Math.max(
+      scoreField(query, row.nombre) * 1.2,
+      scoreField(query, row.categoria) * 0.92,
+      scoreField(query, row.descripcion) * 0.78,
+      scoreField(query, row.marca) * 0.55
+    );
+  }
+
+  const aliases = getProductFamilyAliases(family);
+  for (const alias of aliases) {
+    if (containsCatalogPhrase(hay, alias)) score += 3.2;
+  }
+
+  const hair = normalizeCatalogSearchText(hairType);
+  if (hair) {
+    const hairTokens = tokenize(hair, { expandSynonyms: true });
+    for (const tok of hairTokens) {
+      if (tok.length >= 3 && hay.includes(tok)) score += 1.15;
+    }
+  }
+
+  const needNorm = normalizeCatalogSearchText(need);
+  if (needNorm) {
+    const needTokens = tokenize(needNorm, { expandSynonyms: true });
+    for (const tok of needTokens) {
+      if (tok.length >= 3 && hay.includes(tok)) score += 1.35;
+    }
+  }
+
+  const useNorm = normalizeUseType(useType);
+  if (useNorm === 'profesional' && /(profesional|salon|salón|barber)/i.test(hay)) score += 1.1;
+  if (useNorm === 'personal' && /(personal|hogar|casa)/i.test(hay)) score += 0.9;
+
+  return score;
+}
+
+function shortlistProductsForRecommendation(rows, criteria = {}) {
+  const items = Array.isArray(rows) ? rows.filter((r) => r?.nombre) : [];
+  if (!items.length) return [];
+
+  const scored = items
+    .map((row) => ({ row, score: scoreProductCandidate(row, criteria) }))
+    .filter((x) => x.score > 0.15 || !criteria.family);
+
+  scored.sort((a, b) => b.score - a.score);
+
+  const out = [];
+  const seen = new Set();
+  for (const item of scored) {
+    const key = normalizeCatalogSearchText(`${item.row?.nombre || ''} ${item.row?.marca || ''}`);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item.row);
+    if (out.length >= (criteria.limit || 10)) break;
+  }
+
+  return out.length ? out : items.slice(0, criteria.limit || 10);
+}
+
+async function recommendProductsWithAI({ text, familyLabel = '', hairType = '', need = '', useType = '', products = [] } = {}) {
+  const candidates = Array.isArray(products) ? products.filter((p) => p?.nombre).slice(0, 10).map(buildProductAICandidate) : [];
+  if (!candidates.length) return null;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Sos un asistente de peluquería que recomienda productos SOLO entre las opciones enviadas.
+Tu trabajo:
+- Elegir hasta 4 productos que mejor encajen.
+- Priorizar coincidencia con tipo de cabello, necesidad y uso personal/profesional.
+- No inventar productos ni cambiar nombres.
+- Si la consulta es amplia y faltan datos, igual podés proponer 2 a 4 opciones razonables y una pregunta de seguimiento.
+
+Respondé SOLO JSON con:
+- intro: string
+- recommended_names: string[] (hasta 4 nombres exactos)
+- follow_up: string
+- rationale: string (breve, 1 oración)`,
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje_cliente: text || '',
+            familia: familyLabel || '',
+            tipo_cabello: hairType || '',
+            necesidad: need || '',
+            uso: useType || '',
+            opciones: candidates,
+          }),
+        },
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    return {
+      intro: String(obj.intro || '').trim(),
+      recommended_names: Array.isArray(obj.recommended_names) ? obj.recommended_names.map((x) => String(x || '').trim()).filter(Boolean) : [],
+      follow_up: String(obj.follow_up || '').trim(),
+      rationale: String(obj.rationale || '').trim(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formatRecommendedProductsReply(aiPayload, rows, { familyLabel = '', hairType = '', need = '', useType = '' } = {}) {
+  const items = Array.isArray(rows) ? rows.filter((r) => r?.nombre).slice(0, 4) : [];
+  if (!items.length) return null;
+
+  const readableFamily = familyLabel ? getProductFamilyLabel(familyLabel) : '';
+  const intro = aiPayload?.intro
+    ? aiPayload.intro
+    : readableFamily
+      ? `Según lo que me dice, estas opciones de *${readableFamily}* le pueden servir:`
+      : `Según lo que me dice, estas opciones le pueden servir:`;
+
+  const rationale = aiPayload?.rationale ? `\n${aiPayload.rationale}` : '';
+  const lines = items.map((p) => {
+    const precio = moneyOrConsult(p.precio);
+    const desc = compactProductDescription(p.descripcion || '', 170);
+    return `✨ *${p.nombre}*\n• Precio: *${precio}*${desc ? `\n• ${desc}` : ''}`;
+  });
+
+  const followUp = aiPayload?.follow_up
+    || `Cuénteme un poquito más: ¿es para uso personal o para trabajar? ¿Qué tipo de cabello tiene y qué busca lograr?`;
+
+  return `${intro}${rationale}\n\n${lines.join("\n\n— — —\n\n")}\n\n${followUp}`.trim();
 }
 
 function detectFemaleContext(text) {
@@ -3850,17 +4082,26 @@ Seña recibida ✔`.trim();
       historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1600),
     });
 
-    const productAI = (intent.type === 'PRODUCT' || intent.type === 'OTHER' || isExplicitProductIntent(text))
+    const lastProductCtx = getLastProductContext(waId);
+
+    const productAI = (intent.type === 'PRODUCT' || intent.type === 'OTHER' || isExplicitProductIntent(text) || !!lastProductCtx)
       ? await extractProductIntentWithAI(text, {
           lastProductName: lastProductByUser.get(waId)?.nombre || '',
           lastServiceName: lastKnownService?.nombre || '',
+          lastFamily: lastProductCtx?.family || '',
+          lastHairType: lastProductCtx?.hairType || '',
+          lastNeed: lastProductCtx?.need || '',
+          lastUseType: lastProductCtx?.useType || '',
         })
       : null;
 
     const shouldTreatAsProduct = intent.type === 'PRODUCT' || (
       intent.type !== 'SERVICE' &&
       intent.type !== 'COURSE' &&
-      !!productAI?.is_product_query
+      (
+        !!productAI?.is_product_query ||
+        (!!lastProductCtx && looksLikeProductPreferenceReply(text))
+      )
     );
 
     // ✅ actualizar tipo de intención para el seguimiento
@@ -3901,7 +4142,10 @@ Seña recibida ✔`.trim();
       const aiFamily = productAI?.family || '';
       const aiSearchText = productAI?.specific_name || productAI?.search_text || '';
       const resolvedQuery = aiSearchText || intent.query || guessQueryFromText(text) || text;
-      const resolvedFamily = aiFamily || detectProductFamily(resolvedQuery) || detectProductFamily(text);
+      const resolvedFamily = aiFamily || detectProductFamily(resolvedQuery) || detectProductFamily(text) || lastProductCtx?.family || '';
+      const resolvedHairType = productAI?.hair_type || lastProductCtx?.hairType || '';
+      const resolvedNeed = productAI?.need || lastProductCtx?.need || '';
+      const resolvedUseType = normalizeUseType(productAI?.use_type || lastProductCtx?.useType || '');
       const productMode = (
         intent.mode === 'LIST' ||
         !!productAI?.wants_all_related ||
@@ -3917,6 +4161,13 @@ Seña recibida ✔`.trim();
 
       if (wantsAll) {
         const parts = formatStockListAll(stock, 12);
+        setLastProductContext(waId, {
+          family: resolvedFamily || '',
+          hairType: resolvedHairType || '',
+          need: resolvedNeed || '',
+          useType: resolvedUseType || '',
+          mode: 'list_all',
+        });
         for (const part of parts) {
           pushHistory(waId, 'assistant', part);
           await sendWhatsAppText(phone, part);
@@ -3925,9 +4176,89 @@ Seña recibida ✔`.trim();
         return;
       }
 
+      const related = findStockRelated(stock, resolvedQuery, { family: resolvedFamily, limit: 200 });
+      const broader = related.length ? related : findStockRelated(stock, text, { family: resolvedFamily, limit: 200 });
+      const detailQuery = productAI?.specific_name || intent.query || guessQueryFromText(text);
+      const matches = detailQuery ? findStock(stock, detailQuery, 'DETAIL') : [];
+      const wantsRecommendation = !!(
+        productAI?.wants_recommendation ||
+        resolvedHairType ||
+        resolvedNeed ||
+        resolvedUseType ||
+        (lastProductCtx && looksLikeProductPreferenceReply(text))
+      );
+
+      if (wantsRecommendation) {
+        const pool = (matches.length > 1 ? matches : [])
+          .concat(related)
+          .concat(broader)
+          .filter((row, idx, arr) =>
+            arr.findIndex((x) =>
+              normalizeCatalogSearchText(`${x?.nombre || ''} ${x?.marca || ''}`) ===
+              normalizeCatalogSearchText(`${row?.nombre || ''} ${row?.marca || ''}`)
+            ) === idx
+          );
+
+        const shortlist = shortlistProductsForRecommendation(pool.length ? pool : stock, {
+          family: resolvedFamily,
+          hairType: resolvedHairType,
+          need: resolvedNeed,
+          useType: resolvedUseType,
+          query: resolvedQuery || text,
+          limit: 10,
+        });
+
+        if (shortlist.length) {
+          const recoAI = await recommendProductsWithAI({
+            text,
+            familyLabel: resolvedFamily,
+            hairType: resolvedHairType,
+            need: resolvedNeed,
+            useType: resolvedUseType,
+            products: shortlist,
+          });
+
+          const picked = recoAI?.recommended_names?.length
+            ? shortlist.filter((row) =>
+                recoAI.recommended_names.some((name) => normalizeCatalogSearchText(name) === normalizeCatalogSearchText(row.nombre))
+              ).slice(0, 4)
+            : shortlist.slice(0, 4);
+
+          const replyReco = formatRecommendedProductsReply(recoAI, picked.length ? picked : shortlist.slice(0, 4), {
+            familyLabel: resolvedFamily,
+            hairType: resolvedHairType,
+            need: resolvedNeed,
+            useType: resolvedUseType,
+          });
+
+          if (replyReco) {
+            setLastProductContext(waId, {
+              family: resolvedFamily || detectProductFamily(text) || '',
+              hairType: resolvedHairType || '',
+              need: resolvedNeed || '',
+              useType: resolvedUseType || '',
+              mode: 'recommendation',
+              lastOptions: (picked.length ? picked : shortlist.slice(0, 4)).map((x) => x.nombre),
+            });
+            if (picked.length === 1) lastProductByUser.set(waId, picked[0]);
+            pushHistory(waId, 'assistant', replyReco);
+            await sendWhatsAppText(phone, replyReco);
+            scheduleInactivityFollowUp(waId, phone);
+            return;
+          }
+        }
+      }
+
       if (productMode === 'LIST') {
-        const related = findStockRelated(stock, resolvedQuery, { family: resolvedFamily, limit: 200 });
         if (related.length) {
+          setLastProductContext(waId, {
+            family: resolvedFamily || detectProductFamily(resolvedQuery) || '',
+            hairType: resolvedHairType || '',
+            need: resolvedNeed || '',
+            useType: resolvedUseType || '',
+            mode: 'list',
+            lastOptions: related.slice(0, 12).map((x) => x.nombre),
+          });
           const parts = formatStockRelatedListAll(related, {
             familyLabel: resolvedFamily || detectProductFamily(resolvedQuery),
             chunkSize: 8,
@@ -3941,11 +4272,27 @@ Seña recibida ✔`.trim();
         }
       }
 
-      const detailQuery = productAI?.specific_name || intent.query || guessQueryFromText(text);
-      const matches = detailQuery ? findStock(stock, detailQuery, 'DETAIL') : [];
-
       if (matches.length) {
-        if (matches.length === 1) lastProductByUser.set(waId, matches[0]);
+        if (matches.length === 1) {
+          lastProductByUser.set(waId, matches[0]);
+          setLastProductContext(waId, {
+            family: resolvedFamily || detectProductFamily(matches[0].nombre) || '',
+            hairType: resolvedHairType || '',
+            need: resolvedNeed || '',
+            useType: resolvedUseType || '',
+            mode: 'detail',
+            lastOptions: [matches[0].nombre],
+          });
+        } else {
+          setLastProductContext(waId, {
+            family: resolvedFamily || detectProductFamily(resolvedQuery) || '',
+            hairType: resolvedHairType || '',
+            need: resolvedNeed || '',
+            useType: resolvedUseType || '',
+            mode: 'list',
+            lastOptions: matches.slice(0, 8).map((x) => x.nombre),
+          });
+        }
 
         if ((productAI?.wants_photo || userAsksForPhoto(text)) && matches.length === 1) {
           const sent = await maybeSendProductPhoto(phone, matches[0], text);
@@ -3964,8 +4311,15 @@ Seña recibida ✔`.trim();
         }
       }
 
-      const broader = findStockRelated(stock, resolvedQuery, { family: resolvedFamily, limit: 200 });
       if (broader.length) {
+        setLastProductContext(waId, {
+          family: resolvedFamily || detectProductFamily(resolvedQuery) || '',
+          hairType: resolvedHairType || '',
+          need: resolvedNeed || '',
+          useType: resolvedUseType || '',
+          mode: 'list',
+          lastOptions: broader.slice(0, 12).map((x) => x.nombre),
+        });
         const parts = formatStockRelatedListAll(broader, {
           familyLabel: resolvedFamily || detectProductFamily(resolvedQuery),
           chunkSize: 8,
@@ -3978,11 +4332,17 @@ Seña recibida ✔`.trim();
         return;
       }
 
-      await sendWhatsAppText(phone, 'No lo encuentro en el catálogo con ese nombre. ¿Me dice la marca o para qué tratamiento lo necesita?');
+      setLastProductContext(waId, {
+        family: resolvedFamily || '',
+        hairType: resolvedHairType || '',
+        need: resolvedNeed || '',
+        useType: resolvedUseType || '',
+        mode: 'followup',
+      });
+      await sendWhatsAppText(phone, 'No lo encuentro así en el catálogo. Dígame la marca, para qué lo necesita o qué tipo de cabello tiene y le recomiendo mejor 😊');
       scheduleInactivityFollowUp(waId, phone);
       return;
     }
-
     // SERVICE
     if (intent.type === "SERVICE") {
       const services = await getServicesCatalog();
