@@ -526,7 +526,7 @@ function normalizeHourHM(value) {
 
   const compact = raw
     .toLowerCase()
-    .replace(/horas?/g, 'hs')
+    .replace(/\bhoras?\b/g, 'hs')
     .replace(/\s+/g, '')
     .replace(/\.$/, '');
 
@@ -554,7 +554,7 @@ function normalizeHourHM(value) {
     return '';
   }
 
-  m = raw.match(/(?:a\s*las|alas|tipo|para\s*las|desde\s*las)?\s*(\d{1,2})(?:[:\.h](\d{1,2}))?\s*(hs?|horas?)/i);
+  m = raw.match(/\b(?:a\s*las|alas|tipo|para\s*las|desde\s*las)?\s*(\d{1,2})(?:[:\.h](\d{1,2}))?\s*(hs?|horas?)\b/i);
   if (m) {
     const hh = Number(m[1]);
     const mm = Number(m[2] || 0);
@@ -575,7 +575,7 @@ function extractLikelyHourFromText(text) {
 
   const t = normalize(raw);
 
-  let m = t.match(/(?:a las|alas|tipo|para las|desde las)?\s*(\d{1,2})(?:[:\.](\d{1,2}))?\s*(?:hs|hora|horas)?/);
+  let m = t.match(/(?:a las|alas|tipo|para las|desde las)?\s*(\d{1,2})(?:[:\.](\d{1,2}))?\s*(?:hs|hora|horas)?\b/);
   if (m) {
     const hh = Number(m[1]);
     const mm = Number(m[2] || 0);
@@ -640,7 +640,7 @@ function extractContactInfo(text) {
     }
 
     if (!nombre) {
-      const nameBeforePhone = raw.match(/^\s*([A-Za-zÁÉÍÓÚÑáéíóúñ' ]{5,80}?)(?:\s*,\s*|\s+y\s+)?(?:(?:y\s+)?(?:su\s+)?(?:numero|número|telefono|tel|cel|celular|whatsapp|wsp))/i);
+      const nameBeforePhone = raw.match(/^\s*([A-Za-zÁÉÍÓÚÑáéíóúñ' ]{5,80}?)(?:\s*,\s*|\s+y\s+)?(?:(?:y\s+)?(?:su\s+)?(?:numero|número|telefono|tel|cel|celular|whatsapp|wsp)\b)/i);
       if (nameBeforePhone) {
         const cand = String(nameBeforePhone[1] || '').replace(/\s+/g, ' ').trim().replace(/[,:;.-]+$/, '');
         if (!/\d/.test(cand) && cand.split(' ').length >= 2) nombre = cand;
@@ -1072,8 +1072,8 @@ function extractLikelyDateFromText(text) {
   const explicit = toYMD(raw);
   if (explicit) return explicit;
 
-  if (/hoy/.test(t)) return todayYMDInTZ();
-  if (/manana/.test(t)) {
+  if (/\bhoy\b/.test(t)) return todayYMDInTZ();
+  if (/\bmanana\b/.test(t)) {
     const d = new Date(`${todayYMDInTZ()}T12:00:00-03:00`);
     const next = new Date(d.getTime() + 24 * 60 * 60 * 1000);
     return formatYMDHMInTZ(next).ymd;
@@ -1092,7 +1092,7 @@ function extractLikelyDateFromText(text) {
   };
 
   for (const [name, num] of Object.entries(weekdays)) {
-    if (new RegExp(`\b${name}\b`, 'i').test(t)) {
+    if (new RegExp(`\\b${escapeRegex(name)}\\b`, 'i').test(t)) {
       return nextDateForWeekday(num);
     }
   }
@@ -1534,6 +1534,10 @@ function normalize(str) {
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function escapeRegex(str) {
+  return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 
@@ -2087,109 +2091,111 @@ async function getCoursesCatalog() {
 }
 
 // ===================== BUSCADORES =====================
-const PRODUCT_TYPE_KEYWORDS = [
-  'shampoo', 'champu', 'acondicionador', 'mascara', 'mascarilla', 'tratamiento', 'serum', 'aceite',
-  'oleo', 'tintura', 'oxidante', 'decolorante', 'matizador', 'ampolla', 'keratina', 'protector',
-  'spray', 'crema', 'gel', 'cera', 'botox', 'alisado', 'secador', 'plancha',
-  'bano de crema', 'bano', 'nutricion', 'reparador', 'hidratacion', 'hidratante'
+const PRODUCT_FAMILY_DEFS = [
+  { id: 'shampoo', label: 'shampoo', aliases: ['shampoo', 'champu', 'champú'] },
+  { id: 'acondicionador', label: 'acondicionador', aliases: ['acondicionador'] },
+  { id: 'bano_de_crema', label: 'baño de crema', aliases: ['baño de crema', 'bano de crema', 'mascara capilar', 'mascarilla capilar'] },
+  { id: 'tratamiento', label: 'tratamiento', aliases: ['tratamiento', 'nutricion', 'nutrición', 'hidratacion', 'hidratación', 'reparador', 'reparacion', 'reparación', 'ampolla'] },
+  { id: 'serum', label: 'serum', aliases: ['serum', 'sérum'] },
+  { id: 'aceite', label: 'aceite', aliases: ['aceite', 'oleo', 'óleo'] },
+  { id: 'tintura', label: 'tintura', aliases: ['tintura', 'coloracion', 'coloración', 'color'] },
+  { id: 'oxidante', label: 'oxidante', aliases: ['oxidante', 'revelador'] },
+  { id: 'decolorante', label: 'decolorante', aliases: ['decolorante', 'aclarante'] },
+  { id: 'matizador', label: 'matizador', aliases: ['matizador', 'violeta', 'plata'] },
+  { id: 'keratina', label: 'keratina', aliases: ['keratina', 'keratin'] },
+  { id: 'protector', label: 'protector', aliases: ['protector', 'protector termico', 'protector térmico'] },
+  { id: 'spray', label: 'spray', aliases: ['spray'] },
+  { id: 'gel', label: 'gel', aliases: ['gel'] },
+  { id: 'cera', label: 'cera', aliases: ['cera'] },
+  { id: 'botox', label: 'botox capilar', aliases: ['botox', 'botox capilar'] },
+  { id: 'alisado', label: 'alisado', aliases: ['alisado', 'alisante', 'nanoplastia', 'cirugia capilar', 'cirugía capilar'] },
+  { id: 'secador', label: 'secador', aliases: ['secador', 'secadora'] },
+  { id: 'plancha', label: 'plancha', aliases: ['plancha', 'planchita'] },
 ];
 
-const PRODUCT_FAMILY_ALIASES = {
-  shampoo: ['shampoo', 'champu', 'shampu'],
-  acondicionador: ['acondicionador'],
-  mascara: ['mascara', 'mascarilla'],
-  tratamiento: ['tratamiento'],
-  serum: ['serum'],
-  aceite: ['aceite', 'oleo'],
-  tintura: ['tintura', 'coloracion'],
-  oxidante: ['oxidante', 'revelador'],
-  decolorante: ['decolorante', 'polvo decolorante'],
-  matizador: ['matizador'],
-  ampolla: ['ampolla'],
-  keratina: ['keratina'],
-  protector: ['protector', 'protector termico'],
-  spray: ['spray'],
-  crema: ['crema'],
-  gel: ['gel'],
-  cera: ['cera'],
-  botox: ['botox'],
-  alisado: ['alisado'],
-  secador: ['secador'],
-  plancha: ['plancha'],
-  'bano de crema': ['bano de crema', 'bano crema'],
-};
+const PRODUCT_TYPE_KEYWORDS = PRODUCT_FAMILY_DEFS.flatMap((x) => x.aliases);
+const PRODUCT_LIST_HINTS_RE = /(catalogo|catálogo|lista|todo|toda|todos|todas|opciones|mostrame|mandame|enviame|pasame|que tenes|qué tenes|que tienen|qué tienen|que hay|qué hay|stock|venden|venta)/i;
 
-function escapeRegExp(str) {
-  return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\$&');
+function normalizeCatalogSearchText(str) {
+  return canonicalizeQuery(str || '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-function detectProductFamilies(query) {
-  const q = canonicalizeQuery(query || '');
-  if (!q) return [];
+function containsCatalogPhrase(text, phrase) {
+  const t = ` ${normalizeCatalogSearchText(text)} `;
+  const p = ` ${normalizeCatalogSearchText(phrase)} `;
+  return !!p.trim() && t.includes(p);
+}
 
-  const found = [];
-  for (const [family, aliases] of Object.entries(PRODUCT_FAMILY_ALIASES)) {
-    if (aliases.some((alias) => new RegExp(`\b${escapeRegExp(alias)}\b`, 'i').test(q))) {
-      found.push(family);
+function getProductFamilyDef(family) {
+  const f = normalizeCatalogSearchText(family);
+  if (!f) return null;
+  return PRODUCT_FAMILY_DEFS.find((item) =>
+    normalizeCatalogSearchText(item.id) === f ||
+    normalizeCatalogSearchText(item.label) === f ||
+    item.aliases.some((alias) => normalizeCatalogSearchText(alias) === f)
+  ) || null;
+}
+
+function getProductFamilyLabel(family) {
+  const def = getProductFamilyDef(family);
+  if (def?.label) return def.label;
+  return normalizeCatalogSearchText(family || '');
+}
+
+function detectProductFamily(query) {
+  const q = normalizeCatalogSearchText(query);
+  if (!q) return '';
+
+  let best = null;
+  for (const def of PRODUCT_FAMILY_DEFS) {
+    let score = 0;
+    for (const alias of def.aliases) {
+      if (containsCatalogPhrase(q, alias)) score += normalizeCatalogSearchText(alias).split(' ').length >= 2 ? 4 : 2;
     }
+    if (!score) continue;
+    if (!best || score > best.score) best = { id: def.id, score };
   }
-  return found;
+  return best?.id || '';
+}
+
+function getProductFamilyAliases(family) {
+  const def = getProductFamilyDef(family) || getProductFamilyDef(detectProductFamily(family));
+  return def?.aliases || [];
 }
 
 function extractProductTypeKeywords(query) {
-  const q = canonicalizeQuery(query || '');
-  if (!q) return [];
-  const direct = PRODUCT_TYPE_KEYWORDS.filter((k) => new RegExp(`\b${escapeRegExp(k)}\b`, 'i').test(q));
-  return Array.from(new Set([...direct, ...detectProductFamilies(q)]));
+  const family = detectProductFamily(query);
+  if (!family) return [];
+  const aliases = getProductFamilyAliases(family);
+  return aliases.length ? aliases : [family];
 }
 
 function isGenericProductQuery(query) {
-  const q = canonicalizeQuery(query || '');
+  const q = normalizeCatalogSearchText(query || '');
   if (!q) return false;
-
-  const families = detectProductFamilies(q);
+  const family = detectProductFamily(q);
   const tokens = tokenize(q, { expandSynonyms: false });
-  const genericSignals = /(precio|precios|stock|opciones|lista|catalogo|catálogo|todo|todos|tenes|tenés|tienen|hay|busco|vendo|venta|mostrar|mostrame|mandame|enviame|pasame|que tenes|qué tenés|que tienen|qué tienen)/i;
-
-  if (!families.length) return false;
-  if (genericSignals.test(q)) return true;
-
-  const familyWords = new Set(
-    families.flatMap((f) => [f, ...(PRODUCT_FAMILY_ALIASES[f] || [])])
-      .flatMap((x) => canonicalizeQuery(x).split(' '))
-      .filter(Boolean)
-  );
-
-  const remaining = tokens.filter((tok) => !familyWords.has(tok));
-  return remaining.length <= 1;
-}
-
-function filterRowsByProductFamilies(rows, query) {
-  const families = detectProductFamilies(query);
-  if (!families.length) return [];
-
-  return rows.filter((r) => {
-    const haystack = canonicalizeQuery(`${r.nombre} ${r.categoria} ${r.marca} ${r.descripcion} ${r.tab}`);
-    return families.some((family) => {
-      const aliases = PRODUCT_FAMILY_ALIASES[family] || [family];
-      return aliases.some((alias) => new RegExp(`\b${escapeRegExp(alias)}\b`, 'i').test(haystack));
-    });
-  });
+  return !!family && (PRODUCT_LIST_HINTS_RE.test(q) || tokens.length <= 4);
 }
 
 function applyProductTypeGuard(rows, query) {
-  const familyRows = filterRowsByProductFamilies(rows, query);
-  if (familyRows.length) return familyRows;
-
-  const keys = extractProductTypeKeywords(query);
-  if (!keys.length) return rows;
+  const family = detectProductFamily(query);
+  const aliases = getProductFamilyAliases(family);
+  if (!aliases.length) return rows;
 
   const guarded = rows.filter((r) => {
-    const haystack = canonicalizeQuery(`${r.nombre} ${r.categoria} ${r.tab}`);
-    return keys.some((k) => new RegExp(`\b${escapeRegExp(k)}\b`, 'i').test(haystack));
+    const haystack = `${r.nombre} ${r.categoria} ${r.marca} ${r.descripcion} ${r.tab}`;
+    return aliases.some((alias) => containsCatalogPhrase(haystack, alias));
   });
 
   return guarded.length ? guarded : rows;
+}
+
+function buildStockHaystack(row) {
+  return normalizeCatalogSearchText(`${row?.nombre || ''} ${row?.categoria || ''} ${row?.marca || ''} ${row?.descripcion || ''} ${row?.tab || ''}`);
 }
 
 function findStock(rows, query, mode) {
@@ -2202,15 +2208,15 @@ function findStock(rows, query, mode) {
   if (exact.length) return exact;
 
   const containsStrong = guardedRows.filter(r => canonicalizeQuery(r.nombre).includes(q) && q.length >= 4);
-  if (mode !== "LIST" && containsStrong.length === 1) return containsStrong;
+  if (mode !== 'LIST' && containsStrong.length === 1) return containsStrong;
 
   const hasTypeGuard = extractProductTypeKeywords(q).length > 0;
   const scored = [];
   for (const r of guardedRows) {
     const sNombre = scoreField(q, r.nombre);
-    const sCat = scoreField(q, r.categoria) * 0.8;
-    const sMarca = scoreField(q, r.marca) * 0.68;
-    const sDesc = hasTypeGuard ? scoreField(q, r.descripcion) * 0.28 : scoreField(q, r.descripcion) * 0.56;
+    const sCat = scoreField(q, r.categoria) * 0.82;
+    const sMarca = scoreField(q, r.marca) * 0.66;
+    const sDesc = hasTypeGuard ? scoreField(q, r.descripcion) * 0.26 : scoreField(q, r.descripcion) * 0.58;
     const sTab = scoreField(q, r.tab) * 0.62;
     const score = Math.max(sNombre, sCat, sMarca, sDesc, sTab);
 
@@ -2219,8 +2225,7 @@ function findStock(rows, query, mode) {
       const bag = tokenize(`${r.nombre} ${r.categoria} ${r.marca} ${r.descripcion}`);
       const jac = jaccard(qTok, bag);
       if (jac >= 0.5) {
-        const boosted = Math.min(1, score + 0.07);
-        scored.push({ row: r, score: boosted, q });
+        scored.push({ row: r, score: Math.min(1, score + 0.07), q });
         continue;
       }
     }
@@ -2231,19 +2236,158 @@ function findStock(rows, query, mode) {
   return pickBestByScore(scored, mode);
 }
 
+function findStockRelated(rows, rawQuery, { family = '', limit = 200 } = {}) {
+  const q = normalizeCatalogSearchText(rawQuery || '');
+  const resolvedFamily = family || detectProductFamily(q);
+  const aliases = getProductFamilyAliases(resolvedFamily);
+  const familyTokenSet = new Set(aliases.flatMap((alias) => tokenize(alias, { expandSynonyms: false })));
+  const extraTokens = tokenize(q, { expandSynonyms: true }).filter((tok) =>
+    tok &&
+    tok.length >= 3 &&
+    !familyTokenSet.has(tok) &&
+    !STOCK_STOPWORDS.has(tok) &&
+    !['producto', 'productos', 'stock', 'precio', 'foto', 'fotos', 'imagen', 'imagenes', 'venta', 'comprar'].includes(tok)
+  );
+
+  const scored = [];
+
+  for (const row of rows) {
+    const hay = buildStockHaystack(row);
+    const bag = tokenize(hay, { expandSynonyms: false });
+    const bagSet = new Set(bag);
+
+    let familyHits = 0;
+    if (aliases.length) {
+      for (const alias of aliases) {
+        if (containsCatalogPhrase(hay, alias)) familyHits += 1;
+      }
+    }
+
+    let extraHits = 0;
+    for (const tok of extraTokens) {
+      if (bagSet.has(tok) || containsCatalogPhrase(hay, tok)) extraHits += 1;
+    }
+
+    const queryScore = q ? Math.max(
+      scoreField(q, row.nombre) * 1.15,
+      scoreField(q, row.categoria) * 0.95,
+      scoreField(q, row.marca) * 0.72,
+      scoreField(q, row.descripcion) * 0.62,
+      scoreField(q, row.tab) * 0.55
+    ) : 0;
+
+    const score = queryScore + (familyHits * 4.5) + (extraHits * 1.85);
+
+    if (aliases.length && !familyHits && score < 1.2) continue;
+    if (!aliases.length && score < 0.55) continue;
+
+    scored.push({ row, score, familyHits, extraHits });
+  }
+
+  scored.sort((a, b) => {
+    if (b.familyHits !== a.familyHits) return b.familyHits - a.familyHits;
+    if (b.extraHits !== a.extraHits) return b.extraHits - a.extraHits;
+    return b.score - a.score;
+  });
+
+  let out = scored.map((x) => x.row);
+
+  if (aliases.length && extraTokens.length) {
+    const narrowed = scored.filter((x) => x.familyHits > 0 && x.extraHits > 0).map((x) => x.row);
+    if (narrowed.length) out = narrowed;
+    else {
+      const familyOnly = scored.filter((x) => x.familyHits > 0).map((x) => x.row);
+      if (familyOnly.length) out = familyOnly;
+    }
+  } else if (aliases.length) {
+    const familyOnly = scored.filter((x) => x.familyHits > 0).map((x) => x.row);
+    if (familyOnly.length) out = familyOnly;
+  }
+
+  const dedup = [];
+  const seen = new Set();
+  for (const row of out) {
+    const key = normalizeCatalogSearchText(`${row?.nombre || ''} ${row?.marca || ''}`);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    dedup.push(row);
+    if (dedup.length >= limit) break;
+  }
+
+  return dedup;
+}
+
+async function extractProductIntentWithAI(text, context = {}) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Analizá si el cliente está consultando PRODUCTOS del catálogo (stock, precios, opciones o fotos).
+Devolvé SOLO JSON con estas claves:
+- is_product_query: boolean
+- family: string (una de estas o vacío: shampoo, acondicionador, baño de crema, tratamiento, serum, aceite, tintura, oxidante, decolorante, matizador, keratina, protector, spray, gel, cera, botox, alisado, secador, plancha, otro)
+- search_text: string
+- specific_name: string
+- wants_all_related: boolean
+- wants_photo: boolean
+- wants_price: boolean
+- hair_type: string
+- need: string
+Reglas:
+- Si pregunta genéricamente por una familia de productos, wants_all_related=true.
+- Si pide stock, precios, lista, catálogo, opciones o qué hay de una familia, is_product_query=true.
+- Si pide foto o precio de un producto puntual, specific_name debe contener ese producto.
+- Si parece servicio/turno y no producto, is_product_query=false.
+- No inventes nombres de productos.`,
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje: raw,
+            ultimo_producto: context.lastProductName || '',
+            ultimo_servicio: context.lastServiceName || '',
+          }),
+        },
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    return {
+      is_product_query: !!obj.is_product_query,
+      family: String(obj.family || '').trim(),
+      search_text: String(obj.search_text || '').trim(),
+      specific_name: String(obj.specific_name || '').trim(),
+      wants_all_related: !!obj.wants_all_related,
+      wants_photo: !!obj.wants_photo,
+      wants_price: !!obj.wants_price,
+      hair_type: String(obj.hair_type || '').trim(),
+      need: String(obj.need || '').trim(),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function detectFemaleContext(text) {
   const t = normalize(text || '');
-  return /(ella|mi hija|otra hija|hija|mi tia|tia|mi señora|mi senora|señora|senora|mujer|femenin[oa]|dama)/i.test(t);
+  return /(\bella\b|\bmi hija\b|\botra hija\b|\bhija\b|\bmi tia\b|\btia\b|\bmi señora\b|\bmi senora\b|\bseñora\b|\bsenora\b|\bmujer\b|\bfemenin[oa]\b|\bdama\b)/i.test(t);
 }
 
 function detectMaleContext(text) {
   const t = normalize(text || '');
-  return /(mi hijo|otro hijo|hijo|mi marido|mi esposo|varon|hombre|masculin[oa]|barber)/i.test(t);
+  return /(\bmi hijo\b|\botro hijo\b|\bhijo\b|\bmi marido\b|\bmi esposo\b|\bvaron\b|\bhombre\b|\bmasculin[oa]\b|\bbarber\b)/i.test(t);
 }
 
 function applyServiceGenderContext(rows, query) {
   const q = normalize(query || '');
-  if (!q || !/corte/i.test(q)) return rows;
+  if (!q || !/\bcorte\b/i.test(q)) return rows;
 
   const female = detectFemaleContext(query);
   const male = detectMaleContext(query) && !female;
@@ -2279,7 +2423,7 @@ function findServices(rows, query, mode) {
 
   const contains = scopedRows.filter(r => normalize(r.nombre).includes(q));
   if (contains.length) {
-    if (/corte/i.test(q) && detectFemaleContext(query)) {
+    if (/\bcorte\b/i.test(q) && detectFemaleContext(query)) {
       const preferred = contains.filter(r => !/(mascul|varon|hombre|barber)/i.test(normalize(`${r.nombre} ${r.categoria} ${r.subcategoria}`)));
       if (preferred.length) return preferred;
     }
@@ -2287,7 +2431,7 @@ function findServices(rows, query, mode) {
   }
 
   const matched = scopedRows.filter(match);
-  if (/corte/i.test(q) && detectFemaleContext(query)) {
+  if (/\bcorte\b/i.test(q) && detectFemaleContext(query)) {
     const preferred = matched.filter(r => !/(mascul|varon|hombre|barber)/i.test(normalize(`${r.nombre} ${r.categoria} ${r.subcategoria}`)));
     if (preferred.length) return preferred;
   }
@@ -2320,7 +2464,7 @@ function formatStockReply(matches, mode) {
   if (!matches.length) return null;
 
   // Mensaje corto estilo “ficha”
-  const items = mode === "LIST_ALL" ? matches : (mode === "LIST" ? matches.slice(0, 10) : matches.slice(0, 1));
+  const items = mode === "LIST" ? matches.slice(0, 10) : matches.slice(0, 1);
 
   const blocks = items.map((p) => {
     const precio = moneyOrConsult(p.precio);
@@ -2331,7 +2475,7 @@ function formatStockReply(matches, mode) {
     ].join("\n");
   });
 
-  const header = mode === "LIST" || mode === "LIST_ALL"
+  const header = mode === "LIST"
     ? `Encontré estas opciones:`
     : `Está en catálogo:`;
 
@@ -2365,6 +2509,38 @@ function formatStockListAll(rows, chunkSize = 12) {
 
     chunks.push(`${header}\n\n${blocks.join("\n\n— — —\n\n")}${footer}`.trim());
   }
+  return chunks;
+}
+
+function formatStockRelatedListAll(rows, { familyLabel = '', chunkSize = 10 } = {}) {
+  const items = Array.isArray(rows) ? rows.filter(r => r?.nombre) : [];
+  if (!items.length) return [];
+
+  const readableFamily = familyLabel ? getProductFamilyLabel(familyLabel) : '';
+  const intro = readableFamily ? ` de *${readableFamily}*` : '';
+  const chunks = [];
+
+  for (let i = 0; i < items.length; i += chunkSize) {
+    const part = items.slice(i, i + chunkSize);
+    const blocks = part.map((p) => {
+      const precio = moneyOrConsult(p.precio);
+      return [
+        `✨ *${p.nombre}*`,
+        `• Precio: *${precio}*`,
+      ].join("\n");
+    });
+
+    const header = i === 0
+      ? `✨ Tenemos estas opciones${intro}:`
+      : `✨ Más opciones${intro}:`;
+
+    const footer = (i + chunkSize) >= items.length
+      ? `\n\nSi quiere, le ayudo a elegir la mejor opción 😊 ¿Es para uso personal o para trabajar? ¿Qué tipo de cabello tiene y qué resultado busca?`
+      : `\n\n(Sigo con más opciones…)`;
+
+    chunks.push(`${header}\n\n${blocks.join("\n\n— — —\n\n")}${footer}`.trim());
+  }
+
   return chunks;
 }
 
@@ -2569,7 +2745,7 @@ function isExplicitServiceIntent(text) {
 function extractAmbiguousBeautyTerm(text) {
   const t = normalize(text || '');
   const terms = ['alisado', 'botox', 'keratina', 'nutricion', 'tratamiento'];
-  return terms.find(term => new RegExp(`\b${term}\b`, 'i').test(t)) || '';
+  return terms.find(term => new RegExp(`\\b${escapeRegex(term)}\\b`, 'i').test(t)) || '';
 }
 
 function formatWarmAssistant(text) {
@@ -2611,6 +2787,7 @@ Tené en cuenta el contexto previo:
 - flujo_actual: si el cliente ya estaba hablando de reservar, priorizá continuidad y no lo mandes a catálogo de nuevo.
 - Si el mensaje es solo 'si', 'dale', 'ok' o similar y venían hablando de un servicio, priorizá la continuidad de ese tema.
 - Si una palabra puede ser producto o servicio y el cliente no lo aclaró, devolvé OTHER.
+- Frases como “qué tenés de shampoo”, “precio de baños de crema”, “qué stock hay de tinturas” son PRODUCT con mode LIST.
 
 Respondé SOLO JSON.`
       },
@@ -3673,16 +3850,29 @@ Seña recibida ✔`.trim();
       historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1600),
     });
 
+    const productAI = (intent.type === 'PRODUCT' || intent.type === 'OTHER' || isExplicitProductIntent(text))
+      ? await extractProductIntentWithAI(text, {
+          lastProductName: lastProductByUser.get(waId)?.nombre || '',
+          lastServiceName: lastKnownService?.nombre || '',
+        })
+      : null;
+
+    const shouldTreatAsProduct = intent.type === 'PRODUCT' || (
+      intent.type !== 'SERVICE' &&
+      intent.type !== 'COURSE' &&
+      !!productAI?.is_product_query
+    );
+
     // ✅ actualizar tipo de intención para el seguimiento
     const ctx1 = lastCloseContext.get(waId);
-    if (ctx1) ctx1.intentType = intent?.type || ctx1.intentType || "OTHER";
+    if (ctx1) ctx1.intentType = shouldTreatAsProduct ? 'PRODUCT' : (intent?.type || ctx1.intentType || 'OTHER');
 
     // Si el clasificador falla, igual intentamos buscar en stock con el texto del cliente
     // ✅ Evitar confusión: "SI/NO/OK/DALE" como respuesta a la última pregunta del bot NO debe disparar catálogo.
-    if (intent.type === "OTHER" && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
+    if (!shouldTreatAsProduct && intent.type === 'OTHER' && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
       const stock = await getStockCatalog();
       const q = guessQueryFromText(text);
-      const matches = findStock(stock, q, "DETAIL");
+      const matches = findStock(stock, q, 'DETAIL');
 
       if (matches.length) {
         lastProductByUser.set(waId, matches[0]);
@@ -3690,17 +3880,15 @@ Seña recibida ✔`.trim();
         if (userAsksForPhoto(text)) {
           const sent = await maybeSendProductPhoto(phone, matches[0], text);
           if (sent) {
-            // ✅ INACTIVIDAD: programar follow-up luego de la respuesta del bot
             scheduleInactivityFollowUp(waId, phone);
             return;
           }
         }
 
-        const replyCatalog = formatStockReply(matches, "DETAIL");
+        const replyCatalog = formatStockReply(matches, 'DETAIL');
         if (replyCatalog) {
-          pushHistory(waId, "assistant", replyCatalog);
+          pushHistory(waId, 'assistant', replyCatalog);
           await sendWhatsAppText(phone, replyCatalog);
-          // ✅ INACTIVIDAD
           scheduleInactivityFollowUp(waId, phone);
           return;
         }
@@ -3708,74 +3896,91 @@ Seña recibida ✔`.trim();
     }
 
     // PRODUCT
-    if (intent.type === "PRODUCT") {
+    if (shouldTreatAsProduct) {
       const stock = await getStockCatalog();
-      const productMode = (intent.mode === 'DETAIL' && isGenericProductQuery(intent.query || text)) ? 'LIST' : intent.mode;
+      const aiFamily = productAI?.family || '';
+      const aiSearchText = productAI?.specific_name || productAI?.search_text || '';
+      const resolvedQuery = aiSearchText || intent.query || guessQueryFromText(text) || text;
+      const resolvedFamily = aiFamily || detectProductFamily(resolvedQuery) || detectProductFamily(text);
+      const productMode = (
+        intent.mode === 'LIST' ||
+        !!productAI?.wants_all_related ||
+        (!productAI?.specific_name && !productAI?.wants_photo && isGenericProductQuery(resolvedQuery)) ||
+        (resolvedFamily && !productAI?.specific_name && !intent.query)
+      ) ? 'LIST' : intent.mode;
 
-      // ✅ Si pide "la lista / catálogo / todos" (o el extractor dejó query vacía), ofrecemos TODO el catálogo
-      const qCleanTokens = tokenize(intent.query || "", { expandSynonyms: true });
-      const wantsAll = productMode === "LIST" && (
-        !intent.query || !intent.query.trim() || qCleanTokens.length === 0 ||
-        /\b(catalogo|catálogo|lista|todo|toda|todos|todas|productos|stock)\b/i.test(intent.query)
+      const qCleanTokens = tokenize(intent.query || resolvedQuery || '', { expandSynonyms: true });
+      const wantsAll = productMode === 'LIST' && (
+        !resolvedQuery || !String(resolvedQuery).trim() || qCleanTokens.length === 0 ||
+        /\b(catalogo|catálogo|lista|todo|toda|todos|todas|productos|stock)\b/i.test(resolvedQuery)
       );
 
       if (wantsAll) {
         const parts = formatStockListAll(stock, 12);
         for (const part of parts) {
-          pushHistory(waId, "assistant", part);
+          pushHistory(waId, 'assistant', part);
           await sendWhatsAppText(phone, part);
         }
-        // ✅ INACTIVIDAD (después del último envío)
         scheduleInactivityFollowUp(waId, phone);
         return;
       }
 
-      const directFamilyMatches = isGenericProductQuery(intent.query || text)
-        ? filterRowsByProductFamilies(stock, intent.query || text)
-        : [];
+      if (productMode === 'LIST') {
+        const related = findStockRelated(stock, resolvedQuery, { family: resolvedFamily, limit: 200 });
+        if (related.length) {
+          const parts = formatStockRelatedListAll(related, {
+            familyLabel: resolvedFamily || detectProductFamily(resolvedQuery),
+            chunkSize: 8,
+          });
+          for (const part of parts) {
+            pushHistory(waId, 'assistant', part);
+            await sendWhatsAppText(phone, part);
+          }
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
+      }
 
-      const matches = directFamilyMatches.length
-        ? directFamilyMatches
-        : (intent.query ? findStock(stock, intent.query, productMode) : []);
+      const detailQuery = productAI?.specific_name || intent.query || guessQueryFromText(text);
+      const matches = detailQuery ? findStock(stock, detailQuery, 'DETAIL') : [];
 
       if (matches.length) {
-        lastProductByUser.set(waId, matches[0]);
+        if (matches.length === 1) lastProductByUser.set(waId, matches[0]);
 
-        if (userAsksForPhoto(text)) {
+        if ((productAI?.wants_photo || userAsksForPhoto(text)) && matches.length === 1) {
           const sent = await maybeSendProductPhoto(phone, matches[0], text);
           if (sent) {
-            // ✅ INACTIVIDAD
             scheduleInactivityFollowUp(waId, phone);
             return;
           }
         }
 
-        const replyCatalog = formatStockReply(matches, directFamilyMatches.length ? "LIST_ALL" : productMode);
+        const replyCatalog = formatStockReply(matches, matches.length === 1 ? 'DETAIL' : 'LIST');
         if (replyCatalog) {
-          pushHistory(waId, "assistant", replyCatalog);
+          pushHistory(waId, 'assistant', replyCatalog);
           await sendWhatsAppText(phone, replyCatalog);
-          // ✅ INACTIVIDAD
           scheduleInactivityFollowUp(waId, phone);
           return;
         }
-      } else {
-        // ✅ Más inteligente: si no matchea, probamos mostrar opciones más amplias por categoría/descripcion
-        const broaderFamily = filterRowsByProductFamilies(stock, guessQueryFromText(intent.query || text));
-        const broader = broaderFamily.length ? broaderFamily : findStock(stock, guessQueryFromText(intent.query || text), "LIST");
-        const replyBroader = formatStockReply(broader, broaderFamily.length ? "LIST_ALL" : "LIST");
-        if (replyBroader) {
-          pushHistory(waId, "assistant", replyBroader);
-          await sendWhatsAppText(phone, replyBroader);
-          // ✅ INACTIVIDAD
-          scheduleInactivityFollowUp(waId, phone);
-          return;
-        }
+      }
 
-        await sendWhatsAppText(phone, "No lo encuentro en el catálogo con ese nombre. ¿Me dice la marca o para qué tratamiento lo necesita?");
-        // ✅ INACTIVIDAD
+      const broader = findStockRelated(stock, resolvedQuery, { family: resolvedFamily, limit: 200 });
+      if (broader.length) {
+        const parts = formatStockRelatedListAll(broader, {
+          familyLabel: resolvedFamily || detectProductFamily(resolvedQuery),
+          chunkSize: 8,
+        });
+        for (const part of parts) {
+          pushHistory(waId, 'assistant', part);
+          await sendWhatsAppText(phone, part);
+        }
         scheduleInactivityFollowUp(waId, phone);
         return;
       }
+
+      await sendWhatsAppText(phone, 'No lo encuentro en el catálogo con ese nombre. ¿Me dice la marca o para qué tratamiento lo necesita?');
+      scheduleInactivityFollowUp(waId, phone);
+      return;
     }
 
     // SERVICE
