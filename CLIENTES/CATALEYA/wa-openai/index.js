@@ -254,9 +254,7 @@ Hablás en español rioplatense, con mensajes cortos y prácticos. Profesional, 
 ESTILO:
 - Respuestas en 1–2 líneas, con viñetas si ayuda.
 - Si inicia con “hola”, responder saludo + “¿en qué puedo ayudarte?” solamente.
-- Emojis ocasionales: al inicio de la conversación con un corazón o una estrella; después tono profesional. usar letras negrita donde sea necesario cuando aclares cosas.
-- Cuando menciones alias, titular, señas o datos sensibles, presentalos en bloques cortos y ordenados, nunca en un párrafo largo.
-- Cuando respondas por precio de un servicio, priorizá este formato: nombre del servicio, precio, aclaración breve si aplica y cierre ofreciendo ayudar con el turno. 
+- Emojis ocasionales: al inicio de la conversación con un corazón o una estrella; después tono profesional. usar letras negrita donde sea necesario cuando aclares cosas. 
 
 Ofrecés:
 - Servicios estéticos
@@ -470,13 +468,7 @@ const TURNOS_TAB = process.env.TURNOS_TAB || "TURNOS";
 
 // Calendar ID (compartir el calendario con el service account)
 // Si no se configura, igual se anota en la planilla.
-const CALENDAR_ID = String(
-  process.env.CALENDAR_ID ||
-  process.env.GCALENDAR_ID ||
-  process.env.GOOGLE_CALENDAR_ID ||
-  process.env.GOOGLE_CALENDARID ||
-  ""
-).trim();
+const CALENDAR_ID = String(process.env.CALENDAR_ID || process.env.GCALENDAR_ID || process.env.GOOGLE_CALENDAR_ID || "").trim();
 
 const TURNOS_HEADERS = [
   "FECHA",
@@ -504,36 +496,61 @@ function turnoInfoBlock() {
   return (
 `✨ Turnos en Cataleya
 
-Profesional: ${TURNOS_STYLIST_NAME} 💇‍♀️
-📅 Horarios de atención para turnos:
-${TURNOS_HORARIOS_TXT}
+Profesional: ${TURNOS_STYLIST_NAME}
+📅 Horarios para turnos:
+• 10:00 a 12:00
+• 17:00 a 20:00
 
-Para confirmar el turno se solicita una seña de ${TURNOS_SENA_TXT}.
-
-💳 Datos para la transferencia
-
-Alias
-${TURNOS_ALIAS}
-
-Titular
-${TURNOS_ALIAS_TITULAR}
-
-Cuando realice la transferencia, envíe por aquí la foto o captura del comprobante 📩`
+Para confirmar el turno se solicita una seña de ${TURNOS_SENA_TXT}.`
   );
 }
 
 function pedirDatosRegistroTurnoBlock() {
   return (
-`😊 Para avanzar con el turno necesito estos datos:
+`Perfecto 😊
 
-• Nombre completo
-• Número de teléfono de contacto
-
-Si ya realizó la transferencia, envíe la captura del comprobante y lo dejo como *SEÑADO* ✅`
+Para registrar el turno necesito:
+👤 Nombre completo
+📱 Teléfono de contacto`
   );
 }
 
+function normalizeHourHM(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const t = raw.toLowerCase().replace(/hs?\.?$/i, '').replace(/\s+/g, '');
+
+  let m = t.match(/^(\d{1,2})$/);
+  if (m) {
+    const hh = Number(m[1]);
+    if (hh >= 0 && hh <= 23) return `${String(hh).padStart(2, '0')}:00`;
+    return '';
+  }
+
+  m = t.match(/^(\d{1,2})[:\.](\d{1,2})$/);
+  if (m) {
+    const hh = Number(m[1]);
+    const mm = Number(m[2]);
+    if (hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59) {
+      return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    }
+    return '';
+  }
+
+  m = raw.match(/(\d{1,2})(?::(\d{1,2}))?\s*(hs?|horas?)/i);
+  if (m) {
+    const hh = Number(m[1]);
+    const mm = Number(m[2] || 0);
+    if (hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59) {
+      return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    }
+  }
+
+  return '';
+}
+
 function detectSenaPaid({ text }) {
+
   const t = normalize(text || "");
   return /(comprobant|transfer|transferi|transferí|señad|seña|pagu|pago|abon|abono|mercado pago|alias|cvu)/i.test(t);
 }
@@ -727,7 +744,7 @@ ${TURNOS_ALIAS}
 Titular
 ${TURNOS_ALIAS_TITULAR}
 
-Cuando realice la transferencia, envíe por aquí la foto, captura o PDF del comprobante 📩`;
+Cuando haga la transferencia, envíe por aquí el comprobante 📩`;
 }
 
 function detectMonto10000(text) {
@@ -761,6 +778,12 @@ async function tryApplyPaymentToDraft(base, { text, mediaMeta } = {}) {
     next.payment_status = "paid_verified";
     next.payment_amount = 10000;
     next.payment_receiver = "Monica Pacheco";
+  } else if (mediaMeta || rawText) {
+    next.payment_status = next.payment_status === "paid_verified" ? "paid_verified" : "payment_review";
+    if (next.payment_status !== "paid_verified") {
+      next.payment_amount = extractMoneyAmountFromText(rawText) || null;
+      next.payment_receiver = detectTitularMonicaPacheco(rawText) ? "Monica Pacheco" : (next.payment_receiver || "");
+    }
   } else {
     next.payment_status = next.payment_status === "paid_verified" ? "paid_verified" : "not_paid";
     if (next.payment_status !== "paid_verified") {
@@ -811,6 +834,7 @@ async function createAppointmentRecord({ waId, waPhone, merged, status, calendar
 
 async function finalizeAppointmentFlow({ waId, phone, merged }) {
   merged.fecha = toYMD(merged.fecha);
+  merged.hora = normalizeHourHM(merged.hora);
   if (!merged?.servicio || !merged?.fecha || !merged?.hora) return { type: "missing_core" };
 
   const busy = await calendarHasConflict({
@@ -846,19 +870,6 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
     notas: merged.notas || "",
   });
 
-  if (TURNOS_SHEET_ID) {
-    await appendTurnoRow({
-      fechaYMD: merged.fecha,
-      dia: weekdayEsFromYMD(merged.fecha),
-      horaHM: merged.hora,
-      cliente: merged.cliente_full || "",
-      telefono: normalizePhone(merged.telefono_contacto || ""),
-      servicio: merged.servicio || "",
-      duracionMin: Number(merged.duracion_min || 60) || 60,
-      calendarEventId: ev?.eventId || "",
-    });
-  }
-
   await createAppointmentRecord({
     waId,
     waPhone: phone,
@@ -866,6 +877,24 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
     status: "booked",
     calendarEventId: ev?.eventId || null,
   });
+
+  if (TURNOS_SHEET_ID) {
+    try {
+      await appendTurnoRow({
+        fechaYMD: merged.fecha,
+        dia: weekdayEsFromYMD(merged.fecha),
+        horaHM: merged.hora,
+        cliente: merged.cliente_full || '',
+        telefono: normalizePhone(merged.telefono_contacto || ''),
+        servicio: merged.servicio || '',
+        duracionMin: Number(merged.duracion_min || 60) || 60,
+        calendarEventId: ev?.eventId || '',
+      });
+    } catch (e) {
+      console.error('❌ Error guardando turno en planilla:', e?.response?.data || e?.message || e);
+    }
+  }
+
   await deleteAppointmentDraft(waId);
   return { type: "booked", eventId: ev?.eventId || null };
 }
@@ -1009,10 +1038,11 @@ Reglas:
 
   try {
     const obj = JSON.parse(completion.choices[0].message.content);
+    const horaNormalizada = normalizeHourHM((obj.hora || '').trim());
     return {
       ok: !!obj.ok,
-      fecha: (obj.fecha || "").trim(),
-      hora: (obj.hora || "").trim(),
+      fecha: toYMD((obj.fecha || "").trim()),
+      hora: horaNormalizada,
       duracion_min: Number(obj.duracion_min || 60) || 60,
       servicio: (obj.servicio || "").trim(),
       notas: (obj.notas || "").trim(),
@@ -1027,7 +1057,11 @@ async function calendarHasConflict({ dateYMD, startHM, durationMin }) {
   if (!CALENDAR_ID) return false;
   const cal = await getCalendarClient();
 
-  const start = new Date(`${dateYMD}T${startHM}:00:00-03:00`);
+  const safeDate = toYMD(dateYMD);
+  const safeHM = normalizeHourHM(startHM);
+  if (!safeDate || !safeHM) return false;
+
+  const start = new Date(`${safeDate}T${safeHM}:00-03:00`);
   const end = new Date(start.getTime() + (Number(durationMin) || 60) * 60000);
 
   const timeMin = start.toISOString();
@@ -1047,29 +1081,28 @@ async function calendarHasConflict({ dateYMD, startHM, durationMin }) {
 }
 
 async function createCalendarTurno({ dateYMD, startHM, durationMin, cliente, telefono, servicio, notas }) {
-  if (!CALENDAR_ID) {
-    console.warn("⚠️ CALENDAR_ID no configurado. No se pudo crear el evento en Google Calendar.");
-    return { eventId: "", skipped: true };
-  }
+  if (!CALENDAR_ID) return { eventId: "", skipped: true };
+
+  const safeDate = toYMD(dateYMD);
+  const safeHM = normalizeHourHM(startHM);
+  if (!safeDate || !safeHM) throw new Error('Valor de tiempo no válido');
 
   const cal = await getCalendarClient();
-  const startLocal = { ymd: dateYMD, hm: startHM };
+  const startLocal = { ymd: safeDate, hm: safeHM };
   const endLocal = addMinutesToYMDHM(startLocal, Number(durationMin) || 60);
 
   const summary = `Turno Cataleya - ${cliente || "Cliente"}${servicio ? ` (${servicio})` : ""}`;
   const description = [
-    cliente ? `Cliente: ${cliente}` : "",
-    telefono ? `Teléfono: ${normalizePhone(telefono)}` : "",
+    telefono ? `Tel: ${normalizePhone(telefono)}` : "",
     servicio ? `Servicio: ${servicio}` : "",
-    `Seña: ${TURNOS_SENA_TXT} verificada`,
     notas ? `Notas: ${notas}` : "",
   ].filter(Boolean).join("\n");
 
   const event = {
     summary,
     description,
-    start: { dateTime: `${startLocal.ymd}T${startLocal.hm}:00-03:00`, timeZone: TIMEZONE },
-    end: { dateTime: `${endLocal.ymd}T${endLocal.hm}:00-03:00`, timeZone: TIMEZONE },
+    start: { dateTime: `${startLocal.ymd}T${startLocal.hm}:00`, timeZone: TIMEZONE },
+    end: { dateTime: `${endLocal.ymd}T${endLocal.hm}:00`, timeZone: TIMEZONE },
   };
 
   const inserted = await cal.events.insert({
@@ -2007,21 +2040,20 @@ function formatStockListAll(rows, chunkSize = 12) {
 
 function formatServicesReply(matches, mode) {
   if (!matches.length) return null;
-  const limited = mode === "LIST" ? matches.slice(0, 10) : matches.slice(0, 3);
+  const limited = mode === "LIST" ? matches.slice(0, 10) : matches.slice(0, 1);
 
-  if (mode !== "LIST") {
+  if (mode !== 'LIST') {
     const s = limited[0];
     const priceTxt = moneyOrConsult(s.precio);
-    const extra = [];
-    if (s.duracion) extra.push(`⏱️ Duración estimada: ${s.duracion}`);
-    return [
-      `✨ ${s.nombre}`,
-      ``,
-      `💲 Precio: ${priceTxt}`,
-      ...extra,
-      ``,
-      `Si desea, puedo ayudarle a sacar un turno 😊`,
-    ].join("\n").trim();
+    const durTxt = s.duracion ? `
+⏱️ Duración: ${s.duracion}` : "";
+    const extra = s.descripcion ? `
+${String(s.descripcion).trim()}` : "";
+    return `✨ ${s.nombre}
+
+💲 Precio: ${priceTxt}${durTxt}${extra}
+
+Si quiere, puedo ayudarle a sacar un turno 😊`.trim();
   }
 
   const lines = limited.map(s => {
@@ -2030,7 +2062,8 @@ function formatServicesReply(matches, mode) {
     return `• ${s.nombre}: *${priceTxt}*${durTxt}`;
   });
 
-  return `Servicios:\n${lines.join("\n")}`.trim();
+  return `Servicios:
+${lines.join("\n")}`.trim();
 }
 
 function textAsksForServicesList(text) {
@@ -2679,14 +2712,56 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
     const lastKnownService = getLastKnownService(waId, pendingDraft);
 
     async function askForMissingTurnoData(base) {
-      const pedir = [];
-      if (!base.servicio) pedir.push("• ¿Qué servicio desea? (Escríbalo como figura en nuestra lista. Ej: Alisado)");
-      if (!base.fecha) pedir.push("• ¿Para qué fecha? (ej: 20/02 o mañana)");
-      if (!base.hora) pedir.push("• ¿En qué horario? (ej: 10:30)");
-      const intro = [];
-      if (base.servicio) intro.push(`✨ ${base.servicio}`);
-      intro.push(`Perfecto 😊 vamos a coordinar su turno.`);
-      const msgFalt = `${maybeTurnoInfoBlock(waId)}\n\n${intro.join("\\n")}\n\nPara avanzar necesito:\n${pedir.join("\\n")}`.trim();
+      const servicioTxt = base?.servicio || base?.last_service_name || "";
+
+      if (!servicioTxt) {
+        const msgFalt = `Perfecto 😊 vamos a coordinar su turno.
+
+✨ Primero necesito que me diga qué servicio desea.`;
+        pushHistory(waId, "assistant", msgFalt);
+        await sendWhatsAppText(phone, msgFalt);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+
+      if (!base?.fecha && !base?.hora) {
+        const msgFalt = `Perfecto 😊 vamos a coordinar su turno.
+
+Servicio: ${servicioTxt}
+
+📅 Dígame qué día le gustaría
+🕐 y en qué horario dentro de estos rangos:
+
+• 10:00 a 12:00
+• 17:00 a 20:00`;
+        pushHistory(waId, "assistant", msgFalt);
+        await sendWhatsAppText(phone, msgFalt);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+
+      if (!base?.fecha) {
+        const msgFalt = `Perfecto 😊
+
+Servicio: ${servicioTxt}
+
+📅 Dígame qué día le gustaría.`;
+        pushHistory(waId, "assistant", msgFalt);
+        await sendWhatsAppText(phone, msgFalt);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+
+      const fechaTxt = ymdToDMY(base.fecha);
+      const msgFalt = `Perfecto 😊
+
+Servicio: ${servicioTxt}
+📅 Día: ${fechaTxt}
+
+🕐 Ahora dígame qué horario prefiere dentro de estos rangos:
+
+• 10:00 a 12:00
+• 17:00 a 20:00`;
       pushHistory(waId, "assistant", msgFalt);
       await sendWhatsAppText(phone, msgFalt);
       scheduleInactivityFollowUp(waId, phone);
@@ -2697,8 +2772,8 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
       await saveAppointmentDraft(waId, phone, toSave);
       const msgSoloNombre = `Perfecto 😊
 
-Para continuar, envíeme por favor:
-• Nombre completo (nombre y apellido)`;
+Para registrar el turno necesito:
+👤 Nombre completo`;
       pushHistory(waId, "assistant", msgSoloNombre);
       await sendWhatsAppText(phone, msgSoloNombre);
       scheduleInactivityFollowUp(waId, phone);
@@ -2707,10 +2782,10 @@ Para continuar, envíeme por favor:
     async function askForPhone(base) {
       const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_phone', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
-      const msgTelefono = `Gracias 😊
+      const msgTelefono = `Perfecto 😊
 
-Ahora envíeme por favor:
-• Número de teléfono de contacto`;
+Ahora necesito:
+📱 Número de teléfono de contacto`;
       pushHistory(waId, "assistant", msgTelefono);
       await sendWhatsAppText(phone, msgTelefono);
       scheduleInactivityFollowUp(waId, phone);
@@ -2719,24 +2794,25 @@ Ahora envíeme por favor:
     async function askForPayment(base) {
       await saveAppointmentDraft(waId, phone, { ...base, awaiting_contact: false, flow_step: 'awaiting_payment', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' });
       const diaOk = base.fecha ? weekdayEsFromYMD(base.fecha) : '';
+      const fechaTxt = base.fecha ? ymdToDMY(base.fecha) : '';
       const lines = [
-        '✅ Horario disponible',
+        '✅ Turno tomado provisoriamente',
         '',
-        `Servicio: ${base.servicio}`,
-        `📅 Día: ${diaOk ? `${diaOk} ` : ''}${base.fecha ? ymdToDMY(base.fecha) : ''}`.trim(),
-        `🕐 Hora: ${base.hora}`,
+        `Servicio: ${base.servicio || base.last_service_name || ''}`,
+        `📅 Día: ${diaOk ? `${diaOk} ` : ''}${fechaTxt}`.trim(),
+        `🕐 Hora: ${normalizeHourHM(base.hora) || base.hora || ''}`,
         '',
         `Para confirmar el turno se solicita una seña de ${TURNOS_SENA_TXT}.`,
         '',
         '💳 Datos para la transferencia',
         '',
         'Alias',
-        `${TURNOS_ALIAS}`,
+        TURNOS_ALIAS,
         '',
         'Titular',
-        `${TURNOS_ALIAS_TITULAR}`,
+        TURNOS_ALIAS_TITULAR,
         '',
-        'Cuando realice la transferencia, envíe por aquí la foto, captura o PDF del comprobante 📩',
+        'Cuando haga la transferencia, envíe por aquí el comprobante 📩',
       ];
       const msgPago = lines.join('\n').trim();
       pushHistory(waId, "assistant", msgPago);
@@ -2745,14 +2821,10 @@ Ahora envíeme por favor:
     }
 
     async function respondFinalizeResult(base, result) {
+
       if (result.type === "busy") {
         const diaC = weekdayEsFromYMD(base.fecha);
-        const msgBusy = `Ese horario ya está ocupado 😊
-
-📅 Día: ${diaC} ${ymdToDMY(base.fecha)}
-🕐 Hora: ${base.hora}
-
-Si desea, le muestro otro horario disponible.`;
+        const msgBusy = `Ese horario ya está ocupado (${diaC} ${ymdToDMY(base.fecha)} ${normalizeHourHM(base.hora) || base.hora}). ¿Le sirve otro horario?`;
         pushHistory(waId, "assistant", msgBusy);
         await sendWhatsAppText(phone, msgBusy);
         scheduleInactivityFollowUp(waId, phone);
@@ -2770,9 +2842,7 @@ Si desea, le muestro otro horario disponible.`;
         if (base.payment_status === 'payment_review' && (base.payment_proof_media_id || base.payment_proof_text)) {
           const msgRev = `Recibí el comprobante 😊
 
-Lo estoy validando con los datos del turno. Si todo coincide, le confirmo la reserva enseguida.
-
-Si desea agilizarlo, también puede escribir el monto y el nombre del titular que figura en el comprobante.`;
+Lo estoy validando con los datos del turno. En cuanto quede confirmado, le aviso por aquí.`;
           await saveAppointmentDraft(waId, phone, { ...base, awaiting_contact: false, flow_step: 'payment_review', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' });
           pushHistory(waId, 'assistant', msgRev);
           await sendWhatsAppText(phone, msgRev);
@@ -2792,11 +2862,11 @@ Si desea agilizarlo, también puede escribir el monto y el nombre del titular qu
 
 Servicio: ${base.servicio}
 📅 Día: ${diaOk} ${ymdToDMY(base.fecha)}
-🕐 Hora: ${base.hora}
+🕐 Hora: ${normalizeHourHM(base.hora) || base.hora}
 
-Seña verificada: *Sí* ✅
+Seña recibida ✔
 
-Como es un servicio de color/tintura, primero lo confirmo con la estilista ${TURNOS_STYLIST_NAME} y le aviso por acá 😊`.trim();
+Ahora consulto con la estilista ${TURNOS_STYLIST_NAME} y le confirmo por aquí.`.trim();
         pushHistory(waId, "assistant", msgPend);
         await sendWhatsAppText(phone, msgPend);
         scheduleInactivityFollowUp(waId, phone);
@@ -2808,9 +2878,9 @@ Como es un servicio de color/tintura, primero lo confirmo con la estilista ${TUR
 
 Servicio: ${base.servicio}
 📅 Día: ${diaOk} ${ymdToDMY(base.fecha)}
-🕐 Hora: ${base.hora}
+🕐 Hora: ${normalizeHourHM(base.hora) || base.hora}
 
-Estado: *SEÑA VERIFICADA* ✅`.trim();
+Seña recibida ✔`.trim();
         pushHistory(waId, "assistant", msgOk);
         await sendWhatsAppText(phone, msgOk);
         scheduleInactivityFollowUp(waId, phone);
@@ -2824,8 +2894,8 @@ Estado: *SEÑA VERIFICADA* ✅`.trim();
       let merged = {
         ...pendingDraft,
         fecha: pendingDraft.fecha || "",
-        hora: pendingDraft.hora || "",
-        servicio: pendingDraft.servicio || "",
+        hora: normalizeHourHM(pendingDraft.hora || ""),
+        servicio: pendingDraft.servicio || pendingDraft.last_service_name || lastKnownService?.nombre || "",
         duracion_min: Number(pendingDraft.duracion_min || 60) || 60,
         notas: pendingDraft.notas || "",
       };
@@ -2834,7 +2904,7 @@ Estado: *SEÑA VERIFICADA* ✅`.trim();
         merged = {
           ...merged,
           fecha: turno.fecha || merged.fecha || "",
-          hora: turno.hora || merged.hora || "",
+          hora: normalizeHourHM(turno.hora || merged.hora || ""),
           servicio: turno.servicio || merged.servicio || "",
           duracion_min: Number(turno.duracion_min || merged.duracion_min || 60) || 60,
           notas: turno.notas || merged.notas || "",
@@ -2876,7 +2946,7 @@ Estado: *SEÑA VERIFICADA* ✅`.trim();
       if (turno?.ok || pendingDraft || lastKnownService) {
         const merged = {
           fecha: toYMD(turno?.fecha || pendingDraft?.fecha || ""),
-          hora: turno?.hora || pendingDraft?.hora || "",
+          hora: normalizeHourHM(turno?.hora || pendingDraft?.hora || ""),
           servicio: turno?.servicio || pendingDraft?.servicio || lastKnownService?.nombre || "",
           duracion_min: Number(turno?.duracion_min || pendingDraft?.duracion_min || 60) || 60,
           notas: turno?.notas || pendingDraft?.notas || "",
