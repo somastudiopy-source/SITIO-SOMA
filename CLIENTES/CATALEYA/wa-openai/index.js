@@ -2782,34 +2782,49 @@ function formatStockRelatedListAll(rows, { familyLabel = '', chunkSize = 10 } = 
   return chunks;
 }
 
-function formatServicesReply(matches, mode) {
+function formatServicesReply(matches, mode, opts = {}) {
   if (!matches.length) return null;
+
+  const options = {
+    showDuration: false,
+    showDescription: false,
+    ...opts,
+  };
+
   const limited = mode === "LIST" ? matches.slice(0, 10) : matches.slice(0, 1);
 
   if (mode !== 'LIST') {
     const s = limited[0];
     const priceTxt = moneyOrConsult(s.precio);
-    const durTxt = s.duracion ? `
-⏱️ Duración: ${s.duracion}` : "";
-    const extra = s.descripcion ? `
-${String(s.descripcion).trim()}` : "";
-    return `✨ ${s.nombre}
+    const parts = [
+      `✨ *${s.nombre}*`,
+      `• Precio: *${priceTxt}*`,
+    ];
 
-💲 Precio: ${priceTxt}${durTxt}${extra}
+    if (options.showDuration && s.duracion) {
+      parts.push(`• Duración: *${s.duracion}*`);
+    }
 
-Si quiere, puedo ayudarle a sacar un turno 😊`.trim();
+    if (options.showDescription && s.descripcion) {
+      parts.push(`• Info: ${String(s.descripcion).trim()}`);
+    }
+
+    const footer = options.showDuration || options.showDescription
+      ? `\n\nSi quiere, también puedo ayudarle a sacar un turno 😊`
+      : `\n\nSi quiere, también le digo cuánto demora o le ayudo a sacar un turno 😊`;
+
+    return `${parts.join("\\n")}${footer}`.trim();
   }
 
-  const lines = limited.map(s => {
+  const blocks = limited.map((s) => {
     const priceTxt = moneyOrConsult(s.precio);
-    const durTxt = s.duracion ? ` | ${s.duracion}` : "";
-    return `• ${s.nombre}: *${priceTxt}*${durTxt}`;
+    return [
+      `✨ *${s.nombre}*`,
+      `• Precio: *${priceTxt}*`,
+    ].join("\\n");
   });
 
-  return `✨ Estos son algunos servicios disponibles:
-${lines.join("\n")}
-
-Si quiere, también puedo ayudarle a elegir el más indicado 😊`.trim();
+  return `✨ Estos son algunos servicios disponibles:\\n\\n${blocks.join("\\n\\n— — —\\n\\n")}\\n\\nSi quiere, también le digo cuánto demora cada uno 😊`.trim();
 }
 
 function textAsksForServicesList(text) {
@@ -2822,19 +2837,32 @@ function textAsksForServicePrice(text) {
   return /(precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|valor)/i.test(t);
 }
 
-function formatServicesListAll(rows, chunkSize = 12) {
+function textAsksForServiceDuration(text) {
+  const t = normalize(text || "");
+  return /(cuanto demora|cuánto demora|cuanto tarda|cuánto tarda|demora|demore|duracion|duración|cuantas horas|cuántas horas|tiempo del servicio|cuanto dura|cuánto dura)/i.test(t);
+}
+
+function formatServicesListAll(rows, chunkSize = 6) {
   const items = Array.isArray(rows) ? rows.filter(r => r?.nombre) : [];
   if (!items.length) return [];
   const chunks = [];
+
   for (let i = 0; i < items.length; i += chunkSize) {
     const part = items.slice(i, i + chunkSize);
-    const lines = part.map(s => {
+    const blocks = part.map((s) => {
       const priceTxt = s.precio ? moneyOrConsult(s.precio) : "consultar";
-      const durTxt = s.duracion ? ` | ${s.duracion}` : "";
-      return `• ${s.nombre}: *${priceTxt}*${durTxt}`;
+      return [
+        `✨ *${s.nombre}*`,
+        `• Precio: *${priceTxt}*`,
+      ].join("\\n");
     });
-    const header = i === 0 ? "Servicios disponibles:" : "Más servicios:";
-    chunks.push(`${header}\n${lines.join("\n")}`.trim());
+
+    const header = i === 0 ? "✨ Servicios disponibles:" : "✨ Más servicios:";
+    const footer = (i + chunkSize) >= items.length
+      ? `\n\nSi quiere, también le digo cuánto demora cada uno 😊`
+      : `\n\n(Sigo con más servicios…)`;
+
+    chunks.push(`${header}\\n\\n${blocks.join("\\n\\n— — —\\n\\n")}${footer}`.trim());
   }
   return chunks;
 }
@@ -4130,6 +4158,43 @@ Seña recibida ✔`.trim();
       if (replyCatalog) {
         pushHistory(waId, 'assistant', replyCatalog);
         await sendWhatsAppText(phone, replyCatalog);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+    }
+
+    if (textAsksForServiceDuration(text)) {
+      const services = await getServicesCatalog();
+      const ctxService = pendingDraft?.servicio || lastKnownService?.nombre || "";
+      let durationMatches = findServiceByContext(services, text, ctxService);
+
+      if (durationMatches.length) {
+        const selectedService = durationMatches[0];
+        if (selectedService?.nombre) {
+          lastServiceByUser.set(waId, { nombre: selectedService.nombre, ts: Date.now() });
+          if (pendingDraft) {
+            await saveAppointmentDraft(waId, phone, {
+              ...pendingDraft,
+              servicio: pendingDraft.servicio || selectedService.nombre,
+              last_service_name: selectedService.nombre,
+              last_intent: 'service_consultation',
+              flow_step: pendingDraft.flow_step || inferDraftFlowStep({ ...pendingDraft, servicio: pendingDraft.servicio || selectedService.nombre }),
+            });
+          }
+        }
+        const replyDuration = formatServicesReply(durationMatches, "DETAIL", { showDuration: true, showDescription: true });
+        if (replyDuration) {
+          pushHistory(waId, "assistant", replyDuration);
+          await sendWhatsAppText(phone, replyDuration);
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
+      }
+
+      if (ctxService) {
+        const msgNoDuration = `No encuentro la duración cargada para *${ctxService}* en este momento.`;
+        pushHistory(waId, "assistant", msgNoDuration);
+        await sendWhatsAppText(phone, msgNoDuration);
         scheduleInactivityFollowUp(waId, phone);
         return;
       }
