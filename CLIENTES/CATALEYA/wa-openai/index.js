@@ -280,6 +280,8 @@ TURNOS:
 - No inventes precios ni servicios: solo los que figuran en el Excel de servicios. 
 - NO se ofrece lifting de pestañas, cejas, perfilado, uñas, limpiezas faciales ni otros servicios fuera del Excel.
 
+- Corte femenino sale $20.000 y es con turno. Incluye Lavado.
+
 - si busca Corte masculino / varón / hombre: es SOLO por orden de llegada, no se toma turno. Horario: Lunes a Sábados 10 a 13 hs y 17 a 22 hs. Precio final: $10.000 PESOS
 
 - Horario del salón comercial: Lunes a Viernes de 17 a 22 hs.
