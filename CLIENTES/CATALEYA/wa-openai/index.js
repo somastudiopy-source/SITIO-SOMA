@@ -2195,6 +2195,7 @@ Además:
 Tené en cuenta el contexto previo:
 - servicio_actual: si existe, mensajes como "quiero el turno", "dale", "quiero ese", "bien" suelen referirse a ese servicio.
 - flujo_actual: si el cliente ya estaba hablando de reservar, priorizá continuidad y no lo mandes a catálogo de nuevo.
+- Si el mensaje mezcla precio + turno, y la pregunta principal es el precio, clasificá como SERVICE en modo DETAIL para que responda primero el precio.
 
 Respondé SOLO JSON.`
       },
@@ -2221,6 +2222,57 @@ Respondé SOLO JSON.`
     };
   } catch {
     return { type: "OTHER", query: "", mode: "DETAIL" };
+  }
+}
+
+async function classifyServiceActionWithAI(text, context = {}) {
+  const raw = String(text || '').trim();
+  if (!raw) return { action: 'OTHER', query: '' };
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Analizá el mensaje de un cliente de peluquería y devolvé SOLO JSON.
+
+Campos:
+- action: uno de PRICE, BOOK, LIST_SERVICES, OTHER
+- query: nombre del servicio o consulta corta
+
+Reglas muy importantes:
+- Si el mensaje mezcla pedido de turno + pregunta de precio, PRIORIZÁ PRICE.
+- "quiero un turno para corte mujer, qué precio tiene" => PRICE
+- "quiero turno para corte mujer" => BOOK
+- "qué servicios tienen" => LIST_SERVICES
+- Si el cliente ya venía hablando de un servicio y dice "quiero el turno", "dale", "reservame", => BOOK
+- No inventes servicios. Si no está claro, usá OTHER.
+- Respondé SOLO JSON.`
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje: raw,
+            servicio_actual: context.lastServiceName || '',
+            flujo_actual: context.flowStep || '',
+            tiene_borrador_turno: !!context.hasDraft,
+            historial_reciente: context.historySnippet || '',
+          })
+        }
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+    });
+
+    const obj = JSON.parse(completion.choices[0].message.content || '{}');
+    return {
+      action: String(obj.action || 'OTHER').trim().toUpperCase(),
+      query: String(obj.query || '').trim(),
+    };
+  } catch {
+    return { action: 'OTHER', query: '' };
   }
 }
 
@@ -2710,6 +2762,12 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
     const recentDbMessages = await getRecentDbMessages(phone, 12);
     const convForAI = mergeConversationForAI(recentDbMessages, ensureConv(waId).messages || []);
     const lastKnownService = getLastKnownService(waId, pendingDraft);
+    const serviceAction = await classifyServiceActionWithAI(text, {
+      lastServiceName: lastKnownService?.nombre || '',
+      flowStep: pendingDraft?.flow_step || '',
+      hasDraft: !!pendingDraft,
+      historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1600),
+    });
 
     async function askForMissingTurnoData(base) {
       const servicioTxt = base?.servicio || base?.last_service_name || "";
@@ -2889,6 +2947,56 @@ Seña recibida ✔`.trim();
       return false;
     }
 
+
+    if (serviceAction.action === 'LIST_SERVICES') {
+      const services = await getServicesCatalog();
+      const parts = formatServicesListAll(services, 6);
+      for (const part of parts.slice(0, 3)) {
+        pushHistory(waId, "assistant", part);
+        await sendWhatsAppText(phone, part);
+      }
+      scheduleInactivityFollowUp(waId, phone);
+      return;
+    }
+
+    if (serviceAction.action === 'PRICE') {
+      const services = await getServicesCatalog();
+      const ctxService = pendingDraft?.servicio || lastKnownService?.nombre || "";
+      const serviceQuery = serviceAction.query || text;
+      let priceMatches = findServiceByContext(services, serviceQuery, ctxService);
+
+      if (priceMatches.length) {
+        const selectedService = priceMatches[0];
+        if (selectedService?.nombre) {
+          lastServiceByUser.set(waId, { nombre: selectedService.nombre, ts: Date.now() });
+          if (pendingDraft) {
+            await saveAppointmentDraft(waId, phone, {
+              ...pendingDraft,
+              servicio: pendingDraft.servicio || selectedService.nombre,
+              last_service_name: selectedService.nombre,
+              last_intent: 'service_consultation',
+              flow_step: pendingDraft.flow_step || inferDraftFlowStep({ ...pendingDraft, servicio: pendingDraft.servicio || selectedService.nombre }),
+            });
+          }
+        }
+        const replyPrice = formatServicesReply(priceMatches, "DETAIL");
+        if (replyPrice) {
+          pushHistory(waId, "assistant", replyPrice);
+          await sendWhatsAppText(phone, replyPrice);
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
+      }
+
+      if (ctxService) {
+        const msgNoPrice = `No encuentro el precio cargado para *${ctxService}* en este momento.`;
+        pushHistory(waId, "assistant", msgNoPrice);
+        await sendWhatsAppText(phone, msgNoPrice);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+    }
+
     if (pendingDraft && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
       const turno = await extractTurnoFromText({ text, customerName: name, context: pendingDraft });
       let merged = {
@@ -2929,7 +3037,7 @@ Seña recibida ✔`.trim();
       if (handled) return;
     }
 
-    const looksLikeTurno = looksLikeAppointmentIntent(text, { pendingDraft, lastService: lastKnownService });
+    const looksLikeTurno = serviceAction.action === 'BOOK' || looksLikeAppointmentIntent(text, { pendingDraft, lastService: lastKnownService });
     if (looksLikeTurno && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
       const turno = await extractTurnoFromText({
         text,
@@ -2991,7 +3099,7 @@ Seña recibida ✔`.trim();
       }
     }
 
-    if (textAsksForServicesList(text)) {
+    if (serviceAction.action === 'LIST_SERVICES' || textAsksForServicesList(text)) {
       const services = await getServicesCatalog();
       const parts = formatServicesListAll(services, 6);
       for (const part of parts.slice(0, 3)) {
@@ -3002,10 +3110,11 @@ Seña recibida ✔`.trim();
       return;
     }
 
-    if (textAsksForServicePrice(text)) {
+    if (serviceAction.action === 'PRICE' || textAsksForServicePrice(text)) {
       const services = await getServicesCatalog();
       const ctxService = pendingDraft?.servicio || lastKnownService?.nombre || "";
-      let priceMatches = findServiceByContext(services, text, ctxService);
+      const serviceQuery = serviceAction.query || text;
+      let priceMatches = findServiceByContext(services, serviceQuery, ctxService);
 
       if (priceMatches.length) {
         const selectedService = priceMatches[0];
