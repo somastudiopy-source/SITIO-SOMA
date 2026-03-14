@@ -2119,6 +2119,31 @@ function applyProductTypeGuard(rows, query) {
   return guarded.length ? guarded : rows;
 }
 
+function getGenericProductOptions(rows, query) {
+  const q = canonicalizeQuery(query || '');
+  if (!q) return [];
+  if (!isGenericProductQuery(q)) return [];
+
+  const keys = extractProductTypeKeywords(q);
+  if (!keys.length) return [];
+
+  const matches = rows.filter((r) => {
+    const haystack = canonicalizeQuery(`${r.nombre} ${r.categoria} ${r.marca} ${r.descripcion} ${r.tab}`);
+    return keys.some((k) => new RegExp(`\b${k}\b`, 'i').test(haystack));
+  });
+
+  const uniq = [];
+  const seen = new Set();
+  for (const item of matches) {
+    const key = canonicalizeQuery(`${item.nombre}::${item.marca}::${item.precio}`);
+    if (!item?.nombre || seen.has(key)) continue;
+    seen.add(key);
+    uniq.push(item);
+  }
+
+  return uniq;
+}
+
 function findStock(rows, query, mode) {
   const q = canonicalizeQuery(query);
   if (!q) return [];
@@ -3593,6 +3618,18 @@ Seña recibida ✔`.trim();
       }
     }
 
+    const stockCatalogForGeneric = await getStockCatalog();
+    const genericProductMatches = getGenericProductOptions(stockCatalogForGeneric, text);
+    if (!pendingDraft && genericProductMatches.length) {
+      const parts = formatStockListAll(genericProductMatches, 12);
+      for (const part of parts) {
+        pushHistory(waId, "assistant", part);
+        await sendWhatsAppText(phone, part);
+      }
+      scheduleInactivityFollowUp(waId, phone);
+      return;
+    }
+
     const intent = await classifyAndExtract(text, {
       lastServiceName: lastKnownService?.nombre || '',
       flowStep: pendingDraft?.flow_step || '',
@@ -3657,7 +3694,10 @@ Seña recibida ✔`.trim();
         return;
       }
 
-      const matches = intent.query ? findStock(stock, intent.query, productMode) : [];
+      const genericMatches = getGenericProductOptions(stock, intent.query || text);
+      const matches = genericMatches.length
+        ? genericMatches
+        : (intent.query ? findStock(stock, intent.query, productMode) : []);
 
       if (matches.length) {
         lastProductByUser.set(waId, matches[0]);
