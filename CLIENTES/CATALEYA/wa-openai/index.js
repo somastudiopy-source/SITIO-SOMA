@@ -2956,6 +2956,41 @@ ${lines.join("\n")}${footer}`.trim());
   return chunks;
 }
 
+
+function isGenericHaircutQuery(text) {
+  const t = normalize(text || "");
+  if (!/\bcorte\b/i.test(t)) return false;
+  if (detectMaleContext(text) || detectFemaleContext(text)) return false;
+  if (/\b(mechit|balayage|keratina|botox|alisado|nutricion|nutrición|color|tintura|emulsion|emulsión|reflejos)\b/i.test(t)) return false;
+  return true;
+}
+
+function getHaircutServiceOptions(rows) {
+  const services = Array.isArray(rows) ? rows.filter(Boolean) : [];
+  const corteRows = services.filter((r) => /\bcorte\b/i.test(normalize(cleanServiceName(r.nombre))));
+  if (!corteRows.length) return { female: null, male: null };
+
+  const male = corteRows.find((r) => /(mascul|varon|hombre|caballero|barber)/i.test(normalize(`${r.nombre} ${r.categoria || ''} ${r.subcategoria || ''}`))) || null;
+  const female = corteRows.find((r) => !/(mascul|varon|hombre|caballero|barber)/i.test(normalize(`${r.nombre} ${r.categoria || ''} ${r.subcategoria || ''}`))) || null;
+  return { female, male };
+}
+
+function formatGenericHaircutReply(rows) {
+  const { female, male } = getHaircutServiceOptions(rows);
+  if (!female && !male) return '';
+
+  const lines = [];
+  if (female) {
+    lines.push(`✂️ *${cleanServiceName(female.nombre) || 'Corte femenino'}* — *${cleanServicePriceText(female.precio)}*`);
+  }
+  if (male) {
+    const extra = /orden de llegada/i.test(String(male.subcategoria || '')) ? ' _(solo por orden de llegada)_' : '';
+    lines.push(`✂️ *${cleanServiceName(male.nombre) || 'Corte masculino'}* — *${cleanServicePriceText(male.precio)}*${extra}`);
+  }
+
+  return `✂️ Tenemos estas opciones de corte:\n\n${lines.join("\n")}\n\nSi quiere, también le digo cuál es con turno y cuál es por orden de llegada 😊`.trim();
+}
+
 function sanitizeServiceLookupText(text) {
   let t = normalize(text || '');
   if (!t) return '';
@@ -3811,12 +3846,25 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
     // ===================== ✅ REGLAS ESPECIALES (sin inventar servicios) =====================
     const normTxt = normalize(text);
 
-    // Corte masculino: solo por orden de llegada (no se toma turno)
-    if (/(\bcorte\b.*\b(mascul|varon|hombre)\b|\bcorte\s+masculino\b|\bbarber\b|\bbarberia\b)/i.test(normTxt) && !detectFemaleContext(text)) {
-      const msgMasc = `✂️ Corte masculino: es SOLO por orden de llegada (no se toma turno).
+    // Corte genérico: ofrecer SIEMPRE las 2 opciones reales del Excel (femenino + masculino)
+    if (isGenericHaircutQuery(text)) {
+      const services = await getServicesCatalog();
+      const genericHaircutReply = formatGenericHaircutReply(services);
+      if (genericHaircutReply) {
+        pushHistory(waId, "assistant", genericHaircutReply);
+        await sendWhatsAppText(phone, genericHaircutReply);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+    }
 
-🕒 Horarios: Lunes a Sábados 10 a 13 hs y 17 a 22 hs.
-💲 Precio final: $10.000.`;
+    // Corte masculino: responder con el dato real del Excel cuando esté disponible
+    if (/(\bcorte\b.*\b(mascul|varon|hombre)\b|\bcorte\s+masculino\b|\bbarber\b|\bbarberia\b)/i.test(normTxt) && !detectFemaleContext(text)) {
+      const services = await getServicesCatalog();
+      const { male } = getHaircutServiceOptions(services);
+      const precioMasc = male ? cleanServicePriceText(male.precio) : '$10.000';
+      const nombreMasc = male ? cleanServiceName(male.nombre) : 'Corte masculino';
+      const msgMasc = `✂️ *${nombreMasc}*: es SOLO por orden de llegada (no se toma turno).\n\n💲 Precio: *${precioMasc}*.`;
       pushHistory(waId, "assistant", msgMasc);
       await sendWhatsAppText(phone, msgMasc);
       scheduleInactivityFollowUp(waId, phone);
