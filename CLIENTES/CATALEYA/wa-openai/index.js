@@ -273,7 +273,7 @@ TURNOS:
   - Horarios de turnos: Lunes a Sábados de 10 a 12 hs y de 17 a 20 hs.
   - Para CONFIRMAR TURNO, se requiere seña obligatoria de $10.000. Si no lo abona, no se guardará el turno.
   - Alias para transferir: Cataleya178
-  sale a nombre Monica Pachecho. Luego debe enviar foto/captura del comprobante.
+  sale a nombre Monica Pacheco. Luego debe enviar foto/captura del comprobante.
 
   - Si el cliente pide turno para color/tintura/teñirse/retocar: luego de elegir día y horario, responder que queda en confirmar y que se consulta con la estilista.
   - Al registrar un turno, solicitar nombre completo y teléfono de contacto. Si ya pagó seña, marcar como SEÑADO.
