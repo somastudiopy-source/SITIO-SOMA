@@ -2956,130 +2956,13 @@ ${lines.join("\n")}${footer}`.trim());
   return chunks;
 }
 
-
-function isGenericHaircutQuery(text) {
-  const t = normalize(text || "");
-  if (!/\bcorte\b/i.test(t)) return false;
-  if (detectMaleContext(text) || detectFemaleContext(text)) return false;
-  if (/\b(mechit|balayage|keratina|botox|alisado|nutricion|nutrición|color|tintura|emulsion|emulsión|reflejos)\b/i.test(t)) return false;
-  return true;
-}
-
-function getHaircutServiceOptions(rows) {
-  const services = Array.isArray(rows) ? rows.filter(Boolean) : [];
-  const corteRows = services.filter((r) => /\bcorte\b/i.test(normalize(cleanServiceName(r.nombre))));
-  if (!corteRows.length) return { female: null, male: null };
-
-  const male = corteRows.find((r) => /(mascul|varon|hombre|caballero|barber)/i.test(normalize(`${r.nombre} ${r.categoria || ''} ${r.subcategoria || ''}`))) || null;
-  const female = corteRows.find((r) => !/(mascul|varon|hombre|caballero|barber)/i.test(normalize(`${r.nombre} ${r.categoria || ''} ${r.subcategoria || ''}`))) || null;
-  return { female, male };
-}
-
-function formatGenericHaircutReply(rows) {
-  const { female, male } = getHaircutServiceOptions(rows);
-  if (!female && !male) return '';
-
-  const lines = [];
-  if (female) {
-    lines.push(`✂️ *${cleanServiceName(female.nombre) || 'Corte femenino'}* — *${cleanServicePriceText(female.precio)}*`);
-  }
-  if (male) {
-    const extra = /orden de llegada/i.test(String(male.subcategoria || '')) ? ' _(solo por orden de llegada)_' : '';
-    lines.push(`✂️ *${cleanServiceName(male.nombre) || 'Corte masculino'}* — *${cleanServicePriceText(male.precio)}*${extra}`);
-  }
-
-  return `✂️ Tenemos estas opciones de corte:\n\n${lines.join("\n")}\n\nSi quiere, también le digo cuál es con turno y cuál es por orden de llegada 😊`.trim();
-}
-
-function sanitizeServiceLookupText(text) {
-  let t = normalize(text || '');
-  if (!t) return '';
-  t = t
-    .replace(/\b(cuanto|cuánto|vale|sale|cuesta|precio|valor|demora|tarda|duracion|duración|tiempo|hora|horas|servicio|ofrecen|ofreces|ofrecer|quiero|necesito|busco|decime|dime|entonces|me|el|la|los|las|un|una|de|del|para|por favor|porfa|porfis|che|hola|bueno|ahora)\b/gi, ' ')
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return t;
-}
-
-function preferServiceMatchesByContext(matches, originalQuery = '') {
-  const list = Array.isArray(matches) ? matches.filter(Boolean) : [];
-  if (!list.length) return [];
-  const q = normalize(originalQuery || '');
-
-  if (/\bcorte\b/i.test(q)) {
-    if (detectFemaleContext(originalQuery)) {
-      const female = list.filter((r) => !/(mascul|varon|hombre|barber)/i.test(normalize(`${r.nombre} ${r.categoria} ${r.subcategoria}`)));
-      if (female.length) return female;
-    }
-
-    if (!detectMaleContext(originalQuery) && !detectFemaleContext(originalQuery)) {
-      const nonMale = list.filter((r) => !/(mascul|varon|hombre|barber)/i.test(normalize(`${r.nombre} ${r.categoria} ${r.subcategoria}`)));
-      if (nonMale.length) return nonMale;
-    }
-  }
-
-  return list;
-}
-
-function findServiceMentionsInText(rows, query) {
-  const q = normalize(query || '');
-  if (!q) return [];
-
-  let direct = rows.filter((r) => {
-    const fullName = normalize(cleanServiceName(r.nombre));
-    const baseName = normalize(getServiceBaseFromName(r.nombre));
-    return (fullName && q.includes(fullName)) || (baseName && q.includes(baseName));
-  });
-  direct = preferServiceMatchesByContext(direct, query);
-  if (direct.length) return direct;
-
-  const sanitized = sanitizeServiceLookupText(query);
-  if (!sanitized) return [];
-
-  if (/\bcorte\b/i.test(q)) {
-    const corte = preferServiceMatchesByContext(rows.filter((r) => /\bcorte\b/i.test(normalize(cleanServiceName(r.nombre)))), query);
-    if (corte.length) return corte;
-  }
-
-  const tokens = sanitized.split(' ').filter((tok) => tok.length >= 4);
-  if (!tokens.length) return [];
-
-  let scored = rows.map((r) => {
-    const hay = normalize(`${cleanServiceName(r.nombre)} ${r.categoria || ''} ${r.subcategoria || ''}`);
-    let score = 0;
-    for (const tok of tokens) {
-      if (hay.includes(tok)) score += tok.length >= 7 ? 3 : 2;
-    }
-    return { row: r, score };
-  }).filter((x) => x.score > 0);
-
-  scored.sort((a, b) => b.score - a.score);
-  const topScore = scored[0]?.score || 0;
-  const top = scored.filter((x) => x.score === topScore).map((x) => x.row);
-  return preferServiceMatchesByContext(top, query);
-}
-
 function findServiceByContext(rows, query, lastServiceName) {
   if (query) {
-    const mentioned = findServiceMentionsInText(rows, query);
-    if (mentioned.length) return mentioned;
-
     const matches = findServices(rows, query, "DETAIL");
     if (matches.length) return matches;
 
-    const sanitized = sanitizeServiceLookupText(query);
-    if (sanitized && sanitized !== normalize(query)) {
-      const sanitizedMentions = findServiceMentionsInText(rows, sanitized);
-      if (sanitizedMentions.length) return sanitizedMentions;
-      const sanitizedMatches = findServices(rows, sanitized, "DETAIL");
-      if (sanitizedMatches.length) return sanitizedMatches;
-    }
-
     const implicit = resolveImplicitServiceFollowupQuery(query, lastServiceName);
     if (implicit) {
-      const implicitMentions = findServiceMentionsInText(rows, implicit);
-      if (implicitMentions.length) return implicitMentions;
       const implicitMatches = findServices(rows, implicit, "DETAIL");
       if (implicitMatches.length) return implicitMatches;
     }
@@ -3846,25 +3729,12 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
     // ===================== ✅ REGLAS ESPECIALES (sin inventar servicios) =====================
     const normTxt = normalize(text);
 
-    // Corte genérico: ofrecer SIEMPRE las 2 opciones reales del Excel (femenino + masculino)
-    if (isGenericHaircutQuery(text)) {
-      const services = await getServicesCatalog();
-      const genericHaircutReply = formatGenericHaircutReply(services);
-      if (genericHaircutReply) {
-        pushHistory(waId, "assistant", genericHaircutReply);
-        await sendWhatsAppText(phone, genericHaircutReply);
-        scheduleInactivityFollowUp(waId, phone);
-        return;
-      }
-    }
-
-    // Corte masculino: responder con el dato real del Excel cuando esté disponible
+    // Corte masculino: solo por orden de llegada (no se toma turno)
     if (/(\bcorte\b.*\b(mascul|varon|hombre)\b|\bcorte\s+masculino\b|\bbarber\b|\bbarberia\b)/i.test(normTxt) && !detectFemaleContext(text)) {
-      const services = await getServicesCatalog();
-      const { male } = getHaircutServiceOptions(services);
-      const precioMasc = male ? cleanServicePriceText(male.precio) : '$10.000';
-      const nombreMasc = male ? cleanServiceName(male.nombre) : 'Corte masculino';
-      const msgMasc = `✂️ *${nombreMasc}*: es SOLO por orden de llegada (no se toma turno).\n\n💲 Precio: *${precioMasc}*.`;
+      const msgMasc = `✂️ Corte masculino: es SOLO por orden de llegada (no se toma turno).
+
+🕒 Horarios: Lunes a Sábados 10 a 13 hs y 17 a 22 hs.
+💲 Precio final: $10.000.`;
       pushHistory(waId, "assistant", msgMasc);
       await sendWhatsAppText(phone, msgMasc);
       scheduleInactivityFollowUp(waId, phone);
@@ -4459,21 +4329,6 @@ Seña recibida ✔`.trim();
         await sendWhatsAppText(phone, msgNoPrice);
         scheduleInactivityFollowUp(waId, phone);
         return;
-      }
-
-      const fallbackMentioned = findServiceMentionsInText(services, text);
-      if (fallbackMentioned.length) {
-        const replyFallbackPrice = formatServicesReply(fallbackMentioned, "DETAIL");
-        if (replyFallbackPrice) {
-          const selectedService = fallbackMentioned[0];
-          if (selectedService?.nombre) {
-            lastServiceByUser.set(waId, { nombre: selectedService.nombre, ts: Date.now() });
-          }
-          pushHistory(waId, "assistant", replyFallbackPrice);
-          await sendWhatsAppText(phone, replyFallbackPrice);
-          scheduleInactivityFollowUp(waId, phone);
-          return;
-        }
       }
     }
 
