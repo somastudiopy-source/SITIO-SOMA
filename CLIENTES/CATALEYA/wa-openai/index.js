@@ -2604,7 +2604,7 @@ function formatRecommendedProductsReply(aiPayload, rows, { familyLabel = '', hai
   const lines = items.map((p) => {
     const precio = moneyOrConsult(p.precio);
     const desc = compactProductDescription(p.descripcion || '', 170);
-    return `✨ *${p.nombre}*\n• Precio: *${precio}*${desc ? `\n• ${desc}` : ''}`;
+    return `${getCatalogItemEmoji(p.nombre, { kind: 'product' })} *${p.nombre}*\n• Precio: *${precio}*${desc ? `\n• ${desc}` : ''}`;
   });
 
   const followUp = aiPayload?.follow_up
@@ -2639,6 +2639,81 @@ function applyServiceGenderContext(rows, query) {
   });
 
   return filtered.length ? filtered : rows;
+}
+
+
+function getCatalogItemEmoji(label, { kind = 'product' } = {}) {
+  const t = normalize(label || '');
+  if (!t) return kind === 'service' ? '💇‍♀️' : '✨';
+  if (/(tijera|corte)/i.test(t)) return '✂️';
+  if (/(navaj|afeitad|barba|shaving|after shave|perfilad)/i.test(t)) return '🪒';
+  if (/(shampoo|acondicionador|mascara|mascarilla|baño de crema|bano de crema|crema|serum|sérum|aceite|oleo|óleo|ampolla|tratamiento|keratina|botox|alisado|protector|gel|cera|matizador|nutricion|nutrición)/i.test(t)) return '🧴';
+  if (/(tintura|color|mechit|balayage|reflejo|decolor|emulsion|emulsión|oxidante)/i.test(t)) return '🎨';
+  if (/(plancha|secador|brushing)/i.test(t)) return '🔥';
+  if (/(curso|capacitacion|capacitación)/i.test(t)) return '🎓';
+  return kind === 'service' ? '💇‍♀️' : '✨';
+}
+
+function cleanServiceName(name) {
+  const raw = String(name || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return '';
+  let clean = raw.replace(/^[^\p{L}\p{N}]+/u, '').trim();
+  const colonIdx = clean.indexOf(':');
+  if (colonIdx > 0) {
+    const first = clean.slice(0, colonIdx).trim();
+    const rest = clean.slice(colonIdx + 1).trim();
+    if (rest && /(orden de llegada|no se toma turno|horario|horarios|duracion|duración|hora|hs\b|solo|sólo)/i.test(rest)) {
+      clean = first;
+    }
+  }
+  return clean;
+}
+
+function cleanServicePriceText(value) {
+  const raw = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return 'consultar';
+  const fromMatch = raw.match(/desde\s*\$\s*[\d\.]+/i);
+  if (fromMatch) return fromMatch[0].replace(/\s+/g, ' ').replace(/desde/i, 'Desde');
+  const priceMatch = raw.match(/\$\s*[\d\.]+/);
+  if (priceMatch) return priceMatch[0].replace(/\s+/g, '');
+  return moneyOrConsult(raw);
+}
+
+function getServiceBaseFromName(name) {
+  const clean = normalize(cleanServiceName(name || ''));
+  if (!clean) return '';
+  if (/\bcorte\b/i.test(clean)) return 'corte';
+  return clean
+    .replace(/\b(femenin[oa]|masculin[oa]|varon|varón|hombre|mujer|dama|caballero|barberia|barbería)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function resolveImplicitServiceFollowupQuery(text, lastServiceName = '') {
+  const t = normalize(text || '');
+  const last = normalize(lastServiceName || '');
+  if (!t || !last) return '';
+
+  const mentionsMale = detectMaleContext(text);
+  const mentionsFemale = detectFemaleContext(text);
+  const hasExplicitServiceTerm = /(corte|keratina|botox|alisado|nutricion|nutrición|mechit|balayage|color|emulsion|emulsión|reflejos|servicio)/i.test(t);
+  const isShortFollowUp = t.length <= 48 || /^(y\b|para\b|el\b|la\b)/i.test(t);
+
+  if ((mentionsMale || mentionsFemale) && !hasExplicitServiceTerm && isShortFollowUp) {
+    const base = getServiceBaseFromName(last);
+    if (base) return `${base} ${mentionsMale ? 'masculino' : 'femenino'}`.trim();
+  }
+
+  if (/^(y ese\?|y ese cuanto sale\?|y ese cuánto sale\?|y ese cuanto demora\?|y ese cuánto demora\?)$/i.test(t)) {
+    return cleanServiceName(lastServiceName);
+  }
+
+  return '';
+}
+
+function recentConversationWasAboutServicePrice(history = []) {
+  const recent = Array.isArray(history) ? history.slice(-6).map((m) => normalize(m?.content || '')).join(' | ') : '';
+  return /(precio:|cuanto sale|cuánto sale|esta \$|está \$|precio final|desde \$)/i.test(recent);
 }
 
 function findServices(rows, query, mode) {
@@ -2708,7 +2783,7 @@ function formatStockReply(matches, mode) {
     const precio = moneyOrConsult(p.precio);
     // ✅ Por pedido: al listar/opciones o detalle, mostrar SOLO nombre y precio.
     return [
-      `✨ *${p.nombre}*`,
+      `${getCatalogItemEmoji(p.nombre, { kind: 'product' })} *${p.nombre}*`,
       `• Precio: *${precio}*`,
     ].join("\n");
   });
@@ -2735,7 +2810,7 @@ function formatStockListAll(rows, chunkSize = 12) {
     const blocks = part.map((p) => {
       const precio = moneyOrConsult(p.precio);
       return [
-        `✨ *${p.nombre}*`,
+        `${getCatalogItemEmoji(p.nombre, { kind: 'product' })} *${p.nombre}*`,
         `• Precio: *${precio}*`,
       ].join("\n");
     });
@@ -2763,7 +2838,7 @@ function formatStockRelatedListAll(rows, { familyLabel = '', chunkSize = 10 } = 
     const blocks = part.map((p) => {
       const precio = moneyOrConsult(p.precio);
       return [
-        `✨ *${p.nombre}*`,
+        `${getCatalogItemEmoji(p.nombre, { kind: 'product' })} *${p.nombre}*`,
         `• Precio: *${precio}*`,
       ].join("\n");
     });
@@ -2795,18 +2870,20 @@ function formatServicesReply(matches, mode, opts = {}) {
 
   if (mode !== 'LIST') {
     const s = limited[0];
-    const priceTxt = moneyOrConsult(s.precio);
+    const cleanName = cleanServiceName(s.nombre);
+    const priceTxt = cleanServicePriceText(s.precio);
+    const emoji = getCatalogItemEmoji(cleanName || s.nombre, { kind: 'service' });
     const parts = [
-      `✨ *${s.nombre}*`,
-      `• Precio: *${priceTxt}*`,
+      `${emoji} *${cleanName || s.nombre}*`,
+      `Precio: *${priceTxt}*`,
     ];
 
     if (options.showDuration && s.duracion) {
-      parts.push(`• Duración: *${s.duracion}*`);
+      parts.push(`Duración: *${s.duracion}*`);
     }
 
     if (options.showDescription && s.descripcion) {
-      parts.push(`• Info: ${String(s.descripcion).trim()}`);
+      parts.push(`Info: ${String(s.descripcion).trim()}`);
     }
 
     const footer = options.showDuration || options.showDescription
@@ -2820,15 +2897,18 @@ Si quiere, también le digo cuánto demora o le ayudo a sacar un turno 😊`;
     return `${parts.join("\n")}${footer}`.trim();
   }
 
-  const blocks = limited.map((s) => {
-    const priceTxt = moneyOrConsult(s.precio);
-    return [
-      `✨ *${s.nombre}*`,
-      `• Precio: *${priceTxt}*`,
-    ].join("\n");
+  const lines = limited.map((s) => {
+    const cleanName = cleanServiceName(s.nombre);
+    const priceTxt = cleanServicePriceText(s.precio);
+    const emoji = getCatalogItemEmoji(cleanName || s.nombre, { kind: 'service' });
+    return `${emoji} *${cleanName || s.nombre}* — *${priceTxt}*`;
   });
 
-  return `✨ Estos son algunos servicios disponibles:\n\n${blocks.join("\n\n— — —\n\n")}\n\nSi quiere, también le digo cuánto demora cada uno 😊`.trim();
+  return `💇‍♀️ Estos son algunos servicios disponibles:
+
+${lines.join("\n")}
+
+Si quiere, también le digo cuánto demora cada uno 😊`.trim();
 }
 
 function textAsksForServicesList(text) {
@@ -2846,31 +2926,32 @@ function textAsksForServiceDuration(text) {
   return /(cuanto demora|cuánto demora|cuanto tarda|cuánto tarda|demora|demore|duracion|duración|cuantas horas|cuántas horas|tiempo del servicio|cuanto dura|cuánto dura)/i.test(t);
 }
 
-function formatServicesListAll(rows, chunkSize = 6) {
+function formatServicesListAll(rows, chunkSize = 8) {
   const items = Array.isArray(rows) ? rows.filter(r => r?.nombre) : [];
   if (!items.length) return [];
   const chunks = [];
 
   for (let i = 0; i < items.length; i += chunkSize) {
     const part = items.slice(i, i + chunkSize);
-    const blocks = part.map((s) => {
-      const priceTxt = s.precio ? moneyOrConsult(s.precio) : "consultar";
-      return [
-        `✨ *${s.nombre}*`,
-        `• Precio: *${priceTxt}*`,
-      ].join("\n");
+    const lines = part.map((s) => {
+      const cleanName = cleanServiceName(s.nombre);
+      const priceTxt = cleanServicePriceText(s.precio);
+      const emoji = getCatalogItemEmoji(cleanName || s.nombre, { kind: 'service' });
+      return `${emoji} *${cleanName || s.nombre}* — *${priceTxt}*`;
     });
 
-    const header = i === 0 ? "✨ Servicios disponibles:" : "✨ Más servicios:";
+    const header = i === 0 ? "💇‍♀️ Servicios disponibles:" : "💇‍♀️ Más servicios:";
     const footer = (i + chunkSize) >= items.length
       ? `
 
 Si quiere, también le digo cuánto demora cada uno 😊`
       : `
 
-(Sigo con más servicios…)`;
+(Le sigo con más servicios…)`;
 
-    chunks.push(`${header}\n\n${blocks.join("\n\n— — —\n\n")}${footer}`.trim());
+    chunks.push(`${header}
+
+${lines.join("\n")}${footer}`.trim());
   }
   return chunks;
 }
@@ -2879,6 +2960,12 @@ function findServiceByContext(rows, query, lastServiceName) {
   if (query) {
     const matches = findServices(rows, query, "DETAIL");
     if (matches.length) return matches;
+
+    const implicit = resolveImplicitServiceFollowupQuery(query, lastServiceName);
+    if (implicit) {
+      const implicitMatches = findServices(rows, implicit, "DETAIL");
+      if (implicitMatches.length) return implicitMatches;
+    }
   }
   if (lastServiceName) {
     const matches = findServices(rows, lastServiceName, "DETAIL");
@@ -4138,7 +4225,7 @@ Seña recibida ✔`.trim();
 
     if (textAsksForServicesList(text)) {
       const services = await getServicesCatalog();
-      const parts = formatServicesListAll(services, 6);
+      const parts = formatServicesListAll(services, 8);
       for (const part of parts.slice(0, 3)) {
         pushHistory(waId, "assistant", part);
         await sendWhatsAppText(phone, part);
@@ -4242,6 +4329,29 @@ Seña recibida ✔`.trim();
         await sendWhatsAppText(phone, msgNoPrice);
         scheduleInactivityFollowUp(waId, phone);
         return;
+      }
+    }
+
+    const implicitServiceFollowupQuery = resolveImplicitServiceFollowupQuery(text, pendingDraft?.servicio || lastKnownService?.nombre || '');
+    if (!pendingDraft && implicitServiceFollowupQuery && !isExplicitProductIntent(text)) {
+      const services = await getServicesCatalog();
+      const implicitMatches = findServices(services, implicitServiceFollowupQuery, 'DETAIL');
+      if (implicitMatches.length) {
+        const selectedService = implicitMatches[0];
+        if (selectedService?.nombre) {
+          lastServiceByUser.set(waId, { nombre: selectedService.nombre, ts: Date.now() });
+        }
+        const wantsDuration = textAsksForServiceDuration(text);
+        const replyImplicit = formatServicesReply(implicitMatches, 'DETAIL', {
+          showDuration: wantsDuration,
+          showDescription: wantsDuration,
+        });
+        if (replyImplicit) {
+          pushHistory(waId, 'assistant', replyImplicit);
+          await sendWhatsAppText(phone, replyImplicit);
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
       }
     }
 
@@ -4573,7 +4683,7 @@ Seña recibida ✔`.trim();
       }
 
       // ✅ Evitar inventar servicios: si no está en el Excel, lo decimos y mostramos opciones reales
-      const some = services.slice(0, 12).map(s => `• ${s.nombre}`).join("\n");
+      const some = services.slice(0, 12).map(s => `${getCatalogItemEmoji(cleanServiceName(s.nombre), { kind: 'service' })} ${cleanServiceName(s.nombre)}`).join("\n");
       const msgNo = `No encuentro ese servicio en nuestra lista.
 
 Servicios disponibles (algunos):
