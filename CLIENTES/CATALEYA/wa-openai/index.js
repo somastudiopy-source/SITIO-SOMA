@@ -518,16 +518,21 @@ Para registrar el turno necesito:
 function normalizeHourHM(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
-  const t = raw.toLowerCase().replace(/hs?\.?$/i, '').replace(/\s+/g, '');
 
-  let m = t.match(/^(\d{1,2})$/);
+  const compact = raw
+    .toLowerCase()
+    .replace(/horas?/g, 'hs')
+    .replace(/\s+/g, '')
+    .replace(/\.$/, '');
+
+  let m = compact.match(/^(\d{1,2})$/);
   if (m) {
     const hh = Number(m[1]);
     if (hh >= 0 && hh <= 23) return `${String(hh).padStart(2, '0')}:00`;
     return '';
   }
 
-  m = t.match(/^(\d{1,2})[:\.](\d{1,2})$/);
+  m = compact.match(/^(\d{1,2})(?:[:\.h])(\d{1,2})$/);
   if (m) {
     const hh = Number(m[1]);
     const mm = Number(m[2]);
@@ -537,11 +542,39 @@ function normalizeHourHM(value) {
     return '';
   }
 
-  m = raw.match(/(\d{1,2})(?::(\d{1,2}))?\s*(hs?|horas?)/i);
+  m = compact.match(/^(\d{1,2})hs$/);
+  if (m) {
+    const hh = Number(m[1]);
+    if (hh >= 0 && hh <= 23) return `${String(hh).padStart(2, '0')}:00`;
+    return '';
+  }
+
+  m = raw.match(/(?:a\s*las|alas|tipo|para\s*las|desde\s*las)?\s*(\d{1,2})(?:[:\.h](\d{1,2}))?\s*(hs?|horas?)/i);
   if (m) {
     const hh = Number(m[1]);
     const mm = Number(m[2] || 0);
     if (hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59) {
+      return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    }
+  }
+
+  return '';
+}
+
+function extractLikelyHourFromText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+
+  const explicit = normalizeHourHM(raw);
+  if (explicit) return explicit;
+
+  const t = normalize(raw);
+
+  let m = t.match(/(?:a las|alas|tipo|para las|desde las)?\s*(\d{1,2})(?:[:\.](\d{1,2}))?\s*(?:hs|hora|horas)?/);
+  if (m) {
+    const hh = Number(m[1]);
+    const mm = Number(m[2] || 0);
+    if (hh >= 7 && hh <= 22 && mm >= 0 && mm <= 59) {
       return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
     }
   }
@@ -860,6 +893,7 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
     return { type: "pending_stylist_confirmation" };
   }
 
+  const notasCalendar = [merged.notas || '', `SEÑA OK ${TURNOS_SENA_TXT}`].filter(Boolean).join(' | ');
   const ev = await createCalendarTurno({
     dateYMD: merged.fecha,
     startHM: merged.hora,
@@ -867,7 +901,7 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
     cliente: merged.cliente_full || "",
     telefono: normalizePhone(merged.telefono_contacto || ""),
     servicio: merged.servicio || "",
-    notas: merged.notas || "",
+    notas: notasCalendar,
   });
 
   await createAppointmentRecord({
@@ -911,6 +945,51 @@ function weekdayEsFromYMD(ymd) {
   } catch {
     return "";
   }
+}
+
+function nextDateForWeekday(targetWeekday) {
+  const today = new Date(`${todayYMDInTZ()}T12:00:00-03:00`);
+  const current = today.getDay();
+  let delta = (targetWeekday - current + 7) % 7;
+  if (delta === 0) delta = 7;
+  const d = new Date(today.getTime() + delta * 24 * 60 * 60 * 1000);
+  return formatYMDHMInTZ(d).ymd;
+}
+
+function extractLikelyDateFromText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+  const t = normalize(raw);
+
+  const explicit = toYMD(raw);
+  if (explicit) return explicit;
+
+  if (/hoy/.test(t)) return todayYMDInTZ();
+  if (/manana/.test(t)) {
+    const d = new Date(`${todayYMDInTZ()}T12:00:00-03:00`);
+    const next = new Date(d.getTime() + 24 * 60 * 60 * 1000);
+    return formatYMDHMInTZ(next).ymd;
+  }
+
+  const weekdays = {
+    domingo: 0,
+    lunes: 1,
+    martes: 2,
+    miercoles: 3,
+    miércoles: 3,
+    jueves: 4,
+    viernes: 5,
+    sabado: 6,
+    sábado: 6,
+  };
+
+  for (const [name, num] of Object.entries(weekdays)) {
+    if (new RegExp(`\b${name}\b`, 'i').test(t)) {
+      return nextDateForWeekday(num);
+    }
+  }
+
+  return '';
 }
 
 function formatYMDHMInTZ(dateObj) {
@@ -1900,36 +1979,65 @@ async function getCoursesCatalog() {
 }
 
 // ===================== BUSCADORES =====================
+const PRODUCT_TYPE_KEYWORDS = [
+  'shampoo', 'champu', 'acondicionador', 'mascara', 'mascarilla', 'tratamiento', 'serum', 'aceite',
+  'oleo', 'tintura', 'oxidante', 'decolorante', 'matizador', 'ampolla', 'keratina', 'protector',
+  'spray', 'crema', 'gel', 'cera', 'botox', 'alisado', 'secador', 'plancha'
+];
+
+function extractProductTypeKeywords(query) {
+  const q = canonicalizeQuery(query || '');
+  if (!q) return [];
+  return PRODUCT_TYPE_KEYWORDS.filter((k) => new RegExp(`\b${k}\b`, 'i').test(q));
+}
+
+function isGenericProductQuery(query) {
+  const q = canonicalizeQuery(query || '');
+  if (!q) return false;
+  const keywords = extractProductTypeKeywords(q);
+  const tokens = tokenize(q, { expandSynonyms: false });
+  return keywords.length > 0 && tokens.length <= Math.max(2, keywords.length + 1);
+}
+
+function applyProductTypeGuard(rows, query) {
+  const keys = extractProductTypeKeywords(query);
+  if (!keys.length) return rows;
+
+  const guarded = rows.filter((r) => {
+    const haystack = canonicalizeQuery(`${r.nombre} ${r.categoria} ${r.tab}`);
+    return keys.some((k) => new RegExp(`\b${k}\b`, 'i').test(haystack));
+  });
+
+  return guarded.length ? guarded : rows;
+}
+
 function findStock(rows, query, mode) {
   const q = canonicalizeQuery(query);
   if (!q) return [];
 
-  // 1) Atajos: si la query es suficientemente específica y matchea fuerte por nombre
-  // (evita gasto y reduce errores)
-  const exact = rows.filter(r => canonicalizeQuery(r.nombre) === q);
+  const guardedRows = applyProductTypeGuard(rows, q);
+
+  const exact = guardedRows.filter(r => canonicalizeQuery(r.nombre) === q);
   if (exact.length) return exact;
 
-  const containsStrong = rows.filter(r => canonicalizeQuery(r.nombre).includes(q) && q.length >= 4);
+  const containsStrong = guardedRows.filter(r => canonicalizeQuery(r.nombre).includes(q) && q.length >= 4);
   if (mode !== "LIST" && containsStrong.length === 1) return containsStrong;
 
-  // 2) Scoring: nombre tiene más peso que categoría/marca/tab.
+  const hasTypeGuard = extractProductTypeKeywords(q).length > 0;
   const scored = [];
-  for (const r of rows) {
+  for (const r of guardedRows) {
     const sNombre = scoreField(q, r.nombre);
-    const sCat = scoreField(q, r.categoria) * 0.78;
-    const sMarca = scoreField(q, r.marca) * 0.72;
-    const sDesc = scoreField(q, r.descripcion) * 0.64;
-    const sTab = scoreField(q, r.tab) * 0.65;
-    // score combinado (evita que una sola coincidencia débil gane)
+    const sCat = scoreField(q, r.categoria) * 0.8;
+    const sMarca = scoreField(q, r.marca) * 0.68;
+    const sDesc = hasTypeGuard ? scoreField(q, r.descripcion) * 0.28 : scoreField(q, r.descripcion) * 0.56;
+    const sTab = scoreField(q, r.tab) * 0.62;
     const score = Math.max(sNombre, sCat, sMarca, sDesc, sTab);
 
-    // Pequeño boost si la query es multi-token y aparece en el nombre por tokens
     const qTok = tokenize(q, { expandSynonyms: true });
     if (qTok.length >= 2) {
       const bag = tokenize(`${r.nombre} ${r.categoria} ${r.marca} ${r.descripcion}`);
       const jac = jaccard(qTok, bag);
       if (jac >= 0.5) {
-        // boost suave (cap a 1)
         const boosted = Math.min(1, score + 0.07);
         scored.push({ row: r, score: boosted, q });
         continue;
@@ -2195,7 +2303,6 @@ Además:
 Tené en cuenta el contexto previo:
 - servicio_actual: si existe, mensajes como "quiero el turno", "dale", "quiero ese", "bien" suelen referirse a ese servicio.
 - flujo_actual: si el cliente ya estaba hablando de reservar, priorizá continuidad y no lo mandes a catálogo de nuevo.
-- Si el mensaje mezcla precio + turno, y la pregunta principal es el precio, clasificá como SERVICE en modo DETAIL para que responda primero el precio.
 
 Respondé SOLO JSON.`
       },
@@ -2222,57 +2329,6 @@ Respondé SOLO JSON.`
     };
   } catch {
     return { type: "OTHER", query: "", mode: "DETAIL" };
-  }
-}
-
-async function classifyServiceActionWithAI(text, context = {}) {
-  const raw = String(text || '').trim();
-  if (!raw) return { action: 'OTHER', query: '' };
-
-  try {
-    const completion = await openai.chat.completions.create({
-      model: PRIMARY_MODEL,
-      messages: [
-        {
-          role: 'system',
-          content:
-`Analizá el mensaje de un cliente de peluquería y devolvé SOLO JSON.
-
-Campos:
-- action: uno de PRICE, BOOK, LIST_SERVICES, OTHER
-- query: nombre del servicio o consulta corta
-
-Reglas muy importantes:
-- Si el mensaje mezcla pedido de turno + pregunta de precio, PRIORIZÁ PRICE.
-- "quiero un turno para corte mujer, qué precio tiene" => PRICE
-- "quiero turno para corte mujer" => BOOK
-- "qué servicios tienen" => LIST_SERVICES
-- Si el cliente ya venía hablando de un servicio y dice "quiero el turno", "dale", "reservame", => BOOK
-- No inventes servicios. Si no está claro, usá OTHER.
-- Respondé SOLO JSON.`
-        },
-        {
-          role: 'user',
-          content: JSON.stringify({
-            mensaje: raw,
-            servicio_actual: context.lastServiceName || '',
-            flujo_actual: context.flowStep || '',
-            tiene_borrador_turno: !!context.hasDraft,
-            historial_reciente: context.historySnippet || '',
-          })
-        }
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0,
-    });
-
-    const obj = JSON.parse(completion.choices[0].message.content || '{}');
-    return {
-      action: String(obj.action || 'OTHER').trim().toUpperCase(),
-      query: String(obj.query || '').trim(),
-    };
-  } catch {
-    return { action: 'OTHER', query: '' };
   }
 }
 
@@ -2762,12 +2818,6 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
     const recentDbMessages = await getRecentDbMessages(phone, 12);
     const convForAI = mergeConversationForAI(recentDbMessages, ensureConv(waId).messages || []);
     const lastKnownService = getLastKnownService(waId, pendingDraft);
-    const serviceAction = await classifyServiceActionWithAI(text, {
-      lastServiceName: lastKnownService?.nombre || '',
-      flowStep: pendingDraft?.flow_step || '',
-      hasDraft: !!pendingDraft,
-      historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1600),
-    });
 
     async function askForMissingTurnoData(base) {
       const servicioTxt = base?.servicio || base?.last_service_name || "";
@@ -2825,13 +2875,26 @@ Servicio: ${servicioTxt}
       scheduleInactivityFollowUp(waId, phone);
     }
 
+    async function askForContactData(base) {
+      const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_contact', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
+      await saveAppointmentDraft(waId, phone, toSave);
+      const msgContacto = `Perfecto 😊
+
+Para dejar el turno listo necesito:
+👤 Nombre y apellido de la persona que va a asistir
+📱 Número de teléfono de contacto`;
+      pushHistory(waId, "assistant", msgContacto);
+      await sendWhatsAppText(phone, msgContacto);
+      scheduleInactivityFollowUp(waId, phone);
+    }
+
     async function askForName(base) {
       const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_name', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
       const msgSoloNombre = `Perfecto 😊
 
-Para registrar el turno necesito:
-👤 Nombre completo`;
+Ahora necesito:
+👤 Nombre y apellido de la persona que va a asistir`;
       pushHistory(waId, "assistant", msgSoloNombre);
       await sendWhatsAppText(phone, msgSoloNombre);
       scheduleInactivityFollowUp(waId, phone);
@@ -2889,11 +2952,19 @@ Ahora necesito:
         return true;
       }
       if (result.type === "need_name") {
-        await askForName(base);
+        if (!base.telefono_contacto) {
+          await askForContactData(base);
+        } else {
+          await askForName(base);
+        }
         return true;
       }
       if (result.type === "need_phone") {
-        await askForPhone(base);
+        if (!base.cliente_full) {
+          await askForContactData(base);
+        } else {
+          await askForPhone(base);
+        }
         return true;
       }
       if (result.type === "need_payment") {
@@ -2921,6 +2992,8 @@ Lo estoy validando con los datos del turno. En cuanto quede confirmado, le aviso
 Servicio: ${base.servicio}
 📅 Día: ${diaOk} ${ymdToDMY(base.fecha)}
 🕐 Hora: ${normalizeHourHM(base.hora) || base.hora}
+👤 Cliente: ${base.cliente_full}
+📱 Teléfono: ${normalizePhone(base.telefono_contacto || '')}
 
 Seña recibida ✔
 
@@ -2937,6 +3010,8 @@ Ahora consulto con la estilista ${TURNOS_STYLIST_NAME} y le confirmo por aquí.`
 Servicio: ${base.servicio}
 📅 Día: ${diaOk} ${ymdToDMY(base.fecha)}
 🕐 Hora: ${normalizeHourHM(base.hora) || base.hora}
+👤 Cliente: ${base.cliente_full}
+📱 Teléfono: ${normalizePhone(base.telefono_contacto || '')}
 
 Seña recibida ✔`.trim();
         pushHistory(waId, "assistant", msgOk);
@@ -2945,56 +3020,6 @@ Seña recibida ✔`.trim();
         return true;
       }
       return false;
-    }
-
-
-    if (serviceAction.action === 'LIST_SERVICES') {
-      const services = await getServicesCatalog();
-      const parts = formatServicesListAll(services, 6);
-      for (const part of parts.slice(0, 3)) {
-        pushHistory(waId, "assistant", part);
-        await sendWhatsAppText(phone, part);
-      }
-      scheduleInactivityFollowUp(waId, phone);
-      return;
-    }
-
-    if (serviceAction.action === 'PRICE') {
-      const services = await getServicesCatalog();
-      const ctxService = pendingDraft?.servicio || lastKnownService?.nombre || "";
-      const serviceQuery = serviceAction.query || text;
-      let priceMatches = findServiceByContext(services, serviceQuery, ctxService);
-
-      if (priceMatches.length) {
-        const selectedService = priceMatches[0];
-        if (selectedService?.nombre) {
-          lastServiceByUser.set(waId, { nombre: selectedService.nombre, ts: Date.now() });
-          if (pendingDraft) {
-            await saveAppointmentDraft(waId, phone, {
-              ...pendingDraft,
-              servicio: pendingDraft.servicio || selectedService.nombre,
-              last_service_name: selectedService.nombre,
-              last_intent: 'service_consultation',
-              flow_step: pendingDraft.flow_step || inferDraftFlowStep({ ...pendingDraft, servicio: pendingDraft.servicio || selectedService.nombre }),
-            });
-          }
-        }
-        const replyPrice = formatServicesReply(priceMatches, "DETAIL");
-        if (replyPrice) {
-          pushHistory(waId, "assistant", replyPrice);
-          await sendWhatsAppText(phone, replyPrice);
-          scheduleInactivityFollowUp(waId, phone);
-          return;
-        }
-      }
-
-      if (ctxService) {
-        const msgNoPrice = `No encuentro el precio cargado para *${ctxService}* en este momento.`;
-        pushHistory(waId, "assistant", msgNoPrice);
-        await sendWhatsAppText(phone, msgNoPrice);
-        scheduleInactivityFollowUp(waId, phone);
-        return;
-      }
     }
 
     if (pendingDraft && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
@@ -3037,7 +3062,7 @@ Seña recibida ✔`.trim();
       if (handled) return;
     }
 
-    const looksLikeTurno = serviceAction.action === 'BOOK' || looksLikeAppointmentIntent(text, { pendingDraft, lastService: lastKnownService });
+    const looksLikeTurno = looksLikeAppointmentIntent(text, { pendingDraft, lastService: lastKnownService });
     if (looksLikeTurno && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
       const turno = await extractTurnoFromText({
         text,
@@ -3099,7 +3124,7 @@ Seña recibida ✔`.trim();
       }
     }
 
-    if (serviceAction.action === 'LIST_SERVICES' || textAsksForServicesList(text)) {
+    if (textAsksForServicesList(text)) {
       const services = await getServicesCatalog();
       const parts = formatServicesListAll(services, 6);
       for (const part of parts.slice(0, 3)) {
@@ -3110,11 +3135,10 @@ Seña recibida ✔`.trim();
       return;
     }
 
-    if (serviceAction.action === 'PRICE' || textAsksForServicePrice(text)) {
+    if (textAsksForServicePrice(text)) {
       const services = await getServicesCatalog();
       const ctxService = pendingDraft?.servicio || lastKnownService?.nombre || "";
-      const serviceQuery = serviceAction.query || text;
-      let priceMatches = findServiceByContext(services, serviceQuery, ctxService);
+      let priceMatches = findServiceByContext(services, text, ctxService);
 
       if (priceMatches.length) {
         const selectedService = priceMatches[0];
@@ -3192,10 +3216,11 @@ Seña recibida ✔`.trim();
     // PRODUCT
     if (intent.type === "PRODUCT") {
       const stock = await getStockCatalog();
+      const productMode = (intent.mode === 'DETAIL' && isGenericProductQuery(intent.query || text)) ? 'LIST' : intent.mode;
 
       // ✅ Si pide "la lista / catálogo / todos" (o el extractor dejó query vacía), ofrecemos TODO el catálogo
       const qCleanTokens = tokenize(intent.query || "", { expandSynonyms: true });
-      const wantsAll = intent.mode === "LIST" && (
+      const wantsAll = productMode === "LIST" && (
         !intent.query || !intent.query.trim() || qCleanTokens.length === 0 ||
         /\b(catalogo|catálogo|lista|todo|toda|todos|todas|productos|stock)\b/i.test(intent.query)
       );
@@ -3211,7 +3236,7 @@ Seña recibida ✔`.trim();
         return;
       }
 
-      const matches = intent.query ? findStock(stock, intent.query, intent.mode) : [];
+      const matches = intent.query ? findStock(stock, intent.query, productMode) : [];
 
       if (matches.length) {
         lastProductByUser.set(waId, matches[0]);
@@ -3225,7 +3250,7 @@ Seña recibida ✔`.trim();
           }
         }
 
-        const replyCatalog = formatStockReply(matches, intent.mode);
+        const replyCatalog = formatStockReply(matches, productMode);
         if (replyCatalog) {
           pushHistory(waId, "assistant", replyCatalog);
           await sendWhatsAppText(phone, replyCatalog);
