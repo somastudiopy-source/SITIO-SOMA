@@ -248,18 +248,13 @@ const TRANSCRIBE_MODEL = process.env.TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe
 // ===================== BOT =====================
 const SYSTEM_PROMPT = `
 Sos la asistente oficial de un salón de belleza de estética llamado "Cataleya" en Cafayate (Salta).
-Tu rol es vender y ayudar con consultas de forma rápida, clara, muy amable y cercana.
-Hablás en español rioplatense, con mensajes cortos y naturales. Profesional, cálida y humana.
+Tu rol es vender y ayudar con consultas de forma rápida, clara y muy amable.
+Hablás en español rioplatense, con mensajes cortos y prácticos. Profesional, nada de tutear.
 
 ESTILO:
-- Soná como una asistente real del salón: cercana, amable y simple.
-- Mensajes cortos, claros y por etapas. Evitá bloques largos.
+- Respuestas en 1–2 líneas, con viñetas si ayuda.
 - Si inicia con “hola”, responder saludo + “¿en qué puedo ayudarte?” solamente.
-- Emojis suaves y lindos cuando sumen claridad: ✨😊📅🕐💳📩
-- Cuando des datos sensibles, presentalos en líneas separadas y prolijas.
-- Si ya venían hablando de un tema, no vuelvas a preguntar lo mismo. Continuá desde el contexto.
-- Si un término puede ser producto o servicio, preguntá cuál de las dos cosas busca antes de responder.
-- Usar letras negrita donde sea necesario para aclarar algo importante. 
+- Emojis ocasionales: al inicio de la conversación con un corazón o una estrella; después tono profesional. usar letras negrita donde sea necesario cuando aclares cosas. 
 
 Ofrecés:
 - Servicios estéticos
@@ -593,82 +588,30 @@ function detectSenaPaid({ text }) {
   return /(comprobant|transfer|transferi|transferí|señad|seña|pagu|pago|abon|abono|mercado pago|alias|cvu)/i.test(t);
 }
 
-function isLikelyPaymentText(text) {
-  const t = normalize(text || "");
-  return /(transfer|comprobante|mercado pago|mp|cvu|cbu|alias|titular|operacion|operación|seña|senia|pago|abon)/i.test(t);
-}
-
-function sanitizePossiblePhone(raw) {
-  let digits = String(raw || '').replace(/[^\d+]/g, '');
-  if (!digits) return '';
-  const plus = digits.startsWith('+');
-  digits = digits.replace(/[^\d]/g, '');
-  if (digits.startsWith('549')) digits = '54' + digits.slice(3);
-  if (digits.startsWith('0')) digits = digits.replace(/^0+/, '');
-  if (digits.length < 8 || digits.length > 15) return '';
-  return plus ? `+${digits}` : `+${digits}`;
-}
-
 function extractContactInfo(text) {
   const raw = String(text || "").trim();
-  const norm = normalize(raw);
 
+  const mPhone = raw.match(/(\+?\d[\d\s().-]{6,}\d)/);
   let telefono = "";
-  if (!isLikelyPaymentText(raw)) {
-    const phoneMatches = raw.match(/(\+?\d[\d\s().-]{6,}\d)/g) || [];
-    for (const cand of phoneMatches) {
-      const cleanPhone = sanitizePossiblePhone(cand);
-      if (cleanPhone) {
-        telefono = cleanPhone;
-        break;
-      }
-    }
-
-    const explicitPhone = raw.match(/(?:telefono|tel|cel|celular|whatsapp|wsp|numero|número)\s*(?:es|:)?\s*(\+?\d[\d\s().-]{6,}\d)/i);
-    if (explicitPhone) {
-      const cleanPhone = sanitizePossiblePhone(explicitPhone[1]);
-      if (cleanPhone) telefono = cleanPhone;
-    }
+  if (mPhone) {
+    telefono = mPhone[1].replace(/[^\d+]/g, "");
+    if (!telefono.startsWith("+")) telefono = `+${telefono}`;
   }
 
   let nombre = "";
-  if (!isLikelyPaymentText(raw)) {
-    const explicitName = raw.match(/(?:me llamo|mi nombre es|soy)\s+([A-Za-zÁÉÍÓÚÑáéíóúñ' ]{5,60})/i);
-    if (explicitName) {
-      const cand = explicitName[1].replace(/\s+/g, ' ').trim();
-      if (!/\d/.test(cand) && cand.split(' ').length >= 2) nombre = cand;
-    }
-
-    if (!nombre) {
-      const cleaned = raw.replace(/\s+/g, ' ').trim();
-      const looksLikePureName = (
-        !/\d/.test(cleaned) &&
-        cleaned.split(' ').length >= 2 &&
-        cleaned.length >= 5 &&
-        cleaned.length <= 60 &&
-        !/(quiero|turno|mañana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|servicio|producto|hora|hs|alisado|botox|keratina)/i.test(norm)
-      );
-      if (looksLikePureName) nombre = cleaned;
-    }
+  const cleaned = raw.replace(/\s+/g, " ").trim();
+  const candidate = cleaned.replace(/^(me llamo|soy|mi nombre es)\s+/i, "").trim();
+  if (candidate && !/\d/.test(candidate) && candidate.split(" ").length >= 2 && candidate.length >= 5) {
+    nombre = candidate;
   }
 
   return { nombre, telefono };
 }
 
-function shouldExtractContactNow(turno, text) {
-  const flow = String(turno?.flow_step || '');
-  if (['awaiting_contact', 'awaiting_name', 'awaiting_phone', 'ready_to_book'].includes(flow)) return true;
-  const raw = String(text || '').trim();
-  if (!raw || isLikelyPaymentText(raw)) return false;
-  if (/(me llamo|mi nombre es|soy|telefono|tel|cel|celular|whatsapp|wsp|numero|número)/i.test(raw)) return true;
-  return false;
-}
-
 function mergeContactIntoTurno({ turno, text, waPhone }) {
-  const out = { ...(turno || {}) };
-  if (!shouldExtractContactNow(out, text)) return out;
-
   const info = extractContactInfo(text);
+
+  const out = { ...(turno || {}) };
 
   if (info.nombre && !out.cliente_full) out.cliente_full = info.nombre;
   if (info.telefono) out.telefono_contacto = normalizePhone(info.telefono);
@@ -863,15 +806,19 @@ async function tryApplyPaymentToDraft(base, { text, mediaMeta } = {}) {
   next.payment_proof_filename = mediaMeta?.filename || mediaMeta?.file_name || next.payment_proof_filename || "";
 
   const comprobanteOk = isValidComprobanteSimple(rawText);
+  const hasReadyAppointmentData = !!(next?.servicio && next?.fecha && next?.hora && next?.cliente_full && next?.telefono_contacto);
+  const canTrustMediaProof = !!mediaMeta && hasReadyAppointmentData && (
+    next?.flow_step === 'awaiting_payment' || next?.flow_step === 'payment_review' || next?.payment_status === 'payment_review'
+  );
 
-  if (comprobanteOk) {
+  if (comprobanteOk || canTrustMediaProof) {
     next.payment_status = "paid_verified";
     next.payment_amount = 10000;
-    next.payment_receiver = "Monica Pacheco";
+    next.payment_receiver = next.payment_receiver || "Monica Pacheco";
   } else if (mediaMeta || rawText) {
     next.payment_status = next.payment_status === "paid_verified" ? "paid_verified" : "payment_review";
     if (next.payment_status !== "paid_verified") {
-      next.payment_amount = extractMoneyAmountFromText(rawText) || null;
+      next.payment_amount = extractMoneyAmountFromText(rawText) || next.payment_amount || null;
       next.payment_receiver = detectTitularMonicaPacheco(rawText) ? "Monica Pacheco" : (next.payment_receiver || "");
     }
   } else {
@@ -883,6 +830,20 @@ async function tryApplyPaymentToDraft(base, { text, mediaMeta } = {}) {
   }
 
   return next;
+}
+
+function isDraftReadyForAutoBooking(base) {
+  return !!(
+    base?.servicio &&
+    base?.fecha &&
+    base?.hora &&
+    base?.cliente_full &&
+    base?.telefono_contacto &&
+    (
+      base?.payment_status === 'paid_verified' ||
+      (base?.payment_status === 'payment_review' && (base?.payment_proof_media_id || base?.payment_proof_filename))
+    )
+  );
 }
 
 async function createAppointmentRecord({ waId, waPhone, merged, status, calendarEventId }) {
@@ -934,9 +895,9 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
   });
   if (busy) return { type: "busy" };
 
+  if (merged.payment_status !== "paid_verified") return { type: "need_payment" };
   if (!merged?.cliente_full) return { type: "need_name" };
   if (!merged?.telefono_contacto) return { type: "need_phone" };
-  if (merged.payment_status !== "paid_verified") return { type: "need_payment" };
 
   if (isColorOrTinturaService(`${merged.servicio} ${merged.notas || ""}`)) {
     await createAppointmentRecord({
@@ -2171,8 +2132,8 @@ function formatStockReply(matches, mode) {
     : `Está en catálogo:`;
 
   const footer = mode === "LIST"
-    ? `\n\nSi quiere, le ayudo a elegir la mejor opción 😊 ¿Lo necesita para uso personal o para trabajar? ¿Qué tipo de cabello tiene y qué objetivo busca (alisado, reparación, hidratación, color, rulos)?`
-    : `\n\nSi quiere, le ayudo a elegir la mejor opción 😊 ¿Lo necesita para uso personal o para trabajar? ¿Qué tipo de cabello tiene y qué resultado busca?`;
+    ? `\n\nPara recomendarle mejor: ¿lo necesita para uso personal o para trabajar? ¿Qué tipo de cabello tiene y qué objetivo busca (alisado, reparación, hidratación, color, rulos)?`
+    : `\n\nPara recomendarle mejor: ¿lo necesita para uso personal o para trabajar? ¿Qué tipo de cabello tiene y qué resultado busca?`;
 
   return `${header}\n\n${blocks.join("\n\n— — —\n\n")}${footer}`.trim();
 }
@@ -2227,10 +2188,8 @@ Si quiere, puedo ayudarle a sacar un turno 😊`.trim();
     return `• ${s.nombre}: *${priceTxt}*${durTxt}`;
   });
 
-  return `✨ Estos son algunos servicios disponibles:
-${lines.join("\n")}
-
-Si quiere, también puedo ayudarle a elegir el más indicado 😊`.trim();
+  return `Servicios:
+${lines.join("\n")}`.trim();
 }
 
 function textAsksForServicesList(text) {
@@ -2330,39 +2289,13 @@ function looksLikeAppointmentIntent(text, { pendingDraft, lastService } = {}) {
   return false;
 }
 
-function isWarmAffirmativeReply(text) {
-  const t = normalize(text || '');
-  return /^(si|sí|sii+|dale|ok|oka|perfecto|bueno|de una|claro|quiero|quiero turno|quiero reservar|quiero sacar turno)$/i.test(t);
-}
-
-function isExplicitProductIntent(text) {
-  const t = normalize(text || '');
-  return /(producto|stock|insumo|shampoo|acondicionador|mascara|mascarilla|tratamiento|serum|aceite|oleo|tintura|oxidante|decolorante|matizador|ampolla|keratina|protector|spray|crema|gel|cera|botox|comprar|venden|tenes|tenés|hay)/i.test(t);
-}
-
-function isExplicitServiceIntent(text) {
-  const t = normalize(text || '');
-  return /(turno|servicio|reservar|agendar|cita|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|valor|hac(en|en)|realizan)/i.test(t);
-}
-
-function extractAmbiguousBeautyTerm(text) {
-  const t = normalize(text || '');
-  const terms = ['alisado', 'botox', 'keratina'];
-  return terms.find(term => new RegExp(`\b${term}\b`, 'i').test(t)) || '';
-}
-
-function formatWarmAssistant(text) {
-  return String(text || '').replace(/^Perfecto 😊/m, 'Perfecto 😊').trim();
-}
-
 function inferDraftFlowStep(base) {
   if (!base?.servicio) return 'awaiting_service';
   if (!base?.fecha) return 'awaiting_date';
   if (!base?.hora) return 'awaiting_time';
-  if (!base?.cliente_full && !base?.telefono_contacto) return 'awaiting_contact';
+  if (base?.payment_status !== 'paid_verified') return 'awaiting_payment';
   if (!base?.cliente_full) return 'awaiting_name';
   if (!base?.telefono_contacto) return 'awaiting_phone';
-  if (base?.payment_status !== 'paid_verified') return 'awaiting_payment';
   return 'ready_to_book';
 }
 
@@ -2388,8 +2321,6 @@ Además:
 Tené en cuenta el contexto previo:
 - servicio_actual: si existe, mensajes como "quiero el turno", "dale", "quiero ese", "bien" suelen referirse a ese servicio.
 - flujo_actual: si el cliente ya estaba hablando de reservar, priorizá continuidad y no lo mandes a catálogo de nuevo.
-- Si el mensaje es solo 'si', 'dale', 'ok' o similar y venían hablando de un servicio, priorizá la continuidad de ese tema.
-- Si una palabra puede ser producto o servicio y el cliente no lo aclaró, devolvé OTHER.
 
 Respondé SOLO JSON.`
       },
@@ -2906,57 +2837,13 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
     const convForAI = mergeConversationForAI(recentDbMessages, ensureConv(waId).messages || []);
     const lastKnownService = getLastKnownService(waId, pendingDraft);
 
-    // ✅ Si el cliente responde afirmativamente a una propuesta de turno y ya veníamos hablando de un servicio,
-    // iniciamos el flujo sin volver a preguntar el servicio.
-    if (!pendingDraft && lastKnownService?.nombre && isWarmAffirmativeReply(text) && lastAssistantWasQuestion(waId)) {
-      const baseTurno = {
-        servicio: lastKnownService.nombre,
-        fecha: '',
-        hora: '',
-        duracion_min: 60,
-        notas: '',
-        cliente_full: '',
-        telefono_contacto: '',
-        payment_status: 'not_paid',
-        payment_amount: null,
-        payment_sender: '',
-        payment_receiver: '',
-        payment_proof_text: '',
-        payment_proof_media_id: '',
-        payment_proof_filename: '',
-        awaiting_contact: false,
-        flow_step: 'awaiting_date',
-        last_intent: 'book_appointment',
-        last_service_name: lastKnownService.nombre,
-      };
-      await saveAppointmentDraft(waId, phone, baseTurno);
-      await askForMissingTurnoData(baseTurno);
-      return;
-    }
-
-    // ✅ Si el término es ambiguo (ej: alisado), preguntamos si busca servicio o producto.
-    const ambiguousBeautyTerm = extractAmbiguousBeautyTerm(text);
-    if (ambiguousBeautyTerm && !pendingDraft && !looksLikeAppointmentIntent(text, { pendingDraft, lastService: lastKnownService }) && !isExplicitProductIntent(text) && !isExplicitServiceIntent(text)) {
-      const msgAclara = `✨ ${ambiguousBeautyTerm.charAt(0).toUpperCase() + ambiguousBeautyTerm.slice(1)} puede referirse a dos cosas.
-
-¿Está buscando:
-• el *servicio* para hacerse en el salón
-• o un *producto* de alisado / tratamiento?
-
-Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
-      pushHistory(waId, 'assistant', msgAclara);
-      await sendWhatsAppText(phone, msgAclara);
-      scheduleInactivityFollowUp(waId, phone);
-      return;
-    }
-
     async function askForMissingTurnoData(base) {
       const servicioTxt = base?.servicio || base?.last_service_name || "";
 
       if (!servicioTxt) {
         const msgFalt = `Perfecto 😊 vamos a coordinar su turno.
 
-✨ Primero necesito que me diga qué servicio quiere reservar.`;
+✨ Primero necesito que me diga qué servicio desea.`;
         pushHistory(waId, "assistant", msgFalt);
         await sendWhatsAppText(phone, msgFalt);
         scheduleInactivityFollowUp(waId, phone);
@@ -2969,7 +2856,7 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
 Servicio: ${servicioTxt}
 
 📅 Dígame qué día le gustaría
-🕐 y en qué horario le quedaría bien dentro de estos rangos:
+🕐 y en qué horario dentro de estos rangos:
 
 • 10:00 a 12:00
 • 17:00 a 20:00`;
@@ -2991,9 +2878,8 @@ Servicio: ${servicioTxt}
         return;
       }
 
-      if (!base?.hora) {
-        const fechaTxt = ymdToDMY(base.fecha);
-        const msgFalt = `Perfecto 😊
+      const fechaTxt = ymdToDMY(base.fecha);
+      const msgFalt = `Perfecto 😊
 
 Servicio: ${servicioTxt}
 📅 Día: ${fechaTxt}
@@ -3002,31 +2888,9 @@ Servicio: ${servicioTxt}
 
 • 10:00 a 12:00
 • 17:00 a 20:00`;
-        pushHistory(waId, "assistant", msgFalt);
-        await sendWhatsAppText(phone, msgFalt);
-        scheduleInactivityFollowUp(waId, phone);
-        return;
-      }
-
-      if (!base?.cliente_full && !base?.telefono_contacto) {
-        await askForContactData(base);
-        return;
-      }
-
-      if (!base?.cliente_full) {
-        await askForName(base);
-        return;
-      }
-
-      if (!base?.telefono_contacto) {
-        await askForPhone(base);
-        return;
-      }
-
-      if (base?.payment_status !== 'paid_verified') {
-        await askForPayment(base);
-        return;
-      }
+      pushHistory(waId, "assistant", msgFalt);
+      await sendWhatsAppText(phone, msgFalt);
+      scheduleInactivityFollowUp(waId, phone);
     }
 
     async function askForContactData(base) {
@@ -3034,8 +2898,7 @@ Servicio: ${servicioTxt}
       await saveAppointmentDraft(waId, phone, toSave);
       const msgContacto = `Perfecto 😊
 
-Para dejar el turno listo necesito estos datos 😊
-
+Para dejar el turno listo necesito:
 👤 Nombre y apellido de la persona que va a asistir
 📱 Número de teléfono de contacto`;
       pushHistory(waId, "assistant", msgContacto);
@@ -3048,8 +2911,7 @@ Para dejar el turno listo necesito estos datos 😊
       await saveAppointmentDraft(waId, phone, toSave);
       const msgSoloNombre = `Perfecto 😊
 
-Ahora necesito este dato 😊
-
+Ahora necesito:
 👤 Nombre y apellido de la persona que va a asistir`;
       pushHistory(waId, "assistant", msgSoloNombre);
       await sendWhatsAppText(phone, msgSoloNombre);
@@ -3061,8 +2923,7 @@ Ahora necesito este dato 😊
       await saveAppointmentDraft(waId, phone, toSave);
       const msgTelefono = `Perfecto 😊
 
-Ahora necesito este dato 😊
-
+Ahora necesito:
 📱 Número de teléfono de contacto`;
       pushHistory(waId, "assistant", msgTelefono);
       await sendWhatsAppText(phone, msgTelefono);
@@ -3205,11 +3066,6 @@ Seña recibida ✔`.trim();
       Object.assign(merged, mergeContactIntoTurno({ turno: merged, text, waPhone: phone }));
       merged = await tryApplyPaymentToDraft(merged, { text, mediaMeta });
 
-      if (!merged.servicio && lastKnownService?.nombre) {
-        merged.servicio = lastKnownService.nombre;
-        merged.last_service_name = lastKnownService.nombre;
-      }
-
       if (!merged.servicio || !merged.fecha || !merged.hora) {
         merged.flow_step = inferDraftFlowStep(merged);
         merged.last_intent = 'book_appointment';
@@ -3222,6 +3078,20 @@ Seña recibida ✔`.trim();
       const result = await finalizeAppointmentFlow({ waId, phone, name, merged });
       const handled = await respondFinalizeResult(merged, result);
       if (handled) return;
+    }
+
+    if (pendingDraft && isDraftReadyForAutoBooking(pendingDraft)) {
+      const recoveredDraft = {
+        ...pendingDraft,
+        fecha: toYMD(pendingDraft.fecha || ''),
+        hora: normalizeHourHM(pendingDraft.hora || ''),
+        payment_status: 'paid_verified',
+        payment_amount: Number(pendingDraft.payment_amount || 10000) || 10000,
+        payment_receiver: pendingDraft.payment_receiver || 'Monica Pacheco',
+      };
+      const recoveryResult = await finalizeAppointmentFlow({ waId, phone, merged: recoveredDraft });
+      const recoveryHandled = await respondFinalizeResult(recoveredDraft, recoveryResult);
+      if (recoveryHandled) return;
     }
 
     const looksLikeTurno = looksLikeAppointmentIntent(text, { pendingDraft, lastService: lastKnownService });
@@ -3238,7 +3108,7 @@ Seña recibida ✔`.trim();
         }
       });
 
-      if (turno?.ok || pendingDraft || lastKnownService || (isWarmAffirmativeReply(text) && lastKnownService)) {
+      if (turno?.ok || pendingDraft || lastKnownService) {
         const merged = {
           fecha: toYMD(turno?.fecha || pendingDraft?.fecha || ""),
           hora: normalizeHourHM(turno?.hora || pendingDraft?.hora || ""),
@@ -3295,30 +3165,6 @@ Seña recibida ✔`.trim();
       }
       scheduleInactivityFollowUp(waId, phone);
       return;
-    }
-
-    if (!pendingDraft && lastKnownService?.nombre && /^producto$/i.test(normalize(text))) {
-      const stock = await getStockCatalog();
-      const matches = findStock(stock, lastKnownService.nombre, 'LIST');
-      if (matches.length) {
-        const replyCatalog = formatStockReply(matches, 'LIST');
-        pushHistory(waId, 'assistant', replyCatalog);
-        await sendWhatsAppText(phone, replyCatalog);
-        scheduleInactivityFollowUp(waId, phone);
-        return;
-      }
-    }
-
-    if (!pendingDraft && lastKnownService?.nombre && /^servicio$/i.test(normalize(text))) {
-      const services = await getServicesCatalog();
-      const matches = findServices(services, lastKnownService.nombre, 'DETAIL');
-      const replyCatalog = formatServicesReply(matches, 'DETAIL');
-      if (replyCatalog) {
-        pushHistory(waId, 'assistant', replyCatalog);
-        await sendWhatsAppText(phone, replyCatalog);
-        scheduleInactivityFollowUp(waId, phone);
-        return;
-      }
     }
 
     if (textAsksForServicePrice(text)) {
