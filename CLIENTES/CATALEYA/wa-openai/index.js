@@ -640,6 +640,14 @@ function extractContactInfo(text) {
     }
 
     if (!nombre) {
+      const nameBeforePhone = raw.match(/^\s*([A-Za-zÁÉÍÓÚÑáéíóúñ' ]{5,80}?)(?:\s*,\s*|\s+y\s+)?(?:(?:y\s+)?(?:su\s+)?(?:numero|número|telefono|tel|cel|celular|whatsapp|wsp))/i);
+      if (nameBeforePhone) {
+        const cand = String(nameBeforePhone[1] || '').replace(/\s+/g, ' ').trim().replace(/[,:;.-]+$/, '');
+        if (!/\d/.test(cand) && cand.split(' ').length >= 2) nombre = cand;
+      }
+    }
+
+    if (!nombre) {
       const cleaned = raw.replace(/\s+/g, ' ').trim();
       const looksLikePureName = (
         !/\d/.test(cleaned) &&
@@ -2150,9 +2158,39 @@ function findStock(rows, query, mode) {
   return pickBestByScore(scored, mode);
 }
 
+function detectFemaleContext(text) {
+  const t = normalize(text || '');
+  return /(ella|mi hija|otra hija|hija|mi tia|tia|mi señora|mi senora|señora|senora|mujer|femenin[oa]|dama)/i.test(t);
+}
+
+function detectMaleContext(text) {
+  const t = normalize(text || '');
+  return /(mi hijo|otro hijo|hijo|mi marido|mi esposo|varon|hombre|masculin[oa]|barber)/i.test(t);
+}
+
+function applyServiceGenderContext(rows, query) {
+  const q = normalize(query || '');
+  if (!q || !/corte/i.test(q)) return rows;
+
+  const female = detectFemaleContext(query);
+  const male = detectMaleContext(query) && !female;
+  if (!female && !male) return rows;
+
+  const filtered = rows.filter((r) => {
+    const hay = normalize(`${r.nombre} ${r.categoria} ${r.subcategoria}`);
+    if (female) return !/(mascul|varon|hombre|barber)/i.test(hay);
+    if (male) return /(mascul|varon|hombre|barber)/i.test(hay);
+    return true;
+  });
+
+  return filtered.length ? filtered : rows;
+}
+
 function findServices(rows, query, mode) {
   const q = normalize(query);
   if (!q) return [];
+
+  const scopedRows = applyServiceGenderContext(rows, query);
 
   const match = (x) => {
     const nombre = normalize(x.nombre);
@@ -2161,15 +2199,26 @@ function findServices(rows, query, mode) {
     return nombre.includes(q) || categoria.includes(q) || sub.includes(q);
   };
 
-  if (mode === "LIST") return rows.filter(match);
+  if (mode === "LIST") return scopedRows.filter(match);
 
-  const exact = rows.filter(r => normalize(r.nombre) === q);
+  const exact = scopedRows.filter(r => normalize(r.nombre) === q);
   if (exact.length) return exact;
 
-  const contains = rows.filter(r => normalize(r.nombre).includes(q));
-  if (contains.length) return contains;
+  const contains = scopedRows.filter(r => normalize(r.nombre).includes(q));
+  if (contains.length) {
+    if (/corte/i.test(q) && detectFemaleContext(query)) {
+      const preferred = contains.filter(r => !/(mascul|varon|hombre|barber)/i.test(normalize(`${r.nombre} ${r.categoria} ${r.subcategoria}`)));
+      if (preferred.length) return preferred;
+    }
+    return contains;
+  }
 
-  return rows.filter(match);
+  const matched = scopedRows.filter(match);
+  if (/corte/i.test(q) && detectFemaleContext(query)) {
+    const preferred = matched.filter(r => !/(mascul|varon|hombre|barber)/i.test(normalize(`${r.nombre} ${r.categoria} ${r.subcategoria}`)));
+    if (preferred.length) return preferred;
+  }
+  return matched;
 }
 
 function findCourses(rows, query, mode) {
@@ -2441,7 +2490,7 @@ function isExplicitProductIntent(text) {
 
 function isExplicitServiceIntent(text) {
   const t = normalize(text || '');
-  return /(turno|otro turno|servicio|reservar|agendar|cita|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|valor|hac(en|en)|realizan|para mi|para mí|despues de|después de)/i.test(t);
+  return /(turno|otro turno|servicio|reservar|agendar|cita|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|valor|hac(en|en)|realizan|para mi|para mí|despues de|después de|corte femenino|femenino|femenina|mi hija|otra hija|mi tia|mi señora|ella)/i.test(t);
 }
 
 function extractAmbiguousBeautyTerm(text) {
@@ -2979,7 +3028,7 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
     const normTxt = normalize(text);
 
     // Corte masculino: solo por orden de llegada (no se toma turno)
-    if (/(\bcorte\b.*\b(mascul|varon|hombre)\b|\bcorte\s+masculino\b|\bbarber\b|\bbarberia\b)/i.test(normTxt)) {
+    if (/(\bcorte\b.*\b(mascul|varon|hombre)\b|\bcorte\s+masculino\b|\bbarber\b|\bbarberia\b)/i.test(normTxt) && !detectFemaleContext(text)) {
       const msgMasc = `✂️ Corte masculino: es SOLO por orden de llegada (no se toma turno).
 
 🕒 Horarios: Lunes a Sábados 10 a 13 hs y 17 a 22 hs.
