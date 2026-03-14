@@ -2365,6 +2365,62 @@ function getLastKnownService(waId, draft) {
   return null;
 }
 
+async function getLastBookedAppointmentForUser({ waId, waPhone }) {
+  const phoneNorm = normalizePhone(waPhone || "");
+  const r = await db.query(
+    `SELECT client_name, service_name, appointment_date, appointment_time, duration_min, created_at
+       FROM appointments
+      WHERE wa_id = $1 OR wa_phone = $2
+      ORDER BY created_at DESC
+      LIMIT 5`,
+    [waId, phoneNorm]
+  );
+
+  const rows = Array.isArray(r?.rows) ? r.rows : [];
+  if (!rows.length) return null;
+
+  return rows.map((row) => ({
+    client_name: row.client_name || "",
+    service_name: row.service_name || "",
+    fecha: row.appointment_date ? String(row.appointment_date).slice(0, 10) : "",
+    hora: row.appointment_time ? String(row.appointment_time).slice(0, 5) : "",
+    duracion_min: Number(row.duration_min || 60) || 60,
+    created_at: row.created_at || null,
+  }))[0] || null;
+}
+
+function resolveRelativeTurnoReference(text, { pendingDraft, lastBooked } = {}) {
+  const raw = String(text || "").trim();
+  const t = normalize(raw);
+  if (!t) return null;
+
+  const asksAfter = /(despues|después|luego|a continuacion|a continuación)/i.test(t);
+  if (!asksAfter) return null;
+
+  const refName = normalize(lastBooked?.client_name || "");
+  const refFirstName = refName ? refName.split(" ")[0] : "";
+  const mentionsReference = (
+    /\b(ella|el|él|mi hija|su turno|ese turno|el turno anterior)\b/i.test(t) ||
+    (refName && t.includes(refName)) ||
+    (refFirstName && t.includes(refFirstName))
+  );
+
+  if (!mentionsReference) return null;
+
+  const baseDate = toYMD(pendingDraft?.fecha || lastBooked?.fecha || "");
+  const baseHour = normalizeHourHM(pendingDraft?.hora || lastBooked?.hora || "");
+  const baseDuration = Number(lastBooked?.duracion_min || pendingDraft?.duracion_min || 60) || 60;
+
+  if (!baseDate || !baseHour) return { fecha: baseDate || "", hora: "", resolved: false };
+
+  const nextSlot = addMinutesToYMDHM({ ymd: baseDate, hm: baseHour }, baseDuration);
+  return {
+    fecha: baseDate,
+    hora: normalizeHourHM(nextSlot?.hm || ""),
+    resolved: !!(baseDate && nextSlot?.hm),
+  };
+}
+
 function looksLikeAppointmentIntent(text, { pendingDraft, lastService } = {}) {
   const t = normalize(text || '');
   if (/(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b)/i.test(t)) return true;
@@ -2380,17 +2436,17 @@ function isWarmAffirmativeReply(text) {
 
 function isExplicitProductIntent(text) {
   const t = normalize(text || '');
-  return /(producto|stock|insumo|shampoo|acondicionador|mascara|mascarilla|tratamiento|serum|aceite|oleo|tintura|oxidante|decolorante|matizador|ampolla|keratina|protector|spray|crema|gel|cera|botox|comprar|venden|tenes|tenés|hay)/i.test(t);
+  return /(producto|stock|insumo|shampoo|acondicionador|mascara|mascarilla|serum|aceite|oleo|tintura|oxidante|decolorante|matizador|ampolla|protector|spray|crema|gel|cera|comprar|venden|tenes|tenés|hay disponible|te queda|les queda)/i.test(t);
 }
 
 function isExplicitServiceIntent(text) {
   const t = normalize(text || '');
-  return /(turno|servicio|reservar|agendar|cita|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|valor|hac(en|en)|realizan)/i.test(t);
+  return /(turno|otro turno|servicio|reservar|agendar|cita|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|valor|hac(en|en)|realizan|para mi|para mí|despues de|después de)/i.test(t);
 }
 
 function extractAmbiguousBeautyTerm(text) {
   const t = normalize(text || '');
-  const terms = ['alisado', 'botox', 'keratina'];
+  const terms = ['alisado', 'botox', 'keratina', 'nutricion', 'tratamiento'];
   return terms.find(term => new RegExp(`\b${term}\b`, 'i').test(t)) || '';
 }
 
@@ -2948,6 +3004,7 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
     const recentDbMessages = await getRecentDbMessages(phone, 12);
     const convForAI = mergeConversationForAI(recentDbMessages, ensureConv(waId).messages || []);
     const lastKnownService = getLastKnownService(waId, pendingDraft);
+    const lastBookedTurno = await getLastBookedAppointmentForUser({ waId, waPhone: phone });
 
     // ✅ Si el cliente responde afirmativamente a una propuesta de turno y ya veníamos hablando de un servicio,
     // iniciamos el flujo sin volver a preguntar el servicio.
@@ -3274,24 +3331,37 @@ Seña recibida ✔`.trim();
 
     if (pendingDraft && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
       const turno = await extractTurnoFromText({ text, customerName: name, context: pendingDraft });
+      const relativeTurno = resolveRelativeTurnoReference(text, { pendingDraft, lastBooked: lastBookedTurno });
       let merged = {
         ...pendingDraft,
-        fecha: pendingDraft.fecha || "",
-        hora: normalizeHourHM(pendingDraft.hora || ""),
+        fecha: pendingDraft.fecha || relativeTurno?.fecha || "",
+        hora: normalizeHourHM(pendingDraft.hora || relativeTurno?.hora || ""),
         servicio: pendingDraft.servicio || pendingDraft.last_service_name || lastKnownService?.nombre || "",
-        duracion_min: Number(pendingDraft.duracion_min || 60) || 60,
+        duracion_min: Number(pendingDraft.duracion_min || lastBookedTurno?.duracion_min || 60) || 60,
         notas: pendingDraft.notas || "",
       };
 
       if (turno?.ok) {
         merged = {
           ...merged,
-          fecha: turno.fecha || merged.fecha || "",
-          hora: normalizeHourHM(turno.hora || merged.hora || ""),
+          fecha: turno.fecha || merged.fecha || relativeTurno?.fecha || "",
+          hora: normalizeHourHM(turno.hora || merged.hora || relativeTurno?.hora || ""),
           servicio: turno.servicio || merged.servicio || "",
           duracion_min: Number(turno.duracion_min || merged.duracion_min || 60) || 60,
           notas: turno.notas || merged.notas || "",
         };
+      }
+
+      if (!merged.fecha && relativeTurno?.fecha) merged.fecha = relativeTurno.fecha;
+      if (!merged.hora && relativeTurno?.hora) merged.hora = normalizeHourHM(relativeTurno.hora);
+
+      if (!merged.servicio) {
+        const rawTrim = String(text || "").trim();
+        const nraw = normalize(rawTrim);
+        const currentService = normalize(pendingDraft.servicio || pendingDraft.last_service_name || lastKnownService?.nombre || "");
+        if (rawTrim && currentService && nraw === currentService) {
+          merged.servicio = pendingDraft.servicio || pendingDraft.last_service_name || lastKnownService?.nombre || rawTrim;
+        }
       }
 
       merged.fecha = toYMD(merged.fecha);
@@ -3331,12 +3401,14 @@ Seña recibida ✔`.trim();
         }
       });
 
-      if (turno?.ok || pendingDraft || lastKnownService || (isWarmAffirmativeReply(text) && lastKnownService)) {
+      const relativeTurno = resolveRelativeTurnoReference(text, { pendingDraft, lastBooked: lastBookedTurno });
+
+      if (turno?.ok || pendingDraft || lastKnownService || (isWarmAffirmativeReply(text) && lastKnownService) || relativeTurno?.fecha || relativeTurno?.hora) {
         const merged = {
-          fecha: toYMD(turno?.fecha || pendingDraft?.fecha || ""),
-          hora: normalizeHourHM(turno?.hora || pendingDraft?.hora || ""),
+          fecha: toYMD(turno?.fecha || pendingDraft?.fecha || relativeTurno?.fecha || ""),
+          hora: normalizeHourHM(turno?.hora || pendingDraft?.hora || relativeTurno?.hora || ""),
           servicio: turno?.servicio || pendingDraft?.servicio || lastKnownService?.nombre || "",
-          duracion_min: Number(turno?.duracion_min || pendingDraft?.duracion_min || 60) || 60,
+          duracion_min: Number(turno?.duracion_min || pendingDraft?.duracion_min || lastBookedTurno?.duracion_min || 60) || 60,
           notas: turno?.notas || pendingDraft?.notas || "",
           cliente_full: pendingDraft?.cliente_full || "",
           telefono_contacto: normalizePhone(pendingDraft?.telefono_contacto || ""),
@@ -3376,6 +3448,27 @@ Seña recibida ✔`.trim();
         const result = await finalizeAppointmentFlow({ waId, phone, name, merged: mergedWithPayment });
         const handled = await respondFinalizeResult(mergedWithPayment, result);
         if (handled) return;
+      }
+    }
+
+    if (pendingDraft && !isExplicitProductIntent(text)) {
+      const rawTrim = String(text || '').trim();
+      const nraw = normalize(rawTrim);
+      const currentService = normalize(pendingDraft?.servicio || pendingDraft?.last_service_name || lastKnownService?.nombre || '');
+      if (rawTrim && currentService && nraw === currentService) {
+        const repairedDraft = {
+          ...pendingDraft,
+          servicio: pendingDraft?.servicio || pendingDraft?.last_service_name || lastKnownService?.nombre || rawTrim,
+          flow_step: inferDraftFlowStep({
+            ...pendingDraft,
+            servicio: pendingDraft?.servicio || pendingDraft?.last_service_name || lastKnownService?.nombre || rawTrim,
+          }),
+          last_intent: 'book_appointment',
+          last_service_name: pendingDraft?.servicio || pendingDraft?.last_service_name || lastKnownService?.nombre || rawTrim,
+        };
+        await saveAppointmentDraft(waId, phone, repairedDraft);
+        await askForMissingTurnoData(repairedDraft);
+        return;
       }
     }
 
