@@ -2090,58 +2090,106 @@ async function getCoursesCatalog() {
 const PRODUCT_TYPE_KEYWORDS = [
   'shampoo', 'champu', 'acondicionador', 'mascara', 'mascarilla', 'tratamiento', 'serum', 'aceite',
   'oleo', 'tintura', 'oxidante', 'decolorante', 'matizador', 'ampolla', 'keratina', 'protector',
-  'spray', 'crema', 'gel', 'cera', 'botox', 'alisado', 'secador', 'plancha'
+  'spray', 'crema', 'gel', 'cera', 'botox', 'alisado', 'secador', 'plancha',
+  'bano de crema', 'bano', 'nutricion', 'reparador', 'hidratacion', 'hidratante'
 ];
+
+const PRODUCT_FAMILY_ALIASES = {
+  shampoo: ['shampoo', 'champu', 'shampu'],
+  acondicionador: ['acondicionador'],
+  mascara: ['mascara', 'mascarilla'],
+  tratamiento: ['tratamiento'],
+  serum: ['serum'],
+  aceite: ['aceite', 'oleo'],
+  tintura: ['tintura', 'coloracion'],
+  oxidante: ['oxidante', 'revelador'],
+  decolorante: ['decolorante', 'polvo decolorante'],
+  matizador: ['matizador'],
+  ampolla: ['ampolla'],
+  keratina: ['keratina'],
+  protector: ['protector', 'protector termico'],
+  spray: ['spray'],
+  crema: ['crema'],
+  gel: ['gel'],
+  cera: ['cera'],
+  botox: ['botox'],
+  alisado: ['alisado'],
+  secador: ['secador'],
+  plancha: ['plancha'],
+  'bano de crema': ['bano de crema', 'bano crema'],
+};
+
+function escapeRegExp(str) {
+  return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\$&');
+}
+
+function detectProductFamilies(query) {
+  const q = canonicalizeQuery(query || '');
+  if (!q) return [];
+
+  const found = [];
+  for (const [family, aliases] of Object.entries(PRODUCT_FAMILY_ALIASES)) {
+    if (aliases.some((alias) => new RegExp(`\b${escapeRegExp(alias)}\b`, 'i').test(q))) {
+      found.push(family);
+    }
+  }
+  return found;
+}
 
 function extractProductTypeKeywords(query) {
   const q = canonicalizeQuery(query || '');
   if (!q) return [];
-  return PRODUCT_TYPE_KEYWORDS.filter((k) => new RegExp(`\b${k}\b`, 'i').test(q));
+  const direct = PRODUCT_TYPE_KEYWORDS.filter((k) => new RegExp(`\b${escapeRegExp(k)}\b`, 'i').test(q));
+  return Array.from(new Set([...direct, ...detectProductFamilies(q)]));
 }
 
 function isGenericProductQuery(query) {
   const q = canonicalizeQuery(query || '');
   if (!q) return false;
-  const keywords = extractProductTypeKeywords(q);
+
+  const families = detectProductFamilies(q);
   const tokens = tokenize(q, { expandSynonyms: false });
-  return keywords.length > 0 && tokens.length <= Math.max(2, keywords.length + 1);
+  const genericSignals = /(precio|precios|stock|opciones|lista|catalogo|catálogo|todo|todos|tenes|tenés|tienen|hay|busco|vendo|venta|mostrar|mostrame|mandame|enviame|pasame|que tenes|qué tenés|que tienen|qué tienen)/i;
+
+  if (!families.length) return false;
+  if (genericSignals.test(q)) return true;
+
+  const familyWords = new Set(
+    families.flatMap((f) => [f, ...(PRODUCT_FAMILY_ALIASES[f] || [])])
+      .flatMap((x) => canonicalizeQuery(x).split(' '))
+      .filter(Boolean)
+  );
+
+  const remaining = tokens.filter((tok) => !familyWords.has(tok));
+  return remaining.length <= 1;
+}
+
+function filterRowsByProductFamilies(rows, query) {
+  const families = detectProductFamilies(query);
+  if (!families.length) return [];
+
+  return rows.filter((r) => {
+    const haystack = canonicalizeQuery(`${r.nombre} ${r.categoria} ${r.marca} ${r.descripcion} ${r.tab}`);
+    return families.some((family) => {
+      const aliases = PRODUCT_FAMILY_ALIASES[family] || [family];
+      return aliases.some((alias) => new RegExp(`\b${escapeRegExp(alias)}\b`, 'i').test(haystack));
+    });
+  });
 }
 
 function applyProductTypeGuard(rows, query) {
+  const familyRows = filterRowsByProductFamilies(rows, query);
+  if (familyRows.length) return familyRows;
+
   const keys = extractProductTypeKeywords(query);
   if (!keys.length) return rows;
 
   const guarded = rows.filter((r) => {
     const haystack = canonicalizeQuery(`${r.nombre} ${r.categoria} ${r.tab}`);
-    return keys.some((k) => new RegExp(`\b${k}\b`, 'i').test(haystack));
+    return keys.some((k) => new RegExp(`\b${escapeRegExp(k)}\b`, 'i').test(haystack));
   });
 
   return guarded.length ? guarded : rows;
-}
-
-function getGenericProductOptions(rows, query) {
-  const q = canonicalizeQuery(query || '');
-  if (!q) return [];
-  if (!isGenericProductQuery(q)) return [];
-
-  const keys = extractProductTypeKeywords(q);
-  if (!keys.length) return [];
-
-  const matches = rows.filter((r) => {
-    const haystack = canonicalizeQuery(`${r.nombre} ${r.categoria} ${r.marca} ${r.descripcion} ${r.tab}`);
-    return keys.some((k) => new RegExp(`\b${k}\b`, 'i').test(haystack));
-  });
-
-  const uniq = [];
-  const seen = new Set();
-  for (const item of matches) {
-    const key = canonicalizeQuery(`${item.nombre}::${item.marca}::${item.precio}`);
-    if (!item?.nombre || seen.has(key)) continue;
-    seen.add(key);
-    uniq.push(item);
-  }
-
-  return uniq;
 }
 
 function findStock(rows, query, mode) {
@@ -2272,7 +2320,7 @@ function formatStockReply(matches, mode) {
   if (!matches.length) return null;
 
   // Mensaje corto estilo “ficha”
-  const items = mode === "LIST" ? matches.slice(0, 10) : matches.slice(0, 1);
+  const items = mode === "LIST_ALL" ? matches : (mode === "LIST" ? matches.slice(0, 10) : matches.slice(0, 1));
 
   const blocks = items.map((p) => {
     const precio = moneyOrConsult(p.precio);
@@ -2283,7 +2331,7 @@ function formatStockReply(matches, mode) {
     ].join("\n");
   });
 
-  const header = mode === "LIST"
+  const header = mode === "LIST" || mode === "LIST_ALL"
     ? `Encontré estas opciones:`
     : `Está en catálogo:`;
 
@@ -3618,18 +3666,6 @@ Seña recibida ✔`.trim();
       }
     }
 
-    const stockCatalogForGeneric = await getStockCatalog();
-    const genericProductMatches = getGenericProductOptions(stockCatalogForGeneric, text);
-    if (!pendingDraft && genericProductMatches.length) {
-      const parts = formatStockListAll(genericProductMatches, 12);
-      for (const part of parts) {
-        pushHistory(waId, "assistant", part);
-        await sendWhatsAppText(phone, part);
-      }
-      scheduleInactivityFollowUp(waId, phone);
-      return;
-    }
-
     const intent = await classifyAndExtract(text, {
       lastServiceName: lastKnownService?.nombre || '',
       flowStep: pendingDraft?.flow_step || '',
@@ -3694,9 +3730,12 @@ Seña recibida ✔`.trim();
         return;
       }
 
-      const genericMatches = getGenericProductOptions(stock, intent.query || text);
-      const matches = genericMatches.length
-        ? genericMatches
+      const directFamilyMatches = isGenericProductQuery(intent.query || text)
+        ? filterRowsByProductFamilies(stock, intent.query || text)
+        : [];
+
+      const matches = directFamilyMatches.length
+        ? directFamilyMatches
         : (intent.query ? findStock(stock, intent.query, productMode) : []);
 
       if (matches.length) {
@@ -3711,7 +3750,7 @@ Seña recibida ✔`.trim();
           }
         }
 
-        const replyCatalog = formatStockReply(matches, productMode);
+        const replyCatalog = formatStockReply(matches, directFamilyMatches.length ? "LIST_ALL" : productMode);
         if (replyCatalog) {
           pushHistory(waId, "assistant", replyCatalog);
           await sendWhatsAppText(phone, replyCatalog);
@@ -3721,8 +3760,9 @@ Seña recibida ✔`.trim();
         }
       } else {
         // ✅ Más inteligente: si no matchea, probamos mostrar opciones más amplias por categoría/descripcion
-        const broader = findStock(stock, guessQueryFromText(intent.query || text), "LIST");
-        const replyBroader = formatStockReply(broader, "LIST");
+        const broaderFamily = filterRowsByProductFamilies(stock, guessQueryFromText(intent.query || text));
+        const broader = broaderFamily.length ? broaderFamily : findStock(stock, guessQueryFromText(intent.query || text), "LIST");
+        const replyBroader = formatStockReply(broader, broaderFamily.length ? "LIST_ALL" : "LIST");
         if (replyBroader) {
           pushHistory(waId, "assistant", replyBroader);
           await sendWhatsAppText(phone, replyBroader);
