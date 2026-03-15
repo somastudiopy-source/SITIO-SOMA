@@ -163,6 +163,21 @@ function normalizePhone(s) {
   return s;
 }
 
+
+function normalizeWhatsAppRecipient(s) {
+  let digits = String(s || "").trim().replace(/[^\d]/g, "");
+  if (!digits) return "";
+  if (digits.endsWith("0")) {
+    const asFloat = String(s || "").trim();
+    if (asFloat.endsWith('.0')) digits = digits.slice(0, -1);
+  }
+  if (digits.startsWith("549")) return "54" + digits.slice(3);
+  if (digits.startsWith("54")) return digits;
+  if (digits.length === 10) return "54" + digits;
+  if (digits.length === 11 && digits.startsWith("0")) return "54" + digits.slice(1);
+  return digits;
+}
+
 async function dbInsertMessage({ direction, wa_peer, name, text, msg_type, wa_msg_id, raw }) {
   const peerNorm = normalizePhone(wa_peer);
   await db.query(
@@ -187,6 +202,13 @@ app.use(express.json({ limit: "25mb" }));
 // ===================== CONFIG =====================
 const DRIVE_FOLDER_ID = "1pKCqh1HEvQaI6XQ85ST8yvzxYWRXpxM1";
 const TIMEZONE = "America/Argentina/Salta";
+
+const WHATSAPP_TEMPLATE_LANGUAGE = process.env.WHATSAPP_TEMPLATE_LANGUAGE || "es_AR";
+const TEMPLATE_RECORDATORIO_CLIENTE = process.env.TEMPLATE_RECORDATORIO_CLIENTE || "recordatorio_turno_cataleya";
+const TEMPLATE_ALERTA_PELUQUERA = process.env.TEMPLATE_ALERTA_PELUQUERA || "alerta_turno_proximo";
+const TEMPLATE_NUEVO_TURNO_PELUQUERA = process.env.TEMPLATE_NUEVO_TURNO_PELUQUERA || "nuevo_turno_peluquera";
+const STYLIST_NOTIFY_PHONE_RAW = process.env.STYLIST_NOTIFY_PHONE || "3868 466370";
+const APPOINTMENT_TEMPLATE_SCAN_MS = Number(process.env.APPOINTMENT_TEMPLATE_SCAN_MS || 60000);
 
 // ===================== REQUIRED ENV CHECK (evita demos rotas) =====================
 const REQUIRED_ENV = ["OPENAI_API_KEY", "WHATSAPP_TOKEN", "PHONE_NUMBER_ID", "VERIFY_TOKEN", "GOOGLE_SA_FILE"];
@@ -1055,6 +1077,97 @@ async function createAppointmentRecord({ waId, waPhone, merged, status, calendar
   return r.rows[0];
 }
 
+
+function getAppointmentStartDate(appt) {
+  const ymd = toYMD(appt?.appointment_date || '');
+  const hm = formatAppointmentTimeForTemplate(appt?.appointment_time || '');
+  if (!ymd || !hm) return null;
+  const dt = new Date(`${ymd}T${hm}:00-03:00`);
+  if (Number.isNaN(dt.getTime())) return null;
+  return dt;
+}
+
+async function getAppointmentRowById(appointmentId) {
+  const r = await db.query(
+    `SELECT id, wa_id, wa_phone, client_name, contact_phone, service_name,
+            appointment_date::text AS appointment_date,
+            to_char(appointment_time, 'HH24:MI') AS appointment_time,
+            status,
+            stylist_notified_at,
+            reminder_client_24h_at,
+            reminder_stylist_24h_at,
+            reminder_stylist_2h_at
+       FROM appointments
+      WHERE id = $1
+      LIMIT 1`,
+    [appointmentId]
+  );
+  return r.rows[0] ? buildAppointmentData(r.rows[0]) : null;
+}
+
+async function processAppointmentTemplateNotifications() {
+  const stylistRecipient = normalizeWhatsAppRecipient(STYLIST_NOTIFY_PHONE_RAW);
+  if (!stylistRecipient) return;
+
+  const r = await db.query(
+    `SELECT id, wa_id, wa_phone, client_name, contact_phone, service_name,
+            appointment_date::text AS appointment_date,
+            to_char(appointment_time, 'HH24:MI') AS appointment_time,
+            status,
+            stylist_notified_at,
+            reminder_client_24h_at,
+            reminder_stylist_24h_at,
+            reminder_stylist_2h_at
+       FROM appointments
+      WHERE appointment_date IS NOT NULL
+        AND appointment_time IS NOT NULL
+        AND status IN ('booked', 'pending_stylist_confirmation')
+        AND appointment_date >= CURRENT_DATE - INTERVAL '1 day'
+      ORDER BY appointment_date ASC, appointment_time ASC`
+  );
+
+  const now = Date.now();
+  for (const raw of (r.rows || [])) {
+    const appt = buildAppointmentData(raw);
+    const startAt = getAppointmentStartDate(appt);
+    if (!startAt) continue;
+
+    const msUntil = startAt.getTime() - now;
+    if (msUntil <= 0) continue;
+
+    try {
+      if (!appt.stylist_notified_at) {
+        await sendNewAppointmentTemplateToStylist(appt);
+      }
+
+      const clientRecipient = normalizeWhatsAppRecipient(appt.contact_phone || appt.wa_phone || '');
+      if (!appt.reminder_client_24h_at && clientRecipient && msUntil <= (24 * 60 * 60 * 1000)) {
+        await sendAppointmentTemplateAndLog({
+          appointmentId: appt.id,
+          recipientPhone: clientRecipient,
+          templateName: TEMPLATE_RECORDATORIO_CLIENTE,
+          notificationType: 'client_reminder_24h',
+          vars: buildAppointmentTemplateVarsForClient(appt),
+          markField: 'reminder_client_24h_at',
+        });
+      }
+
+      if (!appt.reminder_stylist_2h_at && msUntil <= (2 * 60 * 60 * 1000)) {
+        await sendAppointmentTemplateAndLog({
+          appointmentId: appt.id,
+          recipientPhone: stylistRecipient,
+          templateName: TEMPLATE_ALERTA_PELUQUERA,
+          notificationType: 'stylist_reminder_2h',
+          vars: buildAppointmentTemplateVarsForStylistReminder(appt),
+          markField: 'reminder_stylist_2h_at',
+        });
+      }
+    } catch (e) {
+      console.error(`❌ Error enviando plantillas de turno para appointment ${appt.id}:`, e?.response?.data || e?.message || e);
+    }
+  }
+}
+
 async function finalizeAppointmentFlow({ waId, phone, merged }) {
   merged.fecha = toYMD(merged.fecha);
   merged.hora = normalizeHourHM(merged.hora);
@@ -1072,13 +1185,29 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
   if (merged.payment_status !== "paid_verified") return { type: "need_payment" };
 
   if (isColorOrTinturaService(`${merged.servicio} ${merged.notas || ""}`)) {
-    await createAppointmentRecord({
+    const apptRow = await createAppointmentRecord({
       waId,
       waPhone: phone,
       merged,
       status: "pending_stylist_confirmation",
       calendarEventId: null,
     });
+    try {
+      const apptData = buildAppointmentData({
+        id: apptRow?.id,
+        wa_id: waId,
+        wa_phone: normalizePhone(phone || merged.telefono_contacto || ""),
+        client_name: merged.cliente_full || "",
+        contact_phone: normalizePhone(merged.telefono_contacto || ""),
+        service_name: merged.servicio || "",
+        appointment_date: merged.fecha,
+        appointment_time: merged.hora,
+        status: "pending_stylist_confirmation",
+      });
+      await sendNewAppointmentTemplateToStylist(apptData);
+    } catch (e) {
+      console.error('❌ Error notificando nuevo turno pendiente a la peluquera:', e?.response?.data || e?.message || e);
+    }
     await deleteAppointmentDraft(waId);
     return { type: "pending_stylist_confirmation" };
   }
@@ -1094,13 +1223,30 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
     notas: notasCalendar,
   });
 
-  await createAppointmentRecord({
+  const bookedRow = await createAppointmentRecord({
     waId,
     waPhone: phone,
     merged,
     status: "booked",
     calendarEventId: ev?.eventId || null,
   });
+
+  try {
+    const apptData = buildAppointmentData({
+      id: bookedRow?.id,
+      wa_id: waId,
+      wa_phone: normalizePhone(phone || merged.telefono_contacto || ""),
+      client_name: merged.cliente_full || "",
+      contact_phone: normalizePhone(merged.telefono_contacto || ""),
+      service_name: merged.servicio || "",
+      appointment_date: merged.fecha,
+      appointment_time: merged.hora,
+      status: "booked",
+    });
+    await sendNewAppointmentTemplateToStylist(apptData);
+  } catch (e) {
+    console.error('❌ Error notificando nuevo turno a la peluquera:', e?.response?.data || e?.message || e);
+  }
 
   if (TURNOS_SHEET_ID) {
     try {
@@ -3656,6 +3802,179 @@ lastSentOutByPeer.set(dedupKey, now);
   return resp.data;
 }
 
+
+async function sendWhatsAppTemplate(to, templateName, bodyVars = [], meta = {}) {
+  const recipient = normalizeWhatsAppRecipient(to);
+  if (!recipient) throw new Error(`Número inválido para plantilla: ${to || '(vacío)'}`);
+  if (!templateName) throw new Error('Falta templateName');
+
+  const body = (Array.isArray(bodyVars) ? bodyVars : []).map((v) => String(v ?? '').trim());
+  const dedupKey = `${recipient}::template::${templateName}::${body.join('|')}`;
+  const now = Date.now();
+  const prevTs = lastSentOutByPeer.get(dedupKey) || 0;
+  if ((now - prevTs) < OUT_DEDUP_MS) return { deduped: true };
+  lastSentOutByPeer.set(dedupKey, now);
+
+  const components = body.length
+    ? [{
+        type: 'body',
+        parameters: body.map((value) => ({ type: 'text', text: value || '-' })),
+      }]
+    : [];
+
+  const payload = {
+    messaging_product: 'whatsapp',
+    to: recipient,
+    type: 'template',
+    template: {
+      name: templateName,
+      language: { code: WHATSAPP_TEMPLATE_LANGUAGE },
+      ...(components.length ? { components } : {}),
+    },
+  };
+
+  const resp = await axios.post(
+    `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
+    payload,
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  const wa_msg_id = resp?.data?.messages?.[0]?.id || null;
+  await dbInsertMessage({
+    direction: 'out',
+    wa_peer: recipient,
+    name: null,
+    text: `[TEMPLATE:${templateName}] ${body.join(' | ')}`,
+    msg_type: 'template',
+    wa_msg_id,
+    raw: { ...(resp?.data || {}), template_payload: payload, meta },
+  });
+
+  return { ...(resp?.data || {}), wa_msg_id };
+}
+
+function formatAppointmentDateForTemplate(dateYMD) {
+  const ymd = toYMD(dateYMD);
+  return ymd ? ymdToDMY(ymd) : '';
+}
+
+function formatAppointmentTimeForTemplate(timeHM) {
+  return normalizeHourHM(timeHM) || String(timeHM || '').trim();
+}
+
+function buildAppointmentData(row = {}) {
+  return {
+    id: row.id,
+    wa_id: row.wa_id || '',
+    wa_phone: normalizePhone(row.wa_phone || ''),
+    contact_phone: normalizePhone(row.contact_phone || ''),
+    client_name: String(row.client_name || '').trim(),
+    service_name: String(row.service_name || '').trim(),
+    appointment_date: toYMD(row.appointment_date || ''),
+    appointment_time: formatAppointmentTimeForTemplate(row.appointment_time || ''),
+    status: String(row.status || '').trim(),
+    stylist_notified_at: row.stylist_notified_at || null,
+    reminder_client_24h_at: row.reminder_client_24h_at || null,
+    reminder_stylist_24h_at: row.reminder_stylist_24h_at || null,
+    reminder_stylist_2h_at: row.reminder_stylist_2h_at || null,
+  };
+}
+
+function buildAppointmentTemplateVarsForStylist(appt) {
+  return [
+    appt.client_name || 'Cliente',
+    formatAppointmentDateForTemplate(appt.appointment_date),
+    formatAppointmentTimeForTemplate(appt.appointment_time),
+    appt.service_name || 'Servicio',
+    normalizePhone(appt.contact_phone || appt.wa_phone || ''),
+  ];
+}
+
+function buildAppointmentTemplateVarsForStylistReminder(appt) {
+  return [
+    appt.client_name || 'Cliente',
+    appt.service_name || 'Servicio',
+    formatAppointmentDateForTemplate(appt.appointment_date),
+    formatAppointmentTimeForTemplate(appt.appointment_time),
+    normalizePhone(appt.contact_phone || appt.wa_phone || ''),
+  ];
+}
+
+function buildAppointmentTemplateVarsForClient(appt) {
+  return [
+    appt.client_name || 'Cliente',
+    formatAppointmentDateForTemplate(appt.appointment_date),
+    formatAppointmentTimeForTemplate(appt.appointment_time),
+    appt.service_name || 'Servicio',
+  ];
+}
+
+async function insertAppointmentNotificationLog({ appointmentId, notificationType, recipientPhone, templateName, waMessageId, payload }) {
+  await db.query(
+    `INSERT INTO appointment_notifications (appointment_id, notification_type, recipient_phone, template_name, wa_message_id, payload)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [
+      appointmentId,
+      notificationType,
+      normalizePhone(recipientPhone || ''),
+      templateName || null,
+      waMessageId || null,
+      payload || {},
+    ]
+  );
+}
+
+async function markAppointmentNotificationField(appointmentId, fieldName) {
+  const allowed = new Set([
+    'stylist_notified_at',
+    'reminder_client_24h_at',
+    'reminder_stylist_24h_at',
+    'reminder_stylist_2h_at',
+  ]);
+  if (!allowed.has(fieldName)) throw new Error(`Campo de notificación no permitido: ${fieldName}`);
+  await db.query(`UPDATE appointments SET ${fieldName} = NOW(), updated_at = NOW() WHERE id = $1`, [appointmentId]);
+}
+
+async function sendAppointmentTemplateAndLog({ appointmentId, recipientPhone, templateName, notificationType, vars, markField }) {
+  const response = await sendWhatsAppTemplate(recipientPhone, templateName, vars, {
+    appointment_id: appointmentId,
+    notification_type: notificationType,
+  });
+
+  await insertAppointmentNotificationLog({
+    appointmentId,
+    notificationType,
+    recipientPhone,
+    templateName,
+    waMessageId: response?.wa_msg_id || response?.messages?.[0]?.id || null,
+    payload: { vars },
+  });
+
+  if (markField) await markAppointmentNotificationField(appointmentId, markField);
+  return response;
+}
+
+async function sendNewAppointmentTemplateToStylist(appt) {
+  const recipient = normalizeWhatsAppRecipient(STYLIST_NOTIFY_PHONE_RAW);
+  if (!recipient || !appt?.id || !appt?.appointment_date || !appt?.appointment_time) return false;
+
+  await sendAppointmentTemplateAndLog({
+    appointmentId: appt.id,
+    recipientPhone: recipient,
+    templateName: TEMPLATE_NUEVO_TURNO_PELUQUERA,
+    notificationType: 'stylist_new_booking',
+    vars: buildAppointmentTemplateVarsForStylist(appt),
+    markField: 'stylist_notified_at',
+  });
+
+  return true;
+}
+
 async function sendWhatsAppImageById(to, mediaId, caption) {
   await axios.post(
     `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
@@ -5275,12 +5594,22 @@ setInterval(() => {
   if (now.startsWith("23:59")) endOfDayJob();
 }, 60000);
 
+// ===================== PLANTILLAS DE TURNOS =====================
+setInterval(() => {
+  processAppointmentTemplateNotifications().catch((e) => {
+    console.error('❌ Error en el scheduler de plantillas de turnos:', e?.response?.data || e?.message || e);
+  });
+}, APPOINTMENT_TEMPLATE_SCAN_MS);
+
 // ===================== START =====================
 const PORT = process.env.PORT || 3000;
 
 (async () => {
   await ensureDb();
   await ensureAppointmentTables();
+  await processAppointmentTemplateNotifications().catch((e) => {
+    console.error('❌ Error inicial procesando plantillas de turnos:', e?.response?.data || e?.message || e);
+  });
 
   app.listen(PORT, () => {
     console.log("🚀 Bot de estética activo");
