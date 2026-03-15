@@ -420,6 +420,42 @@ function clearLastProductContext(waId) {
   lastProductContextByUser.delete(waId);
 }
 
+function clearProductMemory(waId) {
+  clearLastProductContext(waId);
+  if (waId) lastProductByUser.delete(waId);
+}
+
+function getLastAssistantMessage(waId) {
+  const conv = ensureConv(waId);
+  return [...(conv.messages || [])].reverse().find((m) => m.role === "assistant") || null;
+}
+
+function lastAssistantLooksLikeTurnoMessage(waId) {
+  const last = getLastAssistantMessage(waId);
+  const t = normalize(last?.content || '');
+  if (!t) return false;
+  return /(turno reservado|solicitud recibida|sena recibida|comprobante recibido|lo estoy validando|datos para la transferencia|cuando haga la transferencia|ahora necesito este dato)/i.test(t);
+}
+
+function lastAssistantLooksLikeCatalogMessage(waId) {
+  const last = getLastAssistantMessage(waId);
+  const t = normalize(last?.content || '');
+  if (!t) return false;
+  return /(esta en catalogo|catalogo completo|mas opciones del catalogo|si quiere, le ayudo a elegir|no lo encuentro asi en el catalogo)/i.test(t);
+}
+
+function isPoliteClosureAfterTurno(text) {
+  const t = normalize(text || '');
+  if (!t) return false;
+  return /^(gracias|muchas gracias|mil gracias|genial gracias|perfecto gracias|perfecto muchas gracias|buenisimo gracias|buenisimo muchas gracias|buenisimo|buenisima|genial|perfecto|listo gracias|ok gracias|oka gracias|dale gracias|barbaro gracias|barbaro|bárbaro|joya|joya gracias)$/.test(t);
+}
+
+function isPoliteCatalogDecline(text) {
+  const t = normalize(text || '');
+  if (!t) return false;
+  return /^(no gracias|no, gracias|no necesito|no necesito nada|no busco nada|no busco nada deja de enviarme|deja de enviarme|dejame ahi|dejalo ahi|dejala ahi|dejalo|dejala|no hace falta|no hace falta gracias)$/.test(t);
+}
+
 function looksLikeProductPreferenceReply(text) {
   const t = normalize(text || '');
   if (!t) return false;
@@ -4134,6 +4170,7 @@ Lo estoy validando con los datos del turno. En cuanto quede confirmado, le aviso
         return true;
       }
       if (result.type === "pending_stylist_confirmation") {
+        clearProductMemory(waId);
         const diaOk = weekdayEsFromYMD(base.fecha);
         const msgPend = `✅ Solicitud recibida
 
@@ -4152,6 +4189,7 @@ Ahora consulto con la estilista ${TURNOS_STYLIST_NAME} y le confirmo por aquí.`
         return true;
       }
       if (result.type === "booked") {
+        clearProductMemory(waId);
         const diaOk = weekdayEsFromYMD(base.fecha);
         const msgOk = `✅ Turno reservado
 
@@ -4313,6 +4351,28 @@ Seña recibida ✔`.trim();
         await askForMissingTurnoData(repairedDraft);
         return;
       }
+    }
+
+    if (!pendingDraft && isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
+      clearProductMemory(waId);
+      const msgCierreTurno = `¡Gracias a vos! 😊
+
+Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
+      pushHistory(waId, "assistant", msgCierreTurno);
+      await sendWhatsAppText(phone, msgCierreTurno);
+      scheduleInactivityFollowUp(waId, phone);
+      return;
+    }
+
+    if (isPoliteCatalogDecline(text) && lastAssistantLooksLikeCatalogMessage(waId)) {
+      clearProductMemory(waId);
+      const msgNoCatalogo = `Perdón 😊 No le molesto más con eso.
+
+Si después necesita algo, estoy acá ✨`;
+      pushHistory(waId, "assistant", msgNoCatalogo);
+      await sendWhatsAppText(phone, msgNoCatalogo);
+      scheduleInactivityFollowUp(waId, phone);
+      return;
     }
 
     if (textAsksForServicesList(text)) {
