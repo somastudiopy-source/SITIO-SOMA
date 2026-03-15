@@ -1637,6 +1637,45 @@ function lastAssistantWasQuestion(waId) {
   return String(last.content).includes("?");
 }
 
+function lastAssistantOfferedBooking(waId) {
+  const last = getLastAssistantMessage(waId);
+  const t = normalize(last?.content || '');
+  if (!t) return false;
+  return /(desea reservar|quiere reservar|quiere sacar turno|le ayudo a sacar un turno|le ayudo con el turno|avanzamos con el turno|quiere que coordinemos el turno|quiere coordinar su turno)/i.test(t);
+}
+
+function lastAssistantAskedGenericClosure(waId) {
+  const last = getLastAssistantMessage(waId);
+  const t = normalize(last?.content || '');
+  if (!t) return false;
+  return /(quiere que le ayudemos en algo mas|quiere que la ayudemos en algo mas|damos por finalizada la consulta|damos por finalizada su consulta)/i.test(t);
+}
+
+function isGreetingOnly(text) {
+  const t = normalizeShortReply(text || '');
+  if (!t) return false;
+  return /^(hola|holi|buen dia|buen día|buenas|buenas tardes|buenas noches|buenos dias|buenos días|que tal|qué tal)$/.test(t);
+}
+
+function isNegativeBookingReply(text) {
+  const t = normalize(text || '');
+  if (!t) return false;
+  return /(no quiero reservar|no quiero turno|no deseo reservar|no deseo turno|no busco turno|sin turno|solo queria consultar|solo quería consultar|solo consultaba|solo queria saber|solo quería saber)/i.test(t);
+}
+
+function isBookingInfoOnly(text) {
+  const t = normalize(text || '');
+  if (!t) return false;
+  if (isNegativeBookingReply(t)) return false;
+  return /((precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|valor|horario|horarios|cuando hay|cuándo hay|hay turnos|tenes turno|tenés turno|disponibilidad|para cuando|para cuándo).*(turno|servicio|alisado|botox|keratina|color|corte|uñas|pestañas|cejas))|((turno|servicio|alisado|botox|keratina|color|corte|uñas|pestañas|cejas).*(precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|valor|horario|horarios|cuando hay|cuándo hay|hay turnos|tenes turno|tenés turno|disponibilidad|para cuando|para cuándo))/i.test(t);
+}
+
+function isStrongBookingIntent(text) {
+  const t = normalize(text || '');
+  if (!t) return false;
+  if (isNegativeBookingReply(t)) return false;
+  return /(quiero reservar|quiero sacar turno|quiero un turno|reservame|resérvame|agendame|agendáme|agendar turno|reservar turno|me gustaria sacar turno|me gustaría sacar turno|me gustaria un turno|me gustaría un turno|coordinar turno|confirmar turno)/i.test(t);
+}
 
 function canonicalizeQuery(text) {
   const t = normalize(text);
@@ -3017,10 +3056,10 @@ function formatServicesReply(matches, mode, opts = {}) {
     const footer = options.showDuration || options.showDescription
       ? `
 
-Si quiere, también puedo ayudarle a sacar un turno 😊`
+Si quiere, también puedo ayudarle con el turno 😊 ¿Desea reservar?`
       : `
 
-Si quiere, también le digo cuánto demora o le ayudo a sacar un turno 😊`;
+Si quiere, también le digo cuánto demora o avanzamos con el turno 😊 ¿Desea reservar?`;
 
     return `${parts.join("\n")}${footer}`.trim();
   }
@@ -3164,6 +3203,11 @@ function recentConversationLooksLikeBooking(history = []) {
     return false;
   }
 
+  // ✅ Si el último mensaje fue un cierre general o de consulta, no seguimos arrastrando el flujo de turnos.
+  if (/(quiere que le ayudemos en algo mas|quiere que la ayudemos en algo mas|damos por finalizada la consulta|damos por finalizada su consulta|en que puedo ayudarle|en que puedo ayudarte)/i.test(lastAssistantText)) {
+    return false;
+  }
+
   const snippet = buildHistorySnippetForAI(recent, 8);
   if (!snippet) return false;
   return /(turno|reserv|agend|cita|que servicio quiere reservar|que dia le gustaria|que horario prefiere|nombre y apellido|telefono de contacto|se solicita una sena|envie por aqui el comprobante|datos para la transferencia|coordinar su turno|para dejar el turno listo necesito|ahora necesito este dato)/i.test(normalize(snippet));
@@ -3173,11 +3217,14 @@ function isLikelyBookingContinuationAnswer(text) {
   const raw = String(text || '').trim();
   const t = normalize(raw);
   if (!t) return false;
+  if (isGreetingOnly(raw)) return false;
+  if (isNegativeBookingReply(raw)) return false;
+  if (isBookingInfoOnly(raw)) return false;
   if (isPoliteClosureAfterTurno(raw)) return false;
   if (isExplicitProductIntent(raw)) return false;
 
   if (isWarmAffirmativeReply(raw)) return true;
-  if (isExplicitServiceIntent(raw)) return true;
+  if (isStrongBookingIntent(raw)) return true;
   if (extractAmbiguousBeautyTerm(raw)) return true;
   if (/(lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|manana|mañana|hoy|pasado manana|pasado mañana|semana que viene|proxima semana|próxima semana)/i.test(t)) return true;
   if (/\b\d{1,2}(:\d{2})?\b/.test(raw)) return true;
@@ -3255,11 +3302,16 @@ function resolveRelativeTurnoReference(text, { pendingDraft, lastBooked } = {}) 
 function looksLikeAppointmentIntent(text, { pendingDraft, lastService, history } = {}) {
   const raw = String(text || '').trim();
   const t = normalize(raw);
+  if (isGreetingOnly(raw)) return false;
+  if (isNegativeBookingReply(raw)) return false;
+  if (isBookingInfoOnly(raw)) return false;
   if (isPoliteClosureAfterTurno(raw)) return false;
   if (isExplicitProductIntent(raw)) return false;
-  if (/(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b)/i.test(t)) return true;
+  if (isStrongBookingIntent(raw)) return true;
+  if (/\b(reserv\w*|agend\w*|cita)\b/i.test(t)) return true;
+  if (/\bturno\b/i.test(t) && !/(precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|valor|horario|horarios|cuando hay|cuándo hay|hay turnos|tenes turno|tenés turno|disponibilidad|para cuando|para cuándo)/i.test(t)) return true;
   if (pendingDraft && /(si|sí|dale|ok|oka|quiero|quiero seguir|continuar|confirmar|bien|perfecto)/i.test(t)) return true;
-  if (lastService && /(quiero( ese| el)? turno|bien,? quiero el turno|dale|ok|me gustaria sacar turno|me gustaria un turno|reservame|agendame)/i.test(t)) return true;
+  if (lastService && /(quiero( ese| el)? turno|bien,? quiero el turno|dale|ok|me gustaria sacar turno|me gustaría sacar turno|me gustaria un turno|me gustaría un turno|reservame|resérvame|agendame|agendáme)/i.test(t)) return true;
   if (recentConversationLooksLikeBooking(history) && isLikelyBookingContinuationAnswer(raw)) return true;
   return false;
 }
@@ -3954,9 +4006,19 @@ Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
       return;
     }
 
+    if (!pendingDraft && (isGreetingOnly(text) || isNegativeBookingReply(text)) && (lastAssistantAskedGenericClosure(waId) || recentConversationLooksLikeBooking(convForAI))) {
+      const safeGreeting = /^no\b/i.test(normalize(text))
+        ? `Perfecto 😊 Queda solo como consulta. ¿En qué más puedo ayudarle?`
+        : `¡Hola! 😊 ¿En qué puedo ayudarle?`;
+      pushHistory(waId, "assistant", safeGreeting);
+      await sendWhatsAppText(phone, safeGreeting);
+      scheduleInactivityFollowUp(waId, phone);
+      return;
+    }
+
     // ✅ Si el cliente responde afirmativamente a una propuesta de turno y ya veníamos hablando de un servicio,
     // iniciamos el flujo sin volver a preguntar el servicio.
-    if (!pendingDraft && lastKnownService?.nombre && isWarmAffirmativeReply(text) && lastAssistantWasQuestion(waId)) {
+    if (!pendingDraft && lastKnownService?.nombre && isWarmAffirmativeReply(text) && lastAssistantOfferedBooking(waId)) {
       const baseTurno = {
         servicio: lastKnownService.nombre,
         fecha: '',
