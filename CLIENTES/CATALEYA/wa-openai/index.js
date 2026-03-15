@@ -280,8 +280,6 @@ TURNOS:
 - No inventes precios ni servicios: solo los que figuran en el Excel de servicios. 
 - NO se ofrece lifting de pestañas, cejas, perfilado, uñas, limpiezas faciales ni otros servicios fuera del Excel.
 
-- Corte femenino sale $20.000 y es con turno. Incluye Lavado.
-
 - si busca Corte masculino / varón / hombre: es SOLO por orden de llegada, no se toma turno. Horario: Lunes a Sábados 10 a 13 hs y 17 a 22 hs. Precio final: $10.000 PESOS
 
 - Horario del salón comercial: Lunes a Viernes de 17 a 22 hs.
@@ -3335,11 +3333,14 @@ async function describeImageWithVision(dataUrl) {
   const resp = await openai.chat.completions.create({
     model: COMPLEX_MODEL,
     messages: [
-      { role: "system", content: "Describí la imagen en español y extraé info útil para atender al cliente." },
+      {
+        role: "system",
+        content: "Analizá la imagen en español y devolvé una descripción útil para atención al cliente. Si hay texto visible, transcribilo de forma fiel. Si parece un comprobante, transferencia o recibo, priorizá extraer monto, titular, alias, estado y nombres visibles. No inventes datos que no se vean."
+      },
       {
         role: "user",
         content: [
-          { type: "text", text: "Describí esta imagen:" },
+          { type: "text", text: "Analizá esta imagen y extraé el texto visible y los datos importantes:" },
           { type: "image_url", image_url: { url: dataUrl } },
         ],
       },
@@ -3659,6 +3660,11 @@ if (closeTimers.has(waId)) {
     const extracted = await extractTextFromIncomingMessage(msg);
     const text = (extracted.text || "").trim();
     const mediaMeta = extracted.media || null;
+    const userIntentText = (
+      msg.type === "image" ? (msg.image?.caption || "") :
+      msg.type === "document" ? (msg.document?.caption || "") :
+      text
+    ).trim();
 
 
 // ✅ Contexto para seguimiento al cierre (se actualiza durante la conversación)
@@ -3703,13 +3709,13 @@ const ctx0 = lastCloseContext.get(waId);
 if (ctx0) ctx0.interest = interest || ctx0.interest;
 
     // Si piden foto sin decir cuál: usar el último producto o las últimas opciones listadas
-    if (userAsksForPhoto(text)) {
+    if (userAsksForPhoto(userIntentText)) {
       const stockForPhotos = await getStockCatalog();
       const lastCtxForPhotos = getLastProductContext(waId);
 
-      if (userAsksForAllPhotos(text) && lastCtxForPhotos?.lastOptions?.length) {
+      if (userAsksForAllPhotos(userIntentText) && lastCtxForPhotos?.lastOptions?.length) {
         const optionProducts = resolveProductsByNames(stockForPhotos, lastCtxForPhotos.lastOptions);
-        const sentAll = await maybeSendMultipleProductPhotos(phone, optionProducts, text);
+        const sentAll = await maybeSendMultipleProductPhotos(phone, optionProducts, userIntentText);
         if (sentAll) {
           scheduleInactivityFollowUp(waId, phone);
           return;
@@ -3718,7 +3724,7 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
 
       const last = lastProductByUser.get(waId);
       if (last) {
-        const sent = await maybeSendProductPhoto(phone, last, text);
+        const sent = await maybeSendProductPhoto(phone, last, userIntentText);
         if (sent) {
           // ✅ INACTIVIDAD: programar follow-up luego de la respuesta del bot
           scheduleInactivityFollowUp(waId, phone);
