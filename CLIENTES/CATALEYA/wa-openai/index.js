@@ -1543,6 +1543,18 @@ function formatSlotsByBlock(slots = []) {
   return grouped.join(' | ');
 }
 
+function formatSlotsByBlockMultiline(slots = []) {
+  if (!Array.isArray(slots) || !slots.length) return '• Sin horarios disponibles';
+
+  return TURNOS_ALLOWED_BLOCKS
+    .map((block) => {
+      const values = slots.filter((slot) => slot.label === block.label).map((slot) => slot.hm);
+      return values.length ? `• ${capitalizeEs(block.label)}: ${values.join(', ')}` : '';
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
 async function getAvailabilitySummaries({ daysYMD, durationMin }) {
   const safeDays = (Array.isArray(daysYMD) ? daysYMD : []).map((d) => toYMD(d)).filter(Boolean);
   if (!safeDays.length) return [];
