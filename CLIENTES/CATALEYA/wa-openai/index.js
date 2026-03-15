@@ -434,7 +434,7 @@ function lastAssistantLooksLikeTurnoMessage(waId) {
   const last = getLastAssistantMessage(waId);
   const t = normalize(last?.content || '');
   if (!t) return false;
-  return /(comprobante recibido|lo estoy validando|datos para la transferencia|cuando haga la transferencia|ahora necesito este dato|para dejar el turno listo necesito|nombre y apellido de la persona que va a asistir|numero de telefono de contacto)/i.test(t);
+  return /(turno reservado|solicitud recibida|sena recibida|comprobante recibido|lo estoy validando|datos para la transferencia|cuando haga la transferencia|ahora necesito este dato)/i.test(t);
 }
 
 function lastAssistantLooksLikeCatalogMessage(waId) {
@@ -1285,8 +1285,6 @@ Reglas:
 - Interpretá fechas relativas ("mañana", "el viernes") usando ${nowTxt} y zona ${TIMEZONE}.
 - Si el texto NO es un pedido de turno NI una continuación de reserva, ok=false.
 - Si te paso un contexto con datos ya conocidos, mantenelos y completá lo faltante.
-- Si además te paso historial reciente, usalo para entender si el cliente está continuando una reserva.
-- Si el cliente responde solo con un servicio, una fecha, una hora, un nombre o un teléfono, y el historial muestra que estaban coordinando un turno, tomalo como continuación.
 `,
       },
       {
@@ -1297,7 +1295,6 @@ Reglas:
           servicio: ctx.servicio || "",
           duracion_min: ctx.duracion_min || "",
           notas: ctx.notas || "",
-          historial_reciente: ctx.historySnippet || "",
         })}\nMensaje: ${text}`
       },
     ],
@@ -1637,45 +1634,6 @@ function lastAssistantWasQuestion(waId) {
   return String(last.content).includes("?");
 }
 
-function lastAssistantOfferedBooking(waId) {
-  const last = getLastAssistantMessage(waId);
-  const t = normalize(last?.content || '');
-  if (!t) return false;
-  return /(desea reservar|quiere reservar|quiere sacar turno|le ayudo a sacar un turno|le ayudo con el turno|avanzamos con el turno|quiere que coordinemos el turno|quiere coordinar su turno)/i.test(t);
-}
-
-function lastAssistantAskedGenericClosure(waId) {
-  const last = getLastAssistantMessage(waId);
-  const t = normalize(last?.content || '');
-  if (!t) return false;
-  return /(quiere que le ayudemos en algo mas|quiere que la ayudemos en algo mas|damos por finalizada la consulta|damos por finalizada su consulta)/i.test(t);
-}
-
-function isGreetingOnly(text) {
-  const t = normalizeShortReply(text || '');
-  if (!t) return false;
-  return /^(hola|holi|buen dia|buen día|buenas|buenas tardes|buenas noches|buenos dias|buenos días|que tal|qué tal)$/.test(t);
-}
-
-function isNegativeBookingReply(text) {
-  const t = normalize(text || '');
-  if (!t) return false;
-  return /(no quiero reservar|no quiero turno|no deseo reservar|no deseo turno|no busco turno|sin turno|solo queria consultar|solo quería consultar|solo consultaba|solo queria saber|solo quería saber)/i.test(t);
-}
-
-function isBookingInfoOnly(text) {
-  const t = normalize(text || '');
-  if (!t) return false;
-  if (isNegativeBookingReply(t)) return false;
-  return /((precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|valor|horario|horarios|cuando hay|cuándo hay|hay turnos|tenes turno|tenés turno|disponibilidad|para cuando|para cuándo).*(turno|servicio|alisado|botox|keratina|color|corte|uñas|pestañas|cejas))|((turno|servicio|alisado|botox|keratina|color|corte|uñas|pestañas|cejas).*(precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|valor|horario|horarios|cuando hay|cuándo hay|hay turnos|tenes turno|tenés turno|disponibilidad|para cuando|para cuándo))/i.test(t);
-}
-
-function isStrongBookingIntent(text) {
-  const t = normalize(text || '');
-  if (!t) return false;
-  if (isNegativeBookingReply(t)) return false;
-  return /(quiero reservar|quiero sacar turno|quiero un turno|reservame|resérvame|agendame|agendáme|agendar turno|reservar turno|me gustaria sacar turno|me gustaría sacar turno|me gustaria un turno|me gustaría un turno|coordinar turno|confirmar turno)/i.test(t);
-}
 
 function canonicalizeQuery(text) {
   const t = normalize(text);
@@ -3056,10 +3014,10 @@ function formatServicesReply(matches, mode, opts = {}) {
     const footer = options.showDuration || options.showDescription
       ? `
 
-Si quiere, también puedo ayudarle con el turno 😊 ¿Desea reservar?`
+Si quiere, también puedo ayudarle a sacar un turno 😊`
       : `
 
-Si quiere, también le digo cuánto demora o avanzamos con el turno 😊 ¿Desea reservar?`;
+Si quiere, también le digo cuánto demora o le ayudo a sacar un turno 😊`;
 
     return `${parts.join("\n")}${footer}`.trim();
   }
@@ -3183,58 +3141,6 @@ function mergeConversationForAI(dbMessages, localMessages) {
   return merged.slice(-20);
 }
 
-function buildHistorySnippetForAI(history = [], limit = 10) {
-  return (Array.isArray(history) ? history : [])
-    .slice(-Math.max(1, limit))
-    .map((m) => `${m.role}: ${String(m?.content || '').trim()}`)
-    .filter(Boolean)
-    .join(' | ')
-    .slice(0, 2000);
-}
-
-function recentConversationLooksLikeBooking(history = []) {
-  const recent = (Array.isArray(history) ? history : []).slice(-8);
-  const lastAssistant = [...recent].reverse().find((m) => m?.role === 'assistant');
-  const lastAssistantText = normalize(lastAssistant?.content || '');
-
-  // ✅ Si el último mensaje del bot ya confirma o deja recibido el turno,
-  // el flujo de turnos debe darse por finalizado automáticamente.
-  if (/(turno reservado|turno confirmado|queda confirmado|queda reservado|solicitud recibida|seña recibida|sena recibida|pago confirmado)/i.test(lastAssistantText)) {
-    return false;
-  }
-
-  // ✅ Si el último mensaje fue un cierre general o de consulta, no seguimos arrastrando el flujo de turnos.
-  if (/(quiere que le ayudemos en algo mas|quiere que la ayudemos en algo mas|damos por finalizada la consulta|damos por finalizada su consulta|en que puedo ayudarle|en que puedo ayudarte)/i.test(lastAssistantText)) {
-    return false;
-  }
-
-  const snippet = buildHistorySnippetForAI(recent, 8);
-  if (!snippet) return false;
-  return /(turno|reserv|agend|cita|que servicio quiere reservar|que dia le gustaria|que horario prefiere|nombre y apellido|telefono de contacto|se solicita una sena|envie por aqui el comprobante|datos para la transferencia|coordinar su turno|para dejar el turno listo necesito|ahora necesito este dato)/i.test(normalize(snippet));
-}
-
-function isLikelyBookingContinuationAnswer(text) {
-  const raw = String(text || '').trim();
-  const t = normalize(raw);
-  if (!t) return false;
-  if (isGreetingOnly(raw)) return false;
-  if (isNegativeBookingReply(raw)) return false;
-  if (isBookingInfoOnly(raw)) return false;
-  if (isPoliteClosureAfterTurno(raw)) return false;
-  if (isExplicitProductIntent(raw)) return false;
-
-  if (isWarmAffirmativeReply(raw)) return true;
-  if (isStrongBookingIntent(raw)) return true;
-  if (extractAmbiguousBeautyTerm(raw)) return true;
-  if (/(lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|manana|mañana|hoy|pasado manana|pasado mañana|semana que viene|proxima semana|próxima semana)/i.test(t)) return true;
-  if (/\b\d{1,2}(:\d{2})?\b/.test(raw)) return true;
-  if (/\b(mi hija|para mi|para mí|ella|mi señora|mi tia|mi tía|mi mama|mi mamá)\b/i.test(raw)) return true;
-  if (/^\+?\d[\d\s\-()]{6,}$/.test(raw)) return true;
-  if (raw.split(/\s+/).length <= 4 && !/[?¿]/.test(raw)) return true;
-
-  return false;
-}
-
 function getLastKnownService(waId, draft) {
   const fromDraft = draft?.servicio || draft?.last_service_name || '';
   if (fromDraft) return { nombre: fromDraft, ts: Date.now() };
@@ -3299,20 +3205,11 @@ function resolveRelativeTurnoReference(text, { pendingDraft, lastBooked } = {}) 
   };
 }
 
-function looksLikeAppointmentIntent(text, { pendingDraft, lastService, history } = {}) {
-  const raw = String(text || '').trim();
-  const t = normalize(raw);
-  if (isGreetingOnly(raw)) return false;
-  if (isNegativeBookingReply(raw)) return false;
-  if (isBookingInfoOnly(raw)) return false;
-  if (isPoliteClosureAfterTurno(raw)) return false;
-  if (isExplicitProductIntent(raw)) return false;
-  if (isStrongBookingIntent(raw)) return true;
-  if (/\b(reserv\w*|agend\w*|cita)\b/i.test(t)) return true;
-  if (/\bturno\b/i.test(t) && !/(precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|valor|horario|horarios|cuando hay|cuándo hay|hay turnos|tenes turno|tenés turno|disponibilidad|para cuando|para cuándo)/i.test(t)) return true;
+function looksLikeAppointmentIntent(text, { pendingDraft, lastService } = {}) {
+  const t = normalize(text || '');
+  if (/(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b)/i.test(t)) return true;
   if (pendingDraft && /(si|sí|dale|ok|oka|quiero|quiero seguir|continuar|confirmar|bien|perfecto)/i.test(t)) return true;
-  if (lastService && /(quiero( ese| el)? turno|bien,? quiero el turno|dale|ok|me gustaria sacar turno|me gustaría sacar turno|me gustaria un turno|me gustaría un turno|reservame|resérvame|agendame|agendáme)/i.test(t)) return true;
-  if (recentConversationLooksLikeBooking(history) && isLikelyBookingContinuationAnswer(raw)) return true;
+  if (lastService && /(quiero( ese| el)? turno|bien,? quiero el turno|dale|ok|me gustaria sacar turno|me gustaria un turno|reservame|agendame)/i.test(t)) return true;
   return false;
 }
 
@@ -3990,35 +3887,12 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
     const pendingDraft = await getAppointmentDraft(waId);
     const recentDbMessages = await getRecentDbMessages(phone, 12);
     const convForAI = mergeConversationForAI(recentDbMessages, ensureConv(waId).messages || []);
-    const historySnippetForAI = buildHistorySnippetForAI(convForAI, 10);
-    const bookingContextActive = recentConversationLooksLikeBooking(convForAI) || !!pendingDraft;
     const lastKnownService = getLastKnownService(waId, pendingDraft);
     const lastBookedTurno = await getLastBookedAppointmentForUser({ waId, waPhone: phone });
 
-    if (!pendingDraft && isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
-      clearProductMemory(waId);
-      const msgCierreTurno = `¡Gracias a vos! 😊
-
-Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
-      pushHistory(waId, "assistant", msgCierreTurno);
-      await sendWhatsAppText(phone, msgCierreTurno);
-      scheduleInactivityFollowUp(waId, phone);
-      return;
-    }
-
-    if (!pendingDraft && (isGreetingOnly(text) || isNegativeBookingReply(text)) && (lastAssistantAskedGenericClosure(waId) || recentConversationLooksLikeBooking(convForAI))) {
-      const safeGreeting = /^no\b/i.test(normalize(text))
-        ? `Perfecto 😊 Queda solo como consulta. ¿En qué más puedo ayudarle?`
-        : `¡Hola! 😊 ¿En qué puedo ayudarle?`;
-      pushHistory(waId, "assistant", safeGreeting);
-      await sendWhatsAppText(phone, safeGreeting);
-      scheduleInactivityFollowUp(waId, phone);
-      return;
-    }
-
     // ✅ Si el cliente responde afirmativamente a una propuesta de turno y ya veníamos hablando de un servicio,
     // iniciamos el flujo sin volver a preguntar el servicio.
-    if (!pendingDraft && lastKnownService?.nombre && isWarmAffirmativeReply(text) && lastAssistantOfferedBooking(waId)) {
+    if (!pendingDraft && lastKnownService?.nombre && isWarmAffirmativeReply(text) && lastAssistantWasQuestion(waId)) {
       const baseTurno = {
         servicio: lastKnownService.nombre,
         fecha: '',
@@ -4046,7 +3920,7 @@ Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
 
     // ✅ Si el término es ambiguo (ej: alisado), preguntamos si busca servicio o producto.
     const ambiguousBeautyTerm = extractAmbiguousBeautyTerm(text);
-    if (ambiguousBeautyTerm && !pendingDraft && !bookingContextActive && !looksLikeAppointmentIntent(text, { pendingDraft, lastService: lastKnownService, history: convForAI }) && !isExplicitProductIntent(text) && !isExplicitServiceIntent(text)) {
+    if (ambiguousBeautyTerm && !pendingDraft && !looksLikeAppointmentIntent(text, { pendingDraft, lastService: lastKnownService }) && !isExplicitProductIntent(text) && !isExplicitServiceIntent(text)) {
       const msgAclara = `✨ ${ambiguousBeautyTerm.charAt(0).toUpperCase() + ambiguousBeautyTerm.slice(1)} puede referirse a dos cosas.
 
 ¿Está buscando:
@@ -4342,7 +4216,7 @@ Seña recibida ✔`.trim();
     }
 
     if (pendingDraft && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
-      const turno = await extractTurnoFromText({ text, customerName: name, context: { ...pendingDraft, historySnippet: historySnippetForAI } });
+      const turno = await extractTurnoFromText({ text, customerName: name, context: pendingDraft });
       const relativeTurno = resolveRelativeTurnoReference(text, { pendingDraft, lastBooked: lastBookedTurno });
       let merged = {
         ...pendingDraft,
@@ -4400,7 +4274,7 @@ Seña recibida ✔`.trim();
       if (handled) return;
     }
 
-    const looksLikeTurno = looksLikeAppointmentIntent(text, { pendingDraft, lastService: lastKnownService, history: convForAI });
+    const looksLikeTurno = looksLikeAppointmentIntent(text, { pendingDraft, lastService: lastKnownService });
     if (looksLikeTurno && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
       const turno = await extractTurnoFromText({
         text,
@@ -4411,57 +4285,58 @@ Seña recibida ✔`.trim();
           hora: pendingDraft?.hora || "",
           duracion_min: pendingDraft?.duracion_min || 60,
           notas: pendingDraft?.notas || "",
-          historySnippet: historySnippetForAI,
         }
       });
 
       const relativeTurno = resolveRelativeTurnoReference(text, { pendingDraft, lastBooked: lastBookedTurno });
 
-      const merged = {
-        fecha: toYMD(turno?.fecha || pendingDraft?.fecha || relativeTurno?.fecha || ""),
-        hora: normalizeHourHM(turno?.hora || pendingDraft?.hora || relativeTurno?.hora || ""),
-        servicio: turno?.servicio || pendingDraft?.servicio || lastKnownService?.nombre || "",
-        duracion_min: Number(turno?.duracion_min || pendingDraft?.duracion_min || lastBookedTurno?.duracion_min || 60) || 60,
-        notas: turno?.notas || pendingDraft?.notas || "",
-        cliente_full: pendingDraft?.cliente_full || "",
-        telefono_contacto: normalizePhone(pendingDraft?.telefono_contacto || ""),
-        payment_status: pendingDraft?.payment_status || "not_paid",
-        payment_amount: pendingDraft?.payment_amount ?? null,
-        payment_sender: pendingDraft?.payment_sender || "",
-        payment_receiver: pendingDraft?.payment_receiver || "",
-        payment_proof_text: pendingDraft?.payment_proof_text || "",
-        payment_proof_media_id: pendingDraft?.payment_proof_media_id || "",
-        payment_proof_filename: pendingDraft?.payment_proof_filename || "",
-        awaiting_contact: !!pendingDraft?.awaiting_contact,
-        flow_step: pendingDraft?.flow_step || "",
-        last_intent: "book_appointment",
-        last_service_name: pendingDraft?.last_service_name || lastKnownService?.nombre || "",
-      };
+      if (turno?.ok || pendingDraft || lastKnownService || (isWarmAffirmativeReply(text) && lastKnownService) || relativeTurno?.fecha || relativeTurno?.hora) {
+        const merged = {
+          fecha: toYMD(turno?.fecha || pendingDraft?.fecha || relativeTurno?.fecha || ""),
+          hora: normalizeHourHM(turno?.hora || pendingDraft?.hora || relativeTurno?.hora || ""),
+          servicio: turno?.servicio || pendingDraft?.servicio || lastKnownService?.nombre || "",
+          duracion_min: Number(turno?.duracion_min || pendingDraft?.duracion_min || lastBookedTurno?.duracion_min || 60) || 60,
+          notas: turno?.notas || pendingDraft?.notas || "",
+          cliente_full: pendingDraft?.cliente_full || "",
+          telefono_contacto: normalizePhone(pendingDraft?.telefono_contacto || ""),
+          payment_status: pendingDraft?.payment_status || "not_paid",
+          payment_amount: pendingDraft?.payment_amount ?? null,
+          payment_sender: pendingDraft?.payment_sender || "",
+          payment_receiver: pendingDraft?.payment_receiver || "",
+          payment_proof_text: pendingDraft?.payment_proof_text || "",
+          payment_proof_media_id: pendingDraft?.payment_proof_media_id || "",
+          payment_proof_filename: pendingDraft?.payment_proof_filename || "",
+          awaiting_contact: !!pendingDraft?.awaiting_contact,
+          flow_step: pendingDraft?.flow_step || "",
+          last_intent: "book_appointment",
+          last_service_name: pendingDraft?.last_service_name || lastKnownService?.nombre || "",
+        };
 
-      const falt = new Set(turno?.faltantes || []);
-      if (!merged.fecha) falt.add("fecha");
-      if (!merged.hora) falt.add("hora");
-      if (!merged.servicio) falt.add("servicio");
+        const falt = new Set(turno?.faltantes || []);
+        if (!merged.fecha) falt.add("fecha");
+        if (!merged.hora) falt.add("hora");
+        if (!merged.servicio) falt.add("servicio");
 
-      Object.assign(merged, mergeContactIntoTurno({ turno: merged, text, waPhone: phone }));
-      let mergedWithPayment = await tryApplyPaymentToDraft(merged, { text, mediaMeta });
-      mergedWithPayment = await applyCatalogServiceDataToTurno(mergedWithPayment);
-      mergedWithPayment.flow_step = inferDraftFlowStep(mergedWithPayment);
-      mergedWithPayment.last_intent = "book_appointment";
-      mergedWithPayment.last_service_name = mergedWithPayment.servicio || mergedWithPayment.last_service_name || "";
-
-      if (falt.size) {
+        Object.assign(merged, mergeContactIntoTurno({ turno: merged, text, waPhone: phone }));
+        let mergedWithPayment = await tryApplyPaymentToDraft(merged, { text, mediaMeta });
+        mergedWithPayment = await applyCatalogServiceDataToTurno(mergedWithPayment);
         mergedWithPayment.flow_step = inferDraftFlowStep(mergedWithPayment);
-        mergedWithPayment.last_intent = 'book_appointment';
-        mergedWithPayment.last_service_name = mergedWithPayment.servicio || mergedWithPayment.last_service_name || '';
-        await saveAppointmentDraft(waId, phone, mergedWithPayment);
-        await askForMissingTurnoData(mergedWithPayment);
-        return;
-      }
+        mergedWithPayment.last_intent = "book_appointment";
+        mergedWithPayment.last_service_name = mergedWithPayment.servicio || mergedWithPayment.last_service_name || "";
 
-      const result = await finalizeAppointmentFlow({ waId, phone, name, merged: mergedWithPayment });
-      const handled = await respondFinalizeResult(mergedWithPayment, result);
-      if (handled) return;
+        if (falt.size) {
+          mergedWithPayment.flow_step = inferDraftFlowStep(mergedWithPayment);
+          mergedWithPayment.last_intent = 'book_appointment';
+          mergedWithPayment.last_service_name = mergedWithPayment.servicio || mergedWithPayment.last_service_name || '';
+          await saveAppointmentDraft(waId, phone, mergedWithPayment);
+          await askForMissingTurnoData(mergedWithPayment);
+          return;
+        }
+
+        const result = await finalizeAppointmentFlow({ waId, phone, name, merged: mergedWithPayment });
+        const handled = await respondFinalizeResult(mergedWithPayment, result);
+        if (handled) return;
+      }
     }
 
     if (pendingDraft && !isExplicitProductIntent(text)) {
@@ -4483,6 +4358,17 @@ Seña recibida ✔`.trim();
         await askForMissingTurnoData(repairedDraft);
         return;
       }
+    }
+
+    if (!pendingDraft && isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
+      clearProductMemory(waId);
+      const msgCierreTurno = `¡Gracias a vos! 😊
+
+Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
+      pushHistory(waId, "assistant", msgCierreTurno);
+      await sendWhatsAppText(phone, msgCierreTurno);
+      scheduleInactivityFollowUp(waId, phone);
+      return;
     }
 
     if (isPoliteCatalogDecline(text) && lastAssistantLooksLikeCatalogMessage(waId)) {
