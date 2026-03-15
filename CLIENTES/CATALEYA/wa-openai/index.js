@@ -3464,11 +3464,20 @@ function resolveRelativeTurnoReference(text, { pendingDraft, lastBooked } = {}) 
   };
 }
 
+function looksLikeAppointmentContextFollowUp(text, { pendingDraft, lastService } = {}) {
+  if (!pendingDraft && !lastService) return false;
+  if (isExplicitProductIntent(text)) return false;
+
+  const t = normalize(text || '');
+  return /(?:lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|hoy|mañana|pasado\s+mañana|proximo|próximo|el\s+dia|el\s+día|y\s+el|que\s+horarios|qué\s+horarios|que\s+disponibilidad|qué\s+disponibilidad|tenes\s+lugar|tenés\s+lugar|disponible|disponibilidad|a\s+la\s+mañana|por\s+la\s+mañana|a\s+la\s+tarde|por\s+la\s+tarde|\d{1,2}[:.]\d{2}|\d{1,2}\s*(?:hs|horas?)|\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)/i.test(t);
+}
+
 function looksLikeAppointmentIntent(text, { pendingDraft, lastService } = {}) {
   const t = normalize(text || '');
   if (/(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b)/i.test(t)) return true;
   if (pendingDraft && /(si|sí|dale|ok|oka|quiero|quiero seguir|continuar|confirmar|bien|perfecto)/i.test(t)) return true;
   if (lastService && /(quiero( ese| el)? turno|bien,? quiero el turno|dale|ok|me gustaria sacar turno|me gustaria un turno|reservame|agendame)/i.test(t)) return true;
+  if (looksLikeAppointmentContextFollowUp(text, { pendingDraft, lastService })) return true;
   return false;
 }
 
