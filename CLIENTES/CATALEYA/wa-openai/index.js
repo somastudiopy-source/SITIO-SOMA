@@ -2094,6 +2094,88 @@ async function getServicesCatalog() {
   return rows;
 }
 
+
+function parseServiceDurationToMinutes(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return 0;
+
+  const t = normalize(raw)
+    .replace(/\s+/g, ' ')
+    .replace(/,/g, '.')
+    .trim();
+
+  if (!t) return 0;
+
+  let m = t.match(/(\d+(?:\.\d+)?)\s*(?:hora|horas|hs|h)\s*y\s*media\b/);
+  if (m) return Math.round(Number(m[1]) * 60 + 30);
+
+  m = t.match(/(\d+(?:\.\d+)?)\s*y\s*media\s*(?:hora|horas|hs|h)?\b/);
+  if (m) return Math.round(Number(m[1]) * 60 + 30);
+
+  m = t.match(/(\d+(?:\.\d+)?)\s*(?:hora|horas|hs|h)\s*(?:y\s*)?(\d{1,2})\s*(?:min|minutos)\b/);
+  if (m) return Math.round(Number(m[1]) * 60 + Number(m[2]));
+
+  m = t.match(/(\d+(?:\.\d+)?)\s*(?:hora|horas|hs|h)\b/);
+  if (m) return Math.round(Number(m[1]) * 60);
+
+  m = t.match(/\bmedia\s*(?:hora|hs|h)\b/);
+  if (m) return 30;
+
+  m = t.match(/(\d{1,3})\s*(?:min|minutos)\b/);
+  if (m) return Number(m[1]) || 0;
+
+  return 0;
+}
+
+function resolveServiceCatalogMatch(rows, serviceName) {
+  const query = String(serviceName || '').trim();
+  if (!query) return null;
+
+  const cleanQuery = normalize(cleanServiceName(query));
+  if (!cleanQuery) return null;
+
+  const exactClean = rows.filter((r) => normalize(cleanServiceName(r?.nombre || '')) === cleanQuery);
+  if (exactClean.length) return exactClean[0];
+
+  const exactRaw = rows.filter((r) => normalize(String(r?.nombre || '')) === normalize(query));
+  if (exactRaw.length) return exactRaw[0];
+
+  const detailMatches = findServices(rows, query, 'DETAIL');
+  if (detailMatches.length) return detailMatches[0];
+
+  const baseQuery = getServiceBaseFromName(query);
+  if (baseQuery) {
+    const byBase = rows.filter((r) => getServiceBaseFromName(r?.nombre || '') === baseQuery);
+    if (byBase.length === 1) return byBase[0];
+  }
+
+  return null;
+}
+
+async function applyCatalogServiceDataToTurno(turno) {
+  const base = turno ? { ...turno } : {};
+  const servicioTxt = String(base.servicio || base.last_service_name || '').trim();
+  if (!servicioTxt) return base;
+
+  try {
+    const services = await getServicesCatalog();
+    const match = resolveServiceCatalogMatch(services, servicioTxt);
+    const durationMin = parseServiceDurationToMinutes(match?.duracion || '');
+
+    if (durationMin > 0) {
+      base.duracion_min = durationMin;
+    }
+
+    if (match?.nombre && !base.last_service_name) {
+      base.last_service_name = match.nombre;
+    }
+
+    return base;
+  } catch {
+    return base;
+  }
+}
+
 async function getCoursesCatalog() {
   const now = Date.now();
   if (catalogCache.courses.rows.length && (now - catalogCache.courses.loadedAt) < CATALOG_CACHE_TTL_MS) {
@@ -4126,6 +4208,7 @@ Seña recibida ✔`.trim();
       merged.fecha = toYMD(merged.fecha);
       Object.assign(merged, mergeContactIntoTurno({ turno: merged, text, waPhone: phone }));
       merged = await tryApplyPaymentToDraft(merged, { text, mediaMeta });
+      merged = await applyCatalogServiceDataToTurno(merged);
 
       if (!merged.servicio && lastKnownService?.nombre) {
         merged.servicio = lastKnownService.nombre;
@@ -4190,7 +4273,8 @@ Seña recibida ✔`.trim();
         if (!merged.servicio) falt.add("servicio");
 
         Object.assign(merged, mergeContactIntoTurno({ turno: merged, text, waPhone: phone }));
-        const mergedWithPayment = await tryApplyPaymentToDraft(merged, { text, mediaMeta });
+        let mergedWithPayment = await tryApplyPaymentToDraft(merged, { text, mediaMeta });
+        mergedWithPayment = await applyCatalogServiceDataToTurno(mergedWithPayment);
         mergedWithPayment.flow_step = inferDraftFlowStep(mergedWithPayment);
         mergedWithPayment.last_intent = "book_appointment";
         mergedWithPayment.last_service_name = mergedWithPayment.servicio || mergedWithPayment.last_service_name || "";
@@ -4279,6 +4363,7 @@ Seña recibida ✔`.trim();
             await saveAppointmentDraft(waId, phone, {
               ...pendingDraft,
               servicio: pendingDraft.servicio || selectedService.nombre,
+              duracion_min: parseServiceDurationToMinutes(selectedService.duracion) || Number(pendingDraft.duracion_min || 60) || 60,
               last_service_name: selectedService.nombre,
               last_intent: 'service_consultation',
               flow_step: pendingDraft.flow_step || inferDraftFlowStep({ ...pendingDraft, servicio: pendingDraft.servicio || selectedService.nombre }),
@@ -4316,6 +4401,7 @@ Seña recibida ✔`.trim();
             await saveAppointmentDraft(waId, phone, {
               ...pendingDraft,
               servicio: pendingDraft.servicio || selectedService.nombre,
+              duracion_min: parseServiceDurationToMinutes(selectedService.duracion) || Number(pendingDraft.duracion_min || 60) || 60,
               last_service_name: selectedService.nombre,
               last_intent: 'service_consultation',
               flow_step: pendingDraft.flow_step || inferDraftFlowStep({ ...pendingDraft, servicio: pendingDraft.servicio || selectedService.nombre }),
@@ -4675,6 +4761,7 @@ Seña recibida ✔`.trim();
               await saveAppointmentDraft(waId, phone, {
                 ...pendingDraft,
                 servicio: pendingDraft.servicio || selectedService,
+                duracion_min: parseServiceDurationToMinutes(matches[0]?.duracion) || Number(pendingDraft.duracion_min || 60) || 60,
                 last_service_name: selectedService,
                 last_intent: 'service_consultation',
                 flow_step: pendingDraft.flow_step || inferDraftFlowStep({ ...pendingDraft, servicio: pendingDraft.servicio || selectedService }),
