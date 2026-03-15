@@ -434,7 +434,7 @@ function lastAssistantLooksLikeTurnoMessage(waId) {
   const last = getLastAssistantMessage(waId);
   const t = normalize(last?.content || '');
   if (!t) return false;
-  return /(turno reservado|solicitud recibida|sena recibida|comprobante recibido|lo estoy validando|datos para la transferencia|cuando haga la transferencia|ahora necesito este dato)/i.test(t);
+  return /(comprobante recibido|lo estoy validando|datos para la transferencia|cuando haga la transferencia|ahora necesito este dato|para dejar el turno listo necesito|nombre y apellido de la persona que va a asistir|numero de telefono de contacto)/i.test(t);
 }
 
 function lastAssistantLooksLikeCatalogMessage(waId) {
@@ -3154,15 +3154,27 @@ function buildHistorySnippetForAI(history = [], limit = 10) {
 }
 
 function recentConversationLooksLikeBooking(history = []) {
-  const snippet = buildHistorySnippetForAI(history, 8);
+  const recent = (Array.isArray(history) ? history : []).slice(-8);
+  const lastAssistant = [...recent].reverse().find((m) => m?.role === 'assistant');
+  const lastAssistantText = normalize(lastAssistant?.content || '');
+
+  // ✅ Si el último mensaje del bot ya confirma o deja recibido el turno,
+  // el flujo de turnos debe darse por finalizado automáticamente.
+  if (/(turno reservado|turno confirmado|queda confirmado|queda reservado|solicitud recibida|seña recibida|sena recibida|pago confirmado)/i.test(lastAssistantText)) {
+    return false;
+  }
+
+  const snippet = buildHistorySnippetForAI(recent, 8);
   if (!snippet) return false;
-  return /(turno|reserv|agend|cita|que servicio quiere reservar|que dia le gustaria|que horario prefiere|nombre y apellido|telefono de contacto|se solicita una sena|envie por aqui el comprobante|datos para la transferencia|coordinar su turno)/i.test(normalize(snippet));
+  return /(turno|reserv|agend|cita|que servicio quiere reservar|que dia le gustaria|que horario prefiere|nombre y apellido|telefono de contacto|se solicita una sena|envie por aqui el comprobante|datos para la transferencia|coordinar su turno|para dejar el turno listo necesito|ahora necesito este dato)/i.test(normalize(snippet));
 }
 
 function isLikelyBookingContinuationAnswer(text) {
   const raw = String(text || '').trim();
   const t = normalize(raw);
   if (!t) return false;
+  if (isPoliteClosureAfterTurno(raw)) return false;
+  if (isExplicitProductIntent(raw)) return false;
 
   if (isWarmAffirmativeReply(raw)) return true;
   if (isExplicitServiceIntent(raw)) return true;
@@ -3171,7 +3183,7 @@ function isLikelyBookingContinuationAnswer(text) {
   if (/\b\d{1,2}(:\d{2})?\b/.test(raw)) return true;
   if (/\b(mi hija|para mi|para mí|ella|mi señora|mi tia|mi tía|mi mama|mi mamá)\b/i.test(raw)) return true;
   if (/^\+?\d[\d\s\-()]{6,}$/.test(raw)) return true;
-  if (raw.split(/\s+/).length <= 4 && !isExplicitProductIntent(raw)) return true;
+  if (raw.split(/\s+/).length <= 4 && !/[?¿]/.test(raw)) return true;
 
   return false;
 }
@@ -3243,6 +3255,8 @@ function resolveRelativeTurnoReference(text, { pendingDraft, lastBooked } = {}) 
 function looksLikeAppointmentIntent(text, { pendingDraft, lastService, history } = {}) {
   const raw = String(text || '').trim();
   const t = normalize(raw);
+  if (isPoliteClosureAfterTurno(raw)) return false;
+  if (isExplicitProductIntent(raw)) return false;
   if (/(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b)/i.test(t)) return true;
   if (pendingDraft && /(si|sí|dale|ok|oka|quiero|quiero seguir|continuar|confirmar|bien|perfecto)/i.test(t)) return true;
   if (lastService && /(quiero( ese| el)? turno|bien,? quiero el turno|dale|ok|me gustaria sacar turno|me gustaria un turno|reservame|agendame)/i.test(t)) return true;
@@ -3929,6 +3943,17 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
     const lastKnownService = getLastKnownService(waId, pendingDraft);
     const lastBookedTurno = await getLastBookedAppointmentForUser({ waId, waPhone: phone });
 
+    if (!pendingDraft && isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
+      clearProductMemory(waId);
+      const msgCierreTurno = `¡Gracias a vos! 😊
+
+Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
+      pushHistory(waId, "assistant", msgCierreTurno);
+      await sendWhatsAppText(phone, msgCierreTurno);
+      scheduleInactivityFollowUp(waId, phone);
+      return;
+    }
+
     // ✅ Si el cliente responde afirmativamente a una propuesta de turno y ya veníamos hablando de un servicio,
     // iniciamos el flujo sin volver a preguntar el servicio.
     if (!pendingDraft && lastKnownService?.nombre && isWarmAffirmativeReply(text) && lastAssistantWasQuestion(waId)) {
@@ -4396,17 +4421,6 @@ Seña recibida ✔`.trim();
         await askForMissingTurnoData(repairedDraft);
         return;
       }
-    }
-
-    if (!pendingDraft && isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
-      clearProductMemory(waId);
-      const msgCierreTurno = `¡Gracias a vos! 😊
-
-Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
-      pushHistory(waId, "assistant", msgCierreTurno);
-      await sendWhatsAppText(phone, msgCierreTurno);
-      scheduleInactivityFollowUp(waId, phone);
-      return;
     }
 
     if (isPoliteCatalogDecline(text) && lastAssistantLooksLikeCatalogMessage(waId)) {
