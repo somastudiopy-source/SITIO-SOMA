@@ -4447,7 +4447,7 @@ Contame servicio, día y horario, y lo dejo listo.`;
       }
 
       if (!base.cliente_full && !base.telefono_contacto) {
-        return `Para dejarlo listo necesito estos datos 😊
+        return `Para dejarlo listo necesito estos datos 
 
 👤 Nombre y apellido de la persona que va a asistir
 📱 Número de teléfono de contacto`;
@@ -4547,7 +4547,7 @@ Ahora consulto con la estilista ${TURNOS_STYLIST_NAME} y le confirmo por aquí.`
       if (result.type === "booked") {
         clearProductMemory(waId);
         const diaOk = weekdayEsFromYMD(base.fecha);
-        const msgOk = `✅ *TURNO RESERVADO*
+        const msgOk = `*TURNO RESERVADO*✅
 
 Servicio: ${base.servicio}
 📅 Día: ${diaOk} ${ymdToDMY(base.fecha)}
