@@ -1575,10 +1575,14 @@ async function buildWeeklyAvailabilityMessage({ servicio, durationMin, limitDays
     return `En este momento no me quedan turnos disponibles en los próximos días dentro de los horarios del salón. Si quiere, después le reviso la próxima semana 😊`;
   }
 
-  const lines = available.map((item) => `• ${capitalizeEs(item.weekday)} ${ymdToDMY(item.dateYMD)}: ${formatSlotsByBlock(item.slots)}`);
-  const encabezado = servicio ? `Servicio: ${servicio}` : 'Estos son los turnos disponibles que veo en el calendario:';
+  const daysToShow = available.slice(0, 3);
+  const lines = daysToShow.map((item) => {
+    const dayHeader = `*${capitalizeEs(item.weekday)} ${ymdToDM(item.dateYMD)}*`;
+    const slotLines = formatSlotsByBlockMultiline(item.slots);
+    return `${dayHeader}\n${slotLines}`;
+  });
 
-  return `Perfecto 😊\n\n${encabezado}\n\nEstos son los turnos disponibles que veo en el calendario:\n\n${lines.join('\n')}\n\nDecime cuál le queda mejor y lo dejo listo.`;
+  return `Perfecto 😊\n\n${servicio ? `Servicio: ${servicio}\n\n` : ''}Te paso los próximos turnos disponibles:\n\n${lines.join('\n\n')}\n\nDecime qué día y horario te queda mejor y lo reservo.`;
 }
 
 async function buildDateAvailabilityMessage({ dateYMD, servicio, durationMin }) {
@@ -1590,10 +1594,10 @@ async function buildDateAvailabilityMessage({ dateYMD, servicio, durationMin }) 
   }
 
   const [summary] = await getAvailabilitySummaries({ daysYMD: [safeDate], durationMin });
-  const dayLabel = `${capitalizeEs(summary?.weekday || weekdayEsFromYMD(safeDate))} ${ymdToDMY(safeDate)}`;
+  const dayLabel = `${capitalizeEs(summary?.weekday || weekdayEsFromYMD(safeDate))} ${ymdToDM(safeDate)}`;
 
   if (summary?.slots?.length) {
-    return `Perfecto 😊\n\n${servicio ? `Servicio: ${servicio}\n` : ''}📅 Día: ${dayLabel}\n\nEstos horarios tengo disponibles:\n\n• ${formatSlotsByBlock(summary.slots)}\n\nDecime cuál le queda mejor y lo dejo listo.`;
+    return `Perfecto 😊\n\n${servicio ? `Servicio: ${servicio}\n\n` : ''}*${dayLabel}*\n${formatSlotsByBlockMultiline(summary.slots)}\n\nDecime cuál le queda mejor y lo dejo listo.`;
   }
 
   const weekly = await buildWeeklyAvailabilityMessage({ servicio, durationMin, limitDays: 6 });
@@ -1608,7 +1612,7 @@ async function buildBusyTurnoMessage({ base }) {
   if (safeDate) {
     const sameDayMsg = await buildDateAvailabilityMessage({ dateYMD: safeDate, servicio, durationMin: safeDuration });
     const diaC = capitalizeEs(weekdayEsFromYMD(safeDate));
-    return `Ese horario ya está ocupado (${diaC} ${ymdToDMY(safeDate)} ${normalizeHourHM(base?.hora) || base?.hora}).\n\n${sameDayMsg}`;
+    return `Ese horario ya está ocupado (${diaC} ${ymdToDM(safeDate)} ${normalizeHourHM(base?.hora) || base?.hora}).\n\n${sameDayMsg}`;
   }
 
   return buildWeeklyAvailabilityMessage({ servicio, durationMin: safeDuration, limitDays: 6 });
@@ -1678,6 +1682,13 @@ function ymdToDMY(ymd) {
   const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return s;
   return `${m[3]}/${m[2]}/${m[1]}`;
+}
+
+function ymdToDM(ymd) {
+  const s = String(ymd || "").trim();
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return s;
+  return `${m[3]}/${m[2]}`;
 }
 
 // Acepta "DD/MM/YYYY", "DD-MM-YYYY", "YYYY-MM-DD" y devuelve siempre "YYYY-MM-DD" (si puede).
@@ -3454,6 +3465,52 @@ function isWarmAffirmativeReply(text) {
   return /^(si|sí|sii+|dale|ok|oka|perfecto|bueno|de una|claro|quiero|quiero turno|quiero reservar|quiero sacar turno)$/i.test(t);
 }
 
+function extractTurnoPauseIntent(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return { matched: false, remainder: '' };
+
+  const patterns = [
+    /\bdespu[eé]s(?: te| le)? confirmo\b/i,
+    /\ben otro momento(?: te aviso)?\b/i,
+    /\bdespu[eé]s(?: te| le)? aviso\b/i,
+    /\bluego(?: te| le)? aviso\b/i,
+    /\bm[aá]s tarde(?: te| le)? aviso\b/i,
+    /\bte confirmo despu[eé]s\b/i,
+    /\bpor ahora no\b/i,
+    /\bno por ahora\b/i,
+    /\bmejor otro momento\b/i,
+    /\blo vemos despu[eé]s\b/i,
+    /\bdespu[eé]s coordinamos\b/i,
+    /\bdej[aá]lo para despu[eé]s\b/i,
+    /\bdej[aá]moslo para despu[eé]s\b/i,
+    /\bte cancelo\b/i,
+    /\bcancel[aá]lo\b/i,
+    /\bcancelar(?: el)? turno\b/i,
+    /\bcancel[aá] el turno\b/i,
+    /\bno lo reserves\b/i,
+    /\bno me lo reserves\b/i,
+    /\bfrenemos ac[aá]\b/i,
+    /\bparamos ac[aá]\b/i,
+  ];
+
+  const matched = patterns.some((rx) => rx.test(raw));
+  if (!matched) return { matched: false, remainder: raw };
+
+  const stripRx = /(?:^|[\s,;:.\-])(?:despu[eé]s(?: te| le)? confirmo|en otro momento(?: te aviso)?|despu[eé]s(?: te| le)? aviso|luego(?: te| le)? aviso|m[aá]s tarde(?: te| le)? aviso|te confirmo despu[eé]s|por ahora no|no por ahora|mejor otro momento|lo vemos despu[eé]s|despu[eé]s coordinamos|dej[aá]lo para despu[eé]s|dej[aá]moslo para despu[eé]s|te cancelo|cancel[aá]lo|cancelar(?: el)? turno|cancel[aá] el turno|no lo reserves|no me lo reserves|frenemos ac[aá]|paramos ac[aá])(?=$|[\s,;:.!?\-])/gi;
+
+  let remainder = raw.replace(stripRx, ' ')
+    .replace(/^[\s,;:.!?\-]+|[\s,;:.!?\-]+$/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  const softOnly = normalize(remainder);
+  if (/^(gracias|ok|oka|dale|perfecto|bueno|listo|joya|genial|barbaro|b[aá]rbaro)$/.test(softOnly)) {
+    remainder = '';
+  }
+
+  return { matched: true, remainder };
+}
+
 function isExplicitProductIntent(text) {
   const t = normalize(text || '');
   return /(producto|stock|insumo|shampoo|acondicionador|mascara|mascarilla|serum|aceite|oleo|tintura|oxidante|decolorante|matizador|ampolla|protector|spray|crema|gel|cera|comprar|venden|tenes|tenés|hay disponible|te queda|les queda)/i.test(t);
@@ -4019,7 +4076,7 @@ if (closeTimers.has(waId)) {
 
     // texto / audio / imagen
     const extracted = await extractTextFromIncomingMessage(msg);
-    const text = (extracted.text || "").trim();
+    let text = (extracted.text || "").trim();
     const mediaMeta = extracted.media || null;
     const userIntentText = (
       msg.type === "image" ? (msg.image?.caption || "") :
@@ -4060,7 +4117,29 @@ lastCloseContext.set(waId, {
 
     pushHistory(waId, "user", text);
 
-    
+    // ✅ Si el cliente frena o cancela la toma de turno en medio del flujo, cortamos ahí mismo.
+    const pauseDraftEarly = await getAppointmentDraft(waId);
+    if (pauseDraftEarly) {
+      const pauseIntentEarly = extractTurnoPauseIntent(text);
+      if (pauseIntentEarly.matched) {
+        await deleteAppointmentDraft(waId);
+
+        if (!pauseIntentEarly.remainder) {
+          const msgPauseTurno = `Perfecto 😊
+
+No hay problema. Frené la gestión del turno por ahora.
+
+Cuando quiera retomarlo, me escribe y le paso nuevamente los horarios disponibles.`;
+          pushHistory(waId, "assistant", msgPauseTurno);
+          await sendWhatsAppText(phone, msgPauseTurno);
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
+
+        text = pauseIntentEarly.remainder;
+      }
+    }
+
 // lead detection
 const interest = await detectInterest(text);
 if (interest) dailyLeads.set(phone, { name, interest });
@@ -4096,7 +4175,7 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
 
 
     // ===================== ✅ REGLAS ESPECIALES (sin inventar servicios) =====================
-    const normTxt = normalize(text);
+    let normTxt = normalize(text);
 
     // Corte masculino: solo por orden de llegada (no se toma turno)
     if (/(\bcorte\b.*\b(mascul|varon|hombre)\b|\bcorte\s+masculino\b|\bbarber\b|\bbarberia\b)/i.test(normTxt) && !detectFemaleContext(text)) {
@@ -4120,7 +4199,31 @@ if (ctx0) ctx0.interest = interest || ctx0.interest;
     }
 
     // ===================== ✅ TURNOS (Calendar + Railway Postgres) =====================
-    const pendingDraft = await getAppointmentDraft(waId);
+    let pendingDraft = await getAppointmentDraft(waId);
+
+    if (pendingDraft) {
+      const pauseIntent = extractTurnoPauseIntent(text);
+      if (pauseIntent.matched) {
+        await deleteAppointmentDraft(waId);
+        pendingDraft = null;
+
+        if (!pauseIntent.remainder) {
+          const msgPauseTurno = `Perfecto 😊
+
+No hay problema. Frené la gestión del turno por ahora.
+
+Cuando quiera retomarlo, me escribe y le paso nuevamente los horarios disponibles.`;
+          pushHistory(waId, "assistant", msgPauseTurno);
+          await sendWhatsAppText(phone, msgPauseTurno);
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
+
+        text = pauseIntent.remainder;
+        normTxt = normalize(text);
+      }
+    }
+
     const recentDbMessages = await getRecentDbMessages(phone, 12);
     const convForAI = mergeConversationForAI(recentDbMessages, ensureConv(waId).messages || []);
     const lastKnownService = getLastKnownService(waId, pendingDraft);
