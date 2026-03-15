@@ -4030,7 +4030,7 @@ Para dejar el turno listo necesito estos datos 😊
     async function askForName(base) {
       const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_name', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
-      const msgSoloNombre = `Perfecto 😊
+      const msgSoloNombre = `Perfecto 
 
 Ahora necesito este dato 😊
 
@@ -4043,7 +4043,7 @@ Ahora necesito este dato 😊
     async function askForPhone(base) {
       const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_phone', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
-      const msgTelefono = `Perfecto 😊
+      const msgTelefono = `Perfecto 
 
 Ahora necesito este dato 😊
 
@@ -4058,20 +4058,19 @@ Ahora necesito este dato 😊
       const diaOk = base.fecha ? weekdayEsFromYMD(base.fecha) : '';
       const fechaTxt = base.fecha ? ymdToDMY(base.fecha) : '';
       const lines = [
-        '✅ Turno tomado provisoriamente',
         '',
         `Servicio: ${base.servicio || base.last_service_name || ''}`,
         `📅 Día: ${diaOk ? `${diaOk} ` : ''}${fechaTxt}`.trim(),
         `🕐 Hora: ${normalizeHourHM(base.hora) || base.hora || ''}`,
         '',
-        `Para confirmar el turno se solicita una seña de ${TURNOS_SENA_TXT}.`,
+        `*PARA TERMINAR DE CONFIRMAR EL TURNO SE SOLICITA UNA SEÑA DE ${TURNOS_SENA_TXT}*`,
         '',
         '💳 Datos para la transferencia',
         '',
-        'Alias',
+        'Alias:',
         TURNOS_ALIAS,
         '',
-        'Titular',
+        'Titular:',
         TURNOS_ALIAS_TITULAR,
         '',
         'Cuando haga la transferencia, envíe por aquí el comprobante 📩',
@@ -4106,7 +4105,7 @@ Contame servicio, día y horario, y lo dejo listo.`;
       if (!base.cliente_full) {
         return `Perfecto 😊
 
-Ahora necesito este dato 😊
+Ahora necesito este dato:
 
 👤 Nombre y apellido de la persona que va a asistir`;
       }
@@ -4198,7 +4197,7 @@ Ahora consulto con la estilista ${TURNOS_STYLIST_NAME} y le confirmo por aquí.`
       if (result.type === "booked") {
         clearProductMemory(waId);
         const diaOk = weekdayEsFromYMD(base.fecha);
-        const msgOk = `✅ Turno reservado
+        const msgOk = `✅ *TURNO RESERVADO*
 
 Servicio: ${base.servicio}
 📅 Día: ${diaOk} ${ymdToDMY(base.fecha)}
