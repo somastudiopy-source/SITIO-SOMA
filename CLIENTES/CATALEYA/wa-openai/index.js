@@ -444,16 +444,23 @@ function lastAssistantLooksLikeCatalogMessage(waId) {
   return /(esta en catalogo|catalogo completo|mas opciones del catalogo|si quiere, le ayudo a elegir|no lo encuentro asi en el catalogo)/i.test(t);
 }
 
+function normalizeShortReply(text) {
+  return normalize(text || '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function isPoliteClosureAfterTurno(text) {
-  const t = normalize(text || '');
+  const t = normalizeShortReply(text || '');
   if (!t) return false;
-  return /^(gracias|muchas gracias|mil gracias|genial gracias|perfecto gracias|perfecto muchas gracias|buenisimo gracias|buenisimo muchas gracias|buenisimo|buenisima|genial|perfecto|listo gracias|ok gracias|oka gracias|dale gracias|barbaro gracias|barbaro|bárbaro|joya|joya gracias)$/.test(t);
+  return /^(gracias|muchas gracias|mil gracias|genial gracias|perfecto gracias|perfecto muchas gracias|buenisimo gracias|buenisimo muchas gracias|buenisimo|buenisima|genial|perfecto|listo gracias|ok gracias|oka gracias|dale gracias|barbaro gracias|barbaro|joya|joya gracias)$/.test(t);
 }
 
 function isPoliteCatalogDecline(text) {
-  const t = normalize(text || '');
+  const t = normalizeShortReply(text || '');
   if (!t) return false;
-  return /^(no gracias|no, gracias|no necesito|no necesito nada|no busco nada|no busco nada deja de enviarme|deja de enviarme|dejame ahi|dejalo ahi|dejala ahi|dejalo|dejala|no hace falta|no hace falta gracias)$/.test(t);
+  return /^(no gracias|no necesito|no necesito nada|no busco nada|no busco nada deja de enviarme|deja de enviarme|dejame ahi|dejalo ahi|dejala ahi|dejalo|dejala|no hace falta|no hace falta gracias)$/.test(t);
 }
 
 function looksLikeProductPreferenceReply(text) {
