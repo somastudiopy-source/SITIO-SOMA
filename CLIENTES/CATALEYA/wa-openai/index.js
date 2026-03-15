@@ -1609,7 +1609,7 @@ async function buildDateAvailabilityMessage({ dateYMD, servicio, durationMin }) 
   const dayLabel = `${capitalizeEs(summary?.weekday || weekdayEsFromYMD(safeDate))} ${ymdToDM(safeDate)}`;
 
   if (summary?.slots?.length) {
-    return `Perfecto 😊\n\n${servicio ? `Servicio: ${servicio}\n\n` : ''}*${dayLabel}*\n${formatSlotsByBlockMultiline(summary.slots)}\n\nDecime cuál le queda mejor y lo dejo listo.`;
+    return `Te digo lo que nos queda disponible:\n\n${servicio ? `Servicio: ${servicio}\n\n` : ''}*${dayLabel}*\n${formatSlotsByBlockMultiline(summary.slots)}\n\nDecime cuál le queda mejor y lo dejo listo.`;
   }
 
   const weekly = await buildWeeklyAvailabilityMessage({ servicio, durationMin, limitDays: 6 });
