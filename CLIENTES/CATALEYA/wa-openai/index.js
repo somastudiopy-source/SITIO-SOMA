@@ -574,6 +574,10 @@ const TURNOS_HORARIOS_TXT = "Lunes a Sábados de 10 a 12 hs y de 17 a 20 hs";
 const TURNOS_SENA_TXT = "$10.000";
 const TURNOS_ALIAS = "Cataleya178";
 const TURNOS_ALIAS_TITULAR = "Monica Pachecho";
+const TURNOS_ALLOWED_BLOCKS = [
+  { label: "mañana", start: "10:00", end: "12:00" },
+  { label: "tarde", start: "17:00", end: "20:00" },
+];
 
 function turnoInfoBlock() {
   return (
@@ -1376,6 +1380,238 @@ async function createCalendarTurno({ dateYMD, startHM, durationMin, cliente, tel
   });
 
   return { eventId: inserted?.data?.id || "", skipped: false };
+}
+
+
+function hmToMinutes(value) {
+  const hm = normalizeHourHM(value);
+  if (!hm) return NaN;
+  const [hh, mm] = hm.split(':').map(Number);
+  return (hh * 60) + mm;
+}
+
+function minutesToHM(totalMinutes) {
+  const mins = Math.max(0, Number(totalMinutes) || 0);
+  const hh = Math.floor(mins / 60);
+  const mm = mins % 60;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+}
+
+function addDaysToYMD(ymd, days) {
+  const base = new Date(`${toYMD(ymd)}T12:00:00-03:00`);
+  const next = new Date(base.getTime() + (Number(days) || 0) * 24 * 60 * 60 * 1000);
+  return formatYMDHMInTZ(next).ymd;
+}
+
+function getTurnoSlotStepMin(durationMin) {
+  const safeDuration = Math.max(30, Number(durationMin) || 60);
+  if (safeDuration <= 30) return 30;
+  if (safeDuration % 60 === 0) return 60;
+  return 30;
+}
+
+function isSundayYMD(ymd) {
+  try {
+    const d = new Date(`${toYMD(ymd)}T12:00:00-03:00`);
+    return d.getDay() === 0;
+  } catch {
+    return false;
+  }
+}
+
+function capitalizeEs(text) {
+  const s = String(text || '').trim();
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
+}
+
+function eventOverlapsSlot(event, { dateYMD, startHM, durationMin }) {
+  if (!event || event.status === 'cancelled') return false;
+
+  const safeDate = toYMD(dateYMD);
+  const safeHM = normalizeHourHM(startHM);
+  const duration = Math.max(30, Number(durationMin) || 60);
+  if (!safeDate || !safeHM) return false;
+
+  const slotStart = new Date(`${safeDate}T${safeHM}:00-03:00`);
+  const slotEnd = new Date(slotStart.getTime() + duration * 60000);
+
+  let eventStart = null;
+  let eventEnd = null;
+
+  if (event?.start?.dateTime) eventStart = new Date(event.start.dateTime);
+  else if (event?.start?.date) eventStart = new Date(`${event.start.date}T00:00:00-03:00`);
+
+  if (event?.end?.dateTime) eventEnd = new Date(event.end.dateTime);
+  else if (event?.end?.date) eventEnd = new Date(`${event.end.date}T00:00:00-03:00`);
+
+  if (!eventStart || !eventEnd || Number.isNaN(eventStart.getTime()) || Number.isNaN(eventEnd.getTime())) return false;
+  return slotStart < eventEnd && slotEnd > eventStart;
+}
+
+async function listCalendarEventsInRange({ fromYMD, toYMDExclusive }) {
+  if (!CALENDAR_ID) return [];
+  const cal = await getCalendarClient();
+
+  const timeMin = new Date(`${toYMD(fromYMD)}T00:00:00-03:00`).toISOString();
+  const timeMax = new Date(`${toYMD(toYMDExclusive)}T00:00:00-03:00`).toISOString();
+
+  let pageToken = undefined;
+  const items = [];
+
+  do {
+    const resp = await cal.events.list({
+      calendarId: CALENDAR_ID,
+      timeMin,
+      timeMax,
+      singleEvents: true,
+      orderBy: 'startTime',
+      maxResults: 250,
+      pageToken,
+    });
+
+    items.push(...(resp?.data?.items || []));
+    pageToken = resp?.data?.nextPageToken || undefined;
+  } while (pageToken);
+
+  return items;
+}
+
+function getUpcomingTurnoDays(limit = 6) {
+  const out = [];
+  let cursor = todayYMDInTZ();
+  let guard = 0;
+
+  while (out.length < limit && guard < 21) {
+    if (!isSundayYMD(cursor)) out.push(cursor);
+    cursor = addDaysToYMD(cursor, 1);
+    guard += 1;
+  }
+
+  return out;
+}
+
+function getAvailableSlotsForDate({ dateYMD, durationMin, events = [] }) {
+  const safeDate = toYMD(dateYMD);
+  const safeDuration = Math.max(30, Number(durationMin) || 60);
+  if (!safeDate || isSundayYMD(safeDate) || safeDate < todayYMDInTZ()) return [];
+
+  const step = getTurnoSlotStepMin(safeDuration);
+  const nowLocal = formatYMDHMInTZ(new Date());
+  const nowMinutes = safeDate === nowLocal.ymd ? hmToMinutes(nowLocal.hm) : -1;
+  const slots = [];
+
+  for (const block of TURNOS_ALLOWED_BLOCKS) {
+    const blockStart = hmToMinutes(block.start);
+    const blockEnd = hmToMinutes(block.end);
+    if (Number.isNaN(blockStart) || Number.isNaN(blockEnd)) continue;
+
+    let cursor = blockStart;
+    if (safeDate === nowLocal.ymd && nowMinutes >= 0) {
+      const roundedNow = Math.ceil(nowMinutes / step) * step;
+      cursor = Math.max(cursor, roundedNow);
+    }
+
+    while ((cursor + safeDuration) <= blockEnd) {
+      const hm = minutesToHM(cursor);
+      const hasConflict = events.some((ev) => eventOverlapsSlot(ev, {
+        dateYMD: safeDate,
+        startHM: hm,
+        durationMin: safeDuration,
+      }));
+
+      if (!hasConflict) {
+        slots.push({ hm, label: block.label });
+      }
+
+      cursor += step;
+    }
+  }
+
+  return slots;
+}
+
+function formatSlotsByBlock(slots = []) {
+  if (!Array.isArray(slots) || !slots.length) return '';
+
+  const grouped = TURNOS_ALLOWED_BLOCKS
+    .map((block) => {
+      const values = slots.filter((slot) => slot.label === block.label).map((slot) => slot.hm);
+      return values.length ? `${block.label}: ${values.join(', ')}` : '';
+    })
+    .filter(Boolean);
+
+  return grouped.join(' | ');
+}
+
+async function getAvailabilitySummaries({ daysYMD, durationMin }) {
+  const safeDays = (Array.isArray(daysYMD) ? daysYMD : []).map((d) => toYMD(d)).filter(Boolean);
+  if (!safeDays.length) return [];
+
+  if (!CALENDAR_ID) {
+    return safeDays.map((dateYMD) => ({
+      dateYMD,
+      weekday: weekdayEsFromYMD(dateYMD),
+      slots: getAvailableSlotsForDate({ dateYMD, durationMin, events: [] }),
+    }));
+  }
+
+  const first = safeDays[0];
+  const lastExclusive = addDaysToYMD(safeDays[safeDays.length - 1], 1);
+  const items = await listCalendarEventsInRange({ fromYMD: first, toYMDExclusive: lastExclusive });
+
+  return safeDays.map((dateYMD) => ({
+    dateYMD,
+    weekday: weekdayEsFromYMD(dateYMD),
+    slots: getAvailableSlotsForDate({ dateYMD, durationMin, events: items }),
+  }));
+}
+
+async function buildWeeklyAvailabilityMessage({ servicio, durationMin, limitDays = 6 }) {
+  const days = getUpcomingTurnoDays(limitDays);
+  const summaries = await getAvailabilitySummaries({ daysYMD: days, durationMin });
+  const available = summaries.filter((item) => item.slots.length > 0);
+
+  if (!available.length) {
+    return `En este momento no me quedan turnos disponibles en los próximos días dentro de los horarios del salón. Si quiere, después le reviso la próxima semana 😊`;
+  }
+
+  const lines = available.map((item) => `• ${capitalizeEs(item.weekday)} ${ymdToDMY(item.dateYMD)}: ${formatSlotsByBlock(item.slots)}`);
+  const encabezado = servicio ? `Servicio: ${servicio}` : 'Estos son los turnos disponibles que veo en el calendario:';
+
+  return `Perfecto 😊\n\n${encabezado}\n\nEstos son los turnos disponibles que veo en el calendario:\n\n${lines.join('\n')}\n\nDecime cuál le queda mejor y lo dejo listo.`;
+}
+
+async function buildDateAvailabilityMessage({ dateYMD, servicio, durationMin }) {
+  const safeDate = toYMD(dateYMD);
+  if (!safeDate) return '';
+
+  if (isSundayYMD(safeDate)) {
+    return `Los domingos no trabajamos con turnos 😊\n\nSi quiere, le paso las opciones disponibles de lunes a sábado.`;
+  }
+
+  const [summary] = await getAvailabilitySummaries({ daysYMD: [safeDate], durationMin });
+  const dayLabel = `${capitalizeEs(summary?.weekday || weekdayEsFromYMD(safeDate))} ${ymdToDMY(safeDate)}`;
+
+  if (summary?.slots?.length) {
+    return `Perfecto 😊\n\n${servicio ? `Servicio: ${servicio}\n` : ''}📅 Día: ${dayLabel}\n\nEstos horarios tengo disponibles:\n\n• ${formatSlotsByBlock(summary.slots)}\n\nDecime cuál le queda mejor y lo dejo listo.`;
+  }
+
+  const weekly = await buildWeeklyAvailabilityMessage({ servicio, durationMin, limitDays: 6 });
+  return `Ese día no me queda lugar disponible dentro del horario del salón.\n\n${weekly}`;
+}
+
+async function buildBusyTurnoMessage({ base }) {
+  const safeDate = toYMD(base?.fecha || '');
+  const safeDuration = Math.max(30, Number(base?.duracion_min || 60) || 60);
+  const servicio = base?.servicio || base?.last_service_name || '';
+
+  if (safeDate) {
+    const sameDayMsg = await buildDateAvailabilityMessage({ dateYMD: safeDate, servicio, durationMin: safeDuration });
+    const diaC = capitalizeEs(weekdayEsFromYMD(safeDate));
+    return `Ese horario ya está ocupado (${diaC} ${ymdToDMY(safeDate)} ${normalizeHourHM(base?.hora) || base?.hora}).\n\n${sameDayMsg}`;
+  }
+
+  return buildWeeklyAvailabilityMessage({ servicio, durationMin: safeDuration, limitDays: 6 });
 }
 
 // ===================== FECHAS =====================
@@ -3948,15 +4184,11 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
       }
 
       if (!base?.fecha && !base?.hora) {
-        const msgFalt = `Perfecto 😊 vamos a coordinar su turno.
-
-Servicio: ${servicioTxt}
-
-📅 Dígame qué día le gustaría
-🕐 y en qué horario le quedaría bien dentro de estos rangos:
-
-• 10:00 a 12:00
-• 17:00 a 20:00`;
+        const msgFalt = await buildWeeklyAvailabilityMessage({
+          servicio: servicioTxt,
+          durationMin: Number(base?.duracion_min || 60) || 60,
+          limitDays: 6,
+        });
         pushHistory(waId, "assistant", msgFalt);
         await sendWhatsAppText(phone, msgFalt);
         scheduleInactivityFollowUp(waId, phone);
@@ -3964,11 +4196,11 @@ Servicio: ${servicioTxt}
       }
 
       if (!base?.fecha) {
-        const msgFalt = `Perfecto 😊
-
-Servicio: ${servicioTxt}
-
-📅 Dígame qué día le gustaría.`;
+        const msgFalt = await buildWeeklyAvailabilityMessage({
+          servicio: servicioTxt,
+          durationMin: Number(base?.duracion_min || 60) || 60,
+          limitDays: 6,
+        });
         pushHistory(waId, "assistant", msgFalt);
         await sendWhatsAppText(phone, msgFalt);
         scheduleInactivityFollowUp(waId, phone);
@@ -3976,16 +4208,11 @@ Servicio: ${servicioTxt}
       }
 
       if (!base?.hora) {
-        const fechaTxt = ymdToDMY(base.fecha);
-        const msgFalt = `Perfecto 😊
-
-Servicio: ${servicioTxt}
-📅 Día: ${fechaTxt}
-
-🕐 Ahora dígame qué horario prefiere dentro de estos rangos:
-
-• 10:00 a 12:00
-• 17:00 a 20:00`;
+        const msgFalt = await buildDateAvailabilityMessage({
+          dateYMD: base.fecha,
+          servicio: servicioTxt,
+          durationMin: Number(base?.duracion_min || 60) || 60,
+        });
         pushHistory(waId, "assistant", msgFalt);
         await sendWhatsAppText(phone, msgFalt);
         scheduleInactivityFollowUp(waId, phone);
@@ -4134,8 +4361,7 @@ Lo estoy validando con los datos del turno. En cuanto quede confirmado, le aviso
     async function respondFinalizeResult(base, result) {
 
       if (result.type === "busy") {
-        const diaC = weekdayEsFromYMD(base.fecha);
-        const msgBusy = `Ese horario ya está ocupado (${diaC} ${ymdToDMY(base.fecha)} ${normalizeHourHM(base.hora) || base.hora}). ¿Le sirve otro horario?`;
+        const msgBusy = await buildBusyTurnoMessage({ base });
         pushHistory(waId, "assistant", msgBusy);
         await sendWhatsAppText(phone, msgBusy);
         scheduleInactivityFollowUp(waId, phone);
