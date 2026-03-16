@@ -178,6 +178,310 @@ function normalizeWhatsAppRecipient(s) {
   return digits;
 }
 
+
+function normalizePhoneDigits(raw) {
+  let digits = String(raw || "").trim().replace(/[^\d]/g, "");
+  if (!digits) return "";
+  if (String(raw || "").trim().endsWith('.0') && digits.endsWith('0')) digits = digits.slice(0, -1);
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  return digits;
+}
+
+function normalizeComparablePhone(raw) {
+  let digits = normalizePhoneDigits(raw);
+  if (!digits) return "";
+  if (digits.startsWith('549')) digits = '54' + digits.slice(3);
+  return digits;
+}
+
+function normalizeHubSpotPhone(raw) {
+  const digits = normalizePhoneDigits(raw);
+  return digits ? `+${digits}` : "";
+}
+
+function buildPhoneCandidates(raw) {
+  const digits = normalizePhoneDigits(raw);
+  const set = new Set();
+  if (!digits) return [];
+
+  const add = (value) => {
+    const v = String(value || '').trim();
+    if (!v) return;
+    set.add(v);
+    set.add(v.replace(/^\+/, ''));
+    if (!v.startsWith('+')) set.add(`+${v}`);
+  };
+
+  add(digits);
+
+  if (digits.startsWith('54')) {
+    const local = digits.slice(2);
+    add(`54${local}`);
+    add(`549${local}`);
+  }
+
+  if (digits.startsWith('549')) {
+    const local = digits.slice(3);
+    add(`54${local}`);
+    add(`549${local}`);
+  }
+
+  return Array.from(set);
+}
+
+function titleCaseName(value) {
+  const txt = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!txt) return '';
+  if (/[a-záéíóúñ]/.test(txt)) return txt;
+  return txt
+    .toLowerCase()
+    .split(' ')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function isLikelyGenericContactName(value) {
+  const t = normalize(value || '');
+  if (!t) return true;
+  if (t.length < 3) return true;
+  if (/^(cliente|clienta|nuevo cliente|nueva clienta|sin nombre|sin apellido|nombre pendiente)$/i.test(t)) return true;
+  if (/(interesad|interesada|estimad|servicio|producto|curso|turno|alisado|depilacion|depilación|mechita|mechas|tintura|corte|cliente salon|cliente salon de belleza)/i.test(t)) return true;
+  return false;
+}
+
+function chooseBestContactName({ existingName = '', explicitName = '', profileName = '' } = {}) {
+  const current = titleCaseName(existingName);
+  const explicit = titleCaseName(explicitName);
+  const profile = titleCaseName(profileName);
+
+  if (explicit && !isLikelyGenericContactName(explicit) && explicit.split(' ').length >= 2) {
+    return { value: explicit, source: 'chat_explicit' };
+  }
+
+  if (current && !isLikelyGenericContactName(current)) {
+    return { value: current, source: 'existing' };
+  }
+
+  if (explicit && !isLikelyGenericContactName(explicit)) {
+    return { value: explicit, source: 'chat_explicit' };
+  }
+
+  if (profile && !isLikelyGenericContactName(profile)) {
+    return { value: profile, source: 'whatsapp_profile' };
+  }
+
+  if (current && !isLikelyGenericContactName(current)) {
+    return { value: current, source: 'existing' };
+  }
+
+  return { value: current || explicit || profile || '', source: '' };
+}
+
+function hubspotDateValue(dateInput) {
+  const d = dateInput instanceof Date ? dateInput : new Date(dateInput || Date.now());
+  if (Number.isNaN(d.getTime())) return '';
+  return String(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+function hubspotDateTimeValue(dateInput) {
+  const d = dateInput instanceof Date ? dateInput : new Date(dateInput || Date.now());
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toISOString();
+}
+
+async function hubspotRequest(method, pathUrl, payload) {
+  if (!HUBSPOT_ACCESS_TOKEN) throw new Error('HUBSPOT_ACCESS_TOKEN no configurado');
+  const resp = await axios({
+    method,
+    url: `${HUBSPOT_BASE_URL}${pathUrl}`,
+    headers: {
+      Authorization: `Bearer ${HUBSPOT_ACCESS_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    data: payload || undefined,
+  });
+  return resp.data;
+}
+
+async function searchHubSpotContacts(filterGroups = [], limit = 10) {
+  if (!HUBSPOT_ACCESS_TOKEN || !Array.isArray(filterGroups) || !filterGroups.length) return [];
+
+  const body = {
+    filterGroups,
+    limit,
+    properties: [
+      HUBSPOT_PROPERTY.firstname,
+      HUBSPOT_PROPERTY.phone,
+      HUBSPOT_PROPERTY.observacion,
+      HUBSPOT_PROPERTY.producto,
+      HUBSPOT_PROPERTY.cliente,
+      HUBSPOT_PROPERTY.categoria,
+      HUBSPOT_PROPERTY.fechaIngresoBase,
+      HUBSPOT_PROPERTY.ultimoContacto,
+      HUBSPOT_PROPERTY.empresa,
+      HUBSPOT_PROPERTY.whatsappContact,
+      HUBSPOT_PROPERTY.whatsappWaId,
+      HUBSPOT_PROPERTY.whatsappPhoneRaw,
+      HUBSPOT_PROPERTY.whatsappPhoneNormalized,
+      HUBSPOT_PROPERTY.whatsappProfileName,
+      HUBSPOT_PROPERTY.nameSource,
+      HUBSPOT_PROPERTY.nameUpdatedAt,
+      'mobilephone',
+    ],
+  };
+
+  try {
+    const data = await hubspotRequest('post', '/crm/v3/objects/contacts/search', body);
+    return Array.isArray(data?.results) ? data.results : [];
+  } catch (e) {
+    console.error('❌ Error buscando contactos en HubSpot:', e?.response?.data || e?.message || e);
+    return [];
+  }
+}
+
+async function findHubSpotContactByWaId(waId) {
+  if (!waId) return null;
+  const results = await searchHubSpotContacts([
+    { filters: [{ propertyName: HUBSPOT_PROPERTY.whatsappWaId, operator: 'EQ', value: String(waId) }] }
+  ], 5);
+  return results[0] || null;
+}
+
+async function findHubSpotContactsByPhone(phoneRaw) {
+  const candidates = buildPhoneCandidates(phoneRaw).slice(0, 12);
+  if (!candidates.length) return [];
+
+  const filterGroups = [];
+  for (const value of candidates) {
+    filterGroups.push({ filters: [{ propertyName: HUBSPOT_PROPERTY.phone, operator: 'EQ', value }] });
+    filterGroups.push({ filters: [{ propertyName: 'mobilephone', operator: 'EQ', value }] });
+    filterGroups.push({ filters: [{ propertyName: HUBSPOT_PROPERTY.whatsappPhoneNormalized, operator: 'EQ', value }] });
+    filterGroups.push({ filters: [{ propertyName: HUBSPOT_PROPERTY.whatsappPhoneRaw, operator: 'EQ', value }] });
+  }
+
+  return searchHubSpotContacts(filterGroups.slice(0, 20), 20);
+}
+
+function chooseBestHubSpotMatch(results, phoneRaw) {
+  const rows = Array.isArray(results) ? results : [];
+  if (!rows.length) return null;
+  const target = normalizeComparablePhone(phoneRaw);
+  if (!target) return rows[0] || null;
+
+  const scored = rows.map((row) => {
+    const props = row?.properties || {};
+    const phones = [
+      props[HUBSPOT_PROPERTY.phone],
+      props.mobilephone,
+      props[HUBSPOT_PROPERTY.whatsappPhoneNormalized],
+      props[HUBSPOT_PROPERTY.whatsappPhoneRaw],
+    ].filter(Boolean);
+
+    const exact = phones.some((p) => normalizeComparablePhone(p) === target);
+    return { row, exact };
+  });
+
+  return scored.find((x) => x.exact)?.row || rows[0] || null;
+}
+
+function buildHubSpotContactProperties(ctx, existingContact, { isClient = false } = {}) {
+  const existing = existingContact?.properties || {};
+  const categoria = pickCategoria({ intentType: ctx.intentType || 'OTHER', text: ctx.lastUserText || '' });
+  const productos = pickProductos(ctx.interest || ctx.lastUserText || '');
+  const resumenBase = String(ctx.interest || ctx.lastUserText || '(sin detalle)').trim();
+  const resumenCorto = resumenBase.length > 500 ? resumenBase.slice(0, 500) : resumenBase;
+  const observacion = `${new Date().toLocaleDateString('es-AR', { timeZone: TIMEZONE })} ${resumenCorto}`.trim();
+
+  const chosenName = chooseBestContactName({
+    existingName: existing?.[HUBSPOT_PROPERTY.firstname] || '',
+    explicitName: ctx.explicitName || '',
+    profileName: ctx.profileName || ctx.name || '',
+  });
+
+  const normalizedPhone = normalizeHubSpotPhone(ctx.phoneRaw || ctx.phone || '');
+  const rawPhone = String(ctx.phoneRaw || ctx.phone || '').trim();
+  const now = new Date();
+
+  const properties = {
+    [HUBSPOT_PROPERTY.phone]: normalizedPhone || rawPhone || existing?.[HUBSPOT_PROPERTY.phone] || '',
+    [HUBSPOT_PROPERTY.observacion]: observacion,
+    [HUBSPOT_PROPERTY.producto]: productos || existing?.[HUBSPOT_PROPERTY.producto] || '',
+    [HUBSPOT_PROPERTY.categoria]: categoria || existing?.[HUBSPOT_PROPERTY.categoria] || '',
+    [HUBSPOT_PROPERTY.ultimoContacto]: hubspotDateValue(now),
+    [HUBSPOT_PROPERTY.empresa]: existing?.[HUBSPOT_PROPERTY.empresa] || HUBSPOT_OPTION.empresaCataleya,
+    [HUBSPOT_PROPERTY.whatsappContact]: 'true',
+    [HUBSPOT_PROPERTY.whatsappWaId]: ctx.waId || existing?.[HUBSPOT_PROPERTY.whatsappWaId] || '',
+    [HUBSPOT_PROPERTY.whatsappPhoneRaw]: rawPhone || existing?.[HUBSPOT_PROPERTY.whatsappPhoneRaw] || '',
+    [HUBSPOT_PROPERTY.whatsappPhoneNormalized]: normalizedPhone || existing?.[HUBSPOT_PROPERTY.whatsappPhoneNormalized] || '',
+    [HUBSPOT_PROPERTY.whatsappProfileName]: titleCaseName(ctx.profileName || ctx.name || '') || existing?.[HUBSPOT_PROPERTY.whatsappProfileName] || '',
+  };
+
+  if (chosenName.value && (chosenName.source === 'chat_explicit' || chosenName.source === 'whatsapp_profile' || isLikelyGenericContactName(existing?.[HUBSPOT_PROPERTY.firstname] || ''))) {
+    properties[HUBSPOT_PROPERTY.firstname] = chosenName.value;
+    properties[HUBSPOT_PROPERTY.nameSource] = chosenName.source || existing?.[HUBSPOT_PROPERTY.nameSource] || '';
+    properties[HUBSPOT_PROPERTY.nameUpdatedAt] = hubspotDateTimeValue(now);
+  }
+
+  if (!existing?.[HUBSPOT_PROPERTY.fechaIngresoBase]) {
+    properties[HUBSPOT_PROPERTY.fechaIngresoBase] = hubspotDateValue(now);
+  }
+
+  if (isClient) {
+    properties[HUBSPOT_PROPERTY.cliente] = HUBSPOT_OPTION.clienteSi;
+  }
+
+  return Object.fromEntries(Object.entries(properties).filter(([, value]) => value !== undefined && value !== null));
+}
+
+async function hasAnyAppointmentForHubSpotContact({ waId, phoneRaw }) {
+  const phoneNorm = normalizePhone(phoneRaw || '');
+  const r = await db.query(
+    `SELECT 1
+       FROM appointments
+      WHERE wa_id = $1
+         OR wa_phone = $2
+         OR contact_phone = $2
+      LIMIT 1`,
+    [waId || '', phoneNorm || '']
+  );
+  return !!r.rows?.length;
+}
+
+async function upsertHubSpotContactFromClose(ctx) {
+  if (!hasHubSpotEnabled()) {
+    console.warn('⚠️ HubSpot no configurado. Se omite seguimiento CRM.');
+    return;
+  }
+
+  const phoneRaw = String(ctx?.phoneRaw || ctx?.phone || '').trim();
+  const waId = String(ctx?.waId || '').trim();
+  if (!phoneRaw && !waId) return;
+
+  let contact = null;
+  if (waId) contact = await findHubSpotContactByWaId(waId);
+  if (!contact && phoneRaw) {
+    const phoneMatches = await findHubSpotContactsByPhone(phoneRaw);
+    contact = chooseBestHubSpotMatch(phoneMatches, phoneRaw);
+  }
+
+  const isClient = await hasAnyAppointmentForHubSpotContact({ waId, phoneRaw });
+  const properties = buildHubSpotContactProperties(ctx, contact, { isClient });
+
+  try {
+    if (contact?.id) {
+      await hubspotRequest('patch', `/crm/v3/objects/contacts/${contact.id}`, { properties });
+      return { action: 'updated', id: contact.id };
+    }
+
+    const created = await hubspotRequest('post', '/crm/v3/objects/contacts', { properties });
+    return { action: 'created', id: created?.id || '' };
+  } catch (e) {
+    console.error('❌ Error creando/actualizando contacto en HubSpot:', e?.response?.data || e?.message || e);
+    throw e;
+  }
+}
+
 async function dbInsertMessage({ direction, wa_peer, name, text, msg_type, wa_msg_id, raw }) {
   const peerNorm = normalizePhone(wa_peer);
   await db.query(
@@ -209,6 +513,40 @@ const TEMPLATE_ALERTA_PELUQUERA = process.env.TEMPLATE_ALERTA_PELUQUERA || "aler
 const TEMPLATE_NUEVO_TURNO_PELUQUERA = process.env.TEMPLATE_NUEVO_TURNO_PELUQUERA || "nuevo_turno_peluquera";
 const STYLIST_NOTIFY_PHONE_RAW = process.env.STYLIST_NOTIFY_PHONE || "3868 466370";
 const APPOINTMENT_TEMPLATE_SCAN_MS = Number(process.env.APPOINTMENT_TEMPLATE_SCAN_MS || 60000);
+
+
+// ===================== HUBSPOT (CRM seguimiento) =====================
+const HUBSPOT_ACCESS_TOKEN = process.env.HUBSPOT_ACCESS_TOKEN || process.env.HUBSPOT_TOKEN || "";
+const HUBSPOT_BASE_URL = (process.env.HUBSPOT_BASE_URL || "https://api.hubapi.com").replace(/\/$/, "");
+const ENABLE_END_OF_DAY_TRACKING = String(process.env.ENABLE_END_OF_DAY_TRACKING || "false").toLowerCase() === "true";
+
+const HUBSPOT_PROPERTY = {
+  firstname: "firstname",
+  phone: "phone",
+  observacion: "observacion",
+  producto: "producto",
+  cliente: "cliente",
+  categoria: "categoria",
+  fechaIngresoBase: "fecha_de_ingreso_base",
+  ultimoContacto: "ultimo_contacto",
+  empresa: "empresa",
+  whatsappContact: "whatsapp_contact",
+  whatsappWaId: "whatsapp_wa_id",
+  whatsappPhoneRaw: "whatsapp_phone_raw",
+  whatsappPhoneNormalized: "whatsapp_phone_normalized",
+  whatsappProfileName: "whatsapp_profile_name",
+  nameSource: "name_source",
+  nameUpdatedAt: "name_updated_at",
+};
+
+const HUBSPOT_OPTION = {
+  clienteSi: "SI",
+  empresaCataleya: "CATALEYA Salón de Belleza",
+};
+
+function hasHubSpotEnabled() {
+  return !!HUBSPOT_ACCESS_TOKEN;
+}
 
 // ===================== REQUIRED ENV CHECK (evita demos rotas) =====================
 const REQUIRED_ENV = ["OPENAI_API_KEY", "WHATSAPP_TOKEN", "PHONE_NUMBER_ID", "VERIFY_TOKEN", "GOOGLE_SA_FILE"];
@@ -346,36 +684,21 @@ const inactivityTimers = new Map();
 const closeTimers = new Map();
 const lastCloseContext = new Map(); // waId -> { phone, name, lastUserText, intentType, interest }
 
+function updateLastCloseContext(waId, patch = {}) {
+  if (!waId) return null;
+  const prev = lastCloseContext.get(waId) || {};
+  const next = { ...prev, ...patch };
+  lastCloseContext.set(waId, next);
+  return next;
+}
+
 const INACTIVITY_MS = 10 * 60 * 1000; // 10 minutos (mensaje de cierre)
 const CLOSE_LOG_MS = 10 * 60 * 1000;  // 10 minutos más (si no responde, se registra)
 
 async function logConversationClose(waId) {
   const ctx = lastCloseContext.get(waId);
-  if (!ctx?.phone) return;
-
-  const spreadsheetId = await getOrCreateMonthlySpreadsheet();
-  const sheetName = getTodaySheetName();
-  await ensureDailySheet(spreadsheetId, sheetName);
-
-  const lastText = (ctx.lastUserText || "").trim();
-  const categoria = pickCategoria({ intentType: ctx.intentType || "OTHER", text: lastText });
-  const productos = pickProductos(lastText);
-
-  const resumenBase = (ctx.interest || lastText || "(sin detalle)").trim();
-  const resumenCorto = resumenBase.length > 80 ? resumenBase.slice(0, 80) : resumenBase;
-
-  const observacion = `${ddmmyyyyAR()} ${resumenCorto}`;
-
-  await upsertContactRow({
-    spreadsheetId,
-    sheetName,
-    name: ctx.name || "",
-    phone: ctx.phone,
-    observacion,
-    categoria,
-    productos,
-    ultimo_contacto: ddmmyyyyAR(),
-  });
+  if (!ctx?.phone && !ctx?.phoneRaw && !ctx?.waId) return;
+  await upsertHubSpotContactFromClose(ctx);
 }
 
 function scheduleInactivityFollowUp(waId, phone) {
@@ -4422,6 +4745,7 @@ app.get("/health", (req, res) => {
     timeAR: nowARString(),
     tmpDir: getTmpDir(),
     models: { primary: PRIMARY_MODEL, complex: COMPLEX_MODEL, transcribe: TRANSCRIBE_MODEL },
+    hubspot: { enabled: hasHubSpotEnabled(), endOfDayTracking: ENABLE_END_OF_DAY_TRACKING },
   });
 });
 
@@ -4470,9 +4794,14 @@ if (closeTimers.has(waId)) {
 
 
 // ✅ Contexto para seguimiento al cierre (se actualiza durante la conversación)
+const contactInfoFromText = extractContactInfo(text);
 lastCloseContext.set(waId, {
+  waId,
   phone,
+  phoneRaw,
   name,
+  profileName: name,
+  explicitName: contactInfoFromText?.nombre || "",
   lastUserText: text,
   intentType: "OTHER",
   interest: null,
@@ -4528,9 +4857,12 @@ Cuando quiera retomarlo, me escribe y le paso nuevamente los horarios disponible
 const interest = await detectInterest(text);
 if (interest) dailyLeads.set(phone, { name, interest });
 
-// ✅ guardar interés en el contexto de cierre
-const ctx0 = lastCloseContext.get(waId);
-if (ctx0) ctx0.interest = interest || ctx0.interest;
+// ✅ guardar interés y mejores datos en el contexto de cierre
+updateLastCloseContext(waId, {
+  interest: interest || (lastCloseContext.get(waId)?.interest || null),
+  explicitName: contactInfoFromText?.nombre || (lastCloseContext.get(waId)?.explicitName || ''),
+  lastUserText: text,
+});
 
     // Si piden foto sin decir cuál: usar el último producto o las últimas opciones listadas
     if (userAsksForPhoto(userIntentText)) {
@@ -4964,6 +5296,7 @@ Seña recibida ✔`.trim();
 
       merged.fecha = toYMD(merged.fecha);
       Object.assign(merged, mergeContactIntoTurno({ turno: merged, text, waPhone: phone }));
+      updateLastCloseContext(waId, { explicitName: merged.cliente_full || contactInfoFromText?.nombre || lastCloseContext.get(waId)?.explicitName || '' });
       merged = await tryApplyPaymentToDraft(merged, { text, mediaMeta });
       merged = await applyCatalogServiceDataToTurno(merged);
 
@@ -5030,6 +5363,7 @@ Seña recibida ✔`.trim();
         if (!merged.servicio) falt.add("servicio");
 
         Object.assign(merged, mergeContactIntoTurno({ turno: merged, text, waPhone: phone }));
+        updateLastCloseContext(waId, { explicitName: merged.cliente_full || contactInfoFromText?.nombre || lastCloseContext.get(waId)?.explicitName || '' });
         let mergedWithPayment = await tryApplyPaymentToDraft(merged, { text, mediaMeta });
         mergedWithPayment = await applyCatalogServiceDataToTurno(mergedWithPayment);
         mergedWithPayment.flow_step = inferDraftFlowStep(mergedWithPayment);
@@ -5258,8 +5592,12 @@ Si después necesita algo, estoy acá ✨`;
     );
 
     // ✅ actualizar tipo de intención para el seguimiento
-    const ctx1 = lastCloseContext.get(waId);
-    if (ctx1) ctx1.intentType = shouldTreatAsProduct ? 'PRODUCT' : (intent?.type || ctx1.intentType || 'OTHER');
+    updateLastCloseContext(waId, {
+      intentType: shouldTreatAsProduct ? 'PRODUCT' : (intent?.type || lastCloseContext.get(waId)?.intentType || 'OTHER'),
+      explicitName: contactInfoFromText?.nombre || lastCloseContext.get(waId)?.explicitName || '',
+      profileName: name || lastCloseContext.get(waId)?.profileName || '',
+      lastUserText: text,
+    });
 
     // Si el clasificador falla, igual intentamos buscar en stock con el texto del cliente
     // ✅ Evitar confusión: "SI/NO/OK/DALE" como respuesta a la última pregunta del bot NO debe disparar catálogo.
@@ -5648,11 +5986,13 @@ async function endOfDayJob() {
   console.log("✅ Seguimiento diario guardado");
 }
 
-// 23:59 hora Argentina
-setInterval(() => {
-  const now = new Date().toLocaleTimeString("es-AR", { timeZone: TIMEZONE });
-  if (now.startsWith("23:59")) endOfDayJob();
-}, 60000);
+// 23:59 hora Argentina (desactivado por defecto: ahora el seguimiento principal se sube a HubSpot al cerrar la charla)
+if (ENABLE_END_OF_DAY_TRACKING) {
+  setInterval(() => {
+    const now = new Date().toLocaleTimeString("es-AR", { timeZone: TIMEZONE });
+    if (now.startsWith("23:59")) endOfDayJob();
+  }, 60000);
+}
 
 // ===================== PLANTILLAS DE TURNOS =====================
 setInterval(() => {
@@ -5667,6 +6007,12 @@ const PORT = process.env.PORT || 3000;
 (async () => {
   await ensureDb();
   await ensureAppointmentTables();
+  console.log(hasHubSpotEnabled()
+    ? "✅ HubSpot CRM habilitado para seguimiento al cierre de charla"
+    : "⚠️ HubSpot CRM no configurado: falta HUBSPOT_ACCESS_TOKEN / HUBSPOT_TOKEN");
+  console.log(ENABLE_END_OF_DAY_TRACKING
+    ? "ℹ️ Seguimiento de medianoche activado"
+    : "ℹ️ Seguimiento de medianoche desactivado (se usa cierre por inactividad)");
   await processAppointmentTemplateNotifications().catch((e) => {
     console.error('❌ Error inicial procesando plantillas de turnos:', e?.response?.data || e?.message || e);
   });
