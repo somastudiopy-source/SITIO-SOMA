@@ -519,6 +519,7 @@ const APPOINTMENT_TEMPLATE_SCAN_MS = Number(process.env.APPOINTMENT_TEMPLATE_SCA
 const HUBSPOT_ACCESS_TOKEN = process.env.HUBSPOT_ACCESS_TOKEN || process.env.HUBSPOT_TOKEN || "";
 const HUBSPOT_BASE_URL = (process.env.HUBSPOT_BASE_URL || "https://api.hubapi.com").replace(/\/$/, "");
 const ENABLE_END_OF_DAY_TRACKING = String(process.env.ENABLE_END_OF_DAY_TRACKING || "false").toLowerCase() === "true";
+const ENABLE_APPOINTMENT_TEMPLATES = String(process.env.ENABLE_APPOINTMENT_TEMPLATES || "true").toLowerCase() === "true";
 
 const HUBSPOT_PROPERTY = {
   firstname: "firstname",
@@ -5995,11 +5996,15 @@ if (ENABLE_END_OF_DAY_TRACKING) {
 }
 
 // ===================== PLANTILLAS DE TURNOS =====================
-setInterval(() => {
-  processAppointmentTemplateNotifications().catch((e) => {
-    console.error('❌ Error en el scheduler de plantillas de turnos:', e?.response?.data || e?.message || e);
-  });
-}, APPOINTMENT_TEMPLATE_SCAN_MS);
+if (ENABLE_APPOINTMENT_TEMPLATES) {
+  setInterval(() => {
+    processAppointmentTemplateNotifications().catch((e) => {
+      console.error('❌ Error en el scheduler de plantillas de turnos:', e?.response?.data || e?.message || e);
+    });
+  }, APPOINTMENT_TEMPLATE_SCAN_MS);
+} else {
+  console.log("ℹ️ Plantillas de turnos desactivadas temporalmente");
+}
 
 // ===================== START =====================
 const PORT = process.env.PORT || 3000;
@@ -6013,9 +6018,14 @@ const PORT = process.env.PORT || 3000;
   console.log(ENABLE_END_OF_DAY_TRACKING
     ? "ℹ️ Seguimiento de medianoche activado"
     : "ℹ️ Seguimiento de medianoche desactivado (se usa cierre por inactividad)");
-  await processAppointmentTemplateNotifications().catch((e) => {
-    console.error('❌ Error inicial procesando plantillas de turnos:', e?.response?.data || e?.message || e);
-  });
+  console.log(ENABLE_APPOINTMENT_TEMPLATES
+    ? "ℹ️ Plantillas de turnos activadas"
+    : "ℹ️ Plantillas de turnos desactivadas temporalmente");
+  if (ENABLE_APPOINTMENT_TEMPLATES) {
+    await processAppointmentTemplateNotifications().catch((e) => {
+      console.error('❌ Error inicial procesando plantillas de turnos:', e?.response?.data || e?.message || e);
+    });
+  }
 
   app.listen(PORT, () => {
     console.log("🚀 Bot de estética activo");
