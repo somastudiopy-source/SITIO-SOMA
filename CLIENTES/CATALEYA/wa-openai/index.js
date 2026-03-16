@@ -1094,7 +1094,7 @@ async function getAppointmentRowById(appointmentId) {
             to_char(appointment_time, 'HH24:MI') AS appointment_time,
             status,
             stylist_notified_at,
-            reminder_client_24h_at,
+            reminder_client_2h_at,
             reminder_stylist_24h_at,
             reminder_stylist_2h_at
        FROM appointments
@@ -1115,7 +1115,7 @@ async function processAppointmentTemplateNotifications() {
             to_char(appointment_time, 'HH24:MI') AS appointment_time,
             status,
             stylist_notified_at,
-            reminder_client_24h_at,
+            reminder_client_2h_at,
             reminder_stylist_24h_at,
             reminder_stylist_2h_at
        FROM appointments
@@ -1141,14 +1141,14 @@ async function processAppointmentTemplateNotifications() {
       }
 
       const clientRecipient = normalizeWhatsAppRecipient(appt.contact_phone || appt.wa_phone || '');
-      if (!appt.reminder_client_24h_at && clientRecipient && msUntil <= (24 * 60 * 60 * 1000)) {
+      if (!appt.reminder_client_2h_at && clientRecipient && msUntil <= (2 * 60 * 60 * 1000)) {
         await sendAppointmentTemplateAndLog({
           appointmentId: appt.id,
           recipientPhone: clientRecipient,
           templateName: TEMPLATE_RECORDATORIO_CLIENTE,
-          notificationType: 'client_reminder_24h',
+          notificationType: 'client_reminder_2h',
           vars: buildAppointmentTemplateVarsForClient(appt),
-          markField: 'reminder_client_24h_at',
+          markField: 'reminder_client_2h_at',
         });
       }
 
@@ -2737,6 +2737,43 @@ function getProductFamilyAliases(family) {
   return def?.aliases || [];
 }
 
+function detectProductFocusTerm(query) {
+  const q = normalizeCatalogSearchText(query || '');
+  if (!q) return '';
+
+  let best = '';
+  for (const def of PRODUCT_FAMILY_DEFS) {
+    for (const alias of (def.aliases || [])) {
+      const normalizedAlias = normalizeCatalogSearchText(alias);
+      if (!normalizedAlias) continue;
+      if (containsCatalogPhrase(q, normalizedAlias) && normalizedAlias.length > best.length) {
+        best = normalizedAlias;
+      }
+    }
+  }
+
+  return best;
+}
+
+function buildProductFocusHaystack(row) {
+  return normalizeCatalogSearchText(`${row?.nombre || ''} ${row?.categoria || ''} ${row?.marca || ''} ${row?.tab || ''}`);
+}
+
+function filterRowsByProductFocus(rows, focusTerm) {
+  const list = Array.isArray(rows) ? rows : [];
+  const focus = normalizeCatalogSearchText(focusTerm || '');
+  if (!focus || !list.length) return list;
+
+  const focused = list.filter((row) => containsCatalogPhrase(buildProductFocusHaystack(row), focus));
+  return focused.length ? focused : list;
+}
+
+function isGenericProductOptionsFollowUp(text) {
+  const t = normalize(text || '');
+  if (!t) return false;
+  return /(que otras opciones|qué otras opciones|otras opciones|que mas tenes|qué más tenés|que más tenes|qué mas tenés|que mas hay|qué más hay|alguna otra|alguna mas|alguna más|otras que tengas|otras tenes|otras tenés|de ese|de esa|de eso|de estas|de estos|de esa linea|de esa línea)/i.test(t);
+}
+
 function extractProductTypeKeywords(query) {
   const family = detectProductFamily(query);
   if (!family) return [];
@@ -2807,9 +2844,10 @@ function findStock(rows, query, mode) {
   return pickBestByScore(scored, mode);
 }
 
-function findStockRelated(rows, rawQuery, { family = '', limit = 200 } = {}) {
+function findStockRelated(rows, rawQuery, { family = '', focusTerm = '', limit = 200 } = {}) {
   const q = normalizeCatalogSearchText(rawQuery || '');
   const resolvedFamily = family || detectProductFamily(q);
+  const resolvedFocusTerm = normalizeCatalogSearchText(focusTerm || detectProductFocusTerm(q) || '');
   const aliases = getProductFamilyAliases(resolvedFamily);
   const familyTokenSet = new Set(aliases.flatMap((alias) => tokenize(alias, { expandSynonyms: false })));
   const extraTokens = tokenize(q, { expandSynonyms: true }).filter((tok) =>
@@ -2862,6 +2900,10 @@ function findStockRelated(rows, rawQuery, { family = '', limit = 200 } = {}) {
   });
 
   let out = scored.map((x) => x.row);
+
+  if (resolvedFocusTerm) {
+    out = filterRowsByProductFocus(out, resolvedFocusTerm);
+  }
 
   if (aliases.length && extraTokens.length) {
     const narrowed = scored.filter((x) => x.familyHits > 0 && x.extraHits > 0).map((x) => x.row);
@@ -3049,7 +3091,9 @@ function shortlistProductsForRecommendation(rows, criteria = {}) {
   const items = Array.isArray(rows) ? rows.filter((r) => r?.nombre) : [];
   if (!items.length) return [];
 
-  const scored = items
+  const scopedItems = criteria?.focusTerm ? filterRowsByProductFocus(items, criteria.focusTerm) : items;
+
+  const scored = scopedItems
     .map((row) => ({ row, score: scoreProductCandidate(row, criteria) }))
     .filter((x) => x.score > 0.15 || !criteria.family);
 
@@ -3065,7 +3109,7 @@ function shortlistProductsForRecommendation(rows, criteria = {}) {
     if (out.length >= (criteria.limit || 10)) break;
   }
 
-  return out.length ? out : items.slice(0, criteria.limit || 10);
+  return out.length ? out : scopedItems.slice(0, criteria.limit || 10);
 }
 
 async function recommendProductsWithAI({ text, familyLabel = '', hairType = '', need = '', useType = '', products = [] } = {}) {
@@ -3178,7 +3222,7 @@ function getCatalogItemEmoji(label, { kind = 'product' } = {}) {
   if (/(tijera|corte)/i.test(t)) return '✂️';
   if (/(navaj|afeitad|barba|shaving|after shave|perfilad)/i.test(t)) return '🪒';
   if (/(shampoo|acondicionador|mascara|mascarilla|baño de crema|bano de crema|crema|serum|sérum|aceite|oleo|óleo|ampolla|tratamiento|keratina|botox|alisado|protector|gel|cera|matizador|nutricion|nutrición)/i.test(t)) return '🧴';
-  if (/(tintura|color|mechit|balayage|reflejo|decolor|emulsion|emulsión|oxidante)/i.test(t)) return '🎨';
+  if (/(tintura|color|mechit|balayage|reflejo|decolor|emulsion|emulsión|oxidante)/i.test(t)) return '🌸';
   if (/(plancha|secador|brushing)/i.test(t)) return '🔥';
   if (/(curso|capacitacion|capacitación)/i.test(t)) return '🎓';
   return kind === 'service' ? '💇‍♀️' : '✨';
@@ -3879,7 +3923,7 @@ function buildAppointmentData(row = {}) {
     appointment_time: formatAppointmentTimeForTemplate(row.appointment_time || ''),
     status: String(row.status || '').trim(),
     stylist_notified_at: row.stylist_notified_at || null,
-    reminder_client_24h_at: row.reminder_client_24h_at || null,
+    reminder_client_2h_at: row.reminder_client_2h_at || null,
     reminder_stylist_24h_at: row.reminder_stylist_24h_at || null,
     reminder_stylist_2h_at: row.reminder_stylist_2h_at || null,
   };
@@ -3932,7 +3976,7 @@ async function insertAppointmentNotificationLog({ appointmentId, notificationTyp
 async function markAppointmentNotificationField(appointmentId, fieldName) {
   const allowed = new Set([
     'stylist_notified_at',
-    'reminder_client_24h_at',
+    'reminder_client_2h_at',
     'reminder_stylist_24h_at',
     'reminder_stylist_2h_at',
   ]);
@@ -5248,10 +5292,12 @@ Si después necesita algo, estoy acá ✨`;
     // PRODUCT
     if (shouldTreatAsProduct) {
       const stock = await getStockCatalog();
-      const aiFamily = productAI?.family || '';
+      const aiFamilyRaw = productAI?.family || '';
+      const aiFamily = normalizeCatalogSearchText(aiFamilyRaw) === 'otro' ? '' : aiFamilyRaw;
       const aiSearchText = productAI?.specific_name || productAI?.search_text || '';
       const resolvedQuery = aiSearchText || intent.query || guessQueryFromText(text) || text;
       const resolvedFamily = aiFamily || detectProductFamily(resolvedQuery) || detectProductFamily(text) || lastProductCtx?.family || '';
+      const resolvedFocusTerm = detectProductFocusTerm(aiSearchText || intent.query || text) || lastProductCtx?.focusTerm || '';
       const resolvedHairType = productAI?.hair_type || lastProductCtx?.hairType || '';
       const resolvedNeed = productAI?.need || lastProductCtx?.need || '';
       const resolvedUseType = normalizeUseType(productAI?.use_type || lastProductCtx?.useType || '');
@@ -5272,6 +5318,7 @@ Si después necesita algo, estoy acá ✨`;
         const parts = formatStockListAll(stock, 12);
         setLastProductContext(waId, {
           family: resolvedFamily || '',
+          focusTerm: resolvedFocusTerm || '',
           hairType: resolvedHairType || '',
           need: resolvedNeed || '',
           useType: resolvedUseType || '',
@@ -5285,10 +5332,16 @@ Si después necesita algo, estoy acá ✨`;
         return;
       }
 
-      const related = findStockRelated(stock, resolvedQuery, { family: resolvedFamily, limit: 200 });
-      const broader = related.length ? related : findStockRelated(stock, text, { family: resolvedFamily, limit: 200 });
+      let related = findStockRelated(stock, resolvedQuery, { family: resolvedFamily, focusTerm: resolvedFocusTerm, limit: 200 });
+      let broader = related.length ? related : findStockRelated(stock, text, { family: resolvedFamily, focusTerm: resolvedFocusTerm, limit: 200 });
       const detailQuery = productAI?.specific_name || intent.query || guessQueryFromText(text);
-      const matches = detailQuery ? findStock(stock, detailQuery, 'DETAIL') : [];
+      let matches = detailQuery ? findStock(stock, detailQuery, 'DETAIL') : [];
+
+      if (resolvedFocusTerm && (isGenericProductOptionsFollowUp(text) || productMode === 'LIST' || !!productAI?.wants_all_related)) {
+        related = filterRowsByProductFocus(related, resolvedFocusTerm);
+        broader = filterRowsByProductFocus(broader, resolvedFocusTerm);
+        matches = filterRowsByProductFocus(matches, resolvedFocusTerm);
+      }
       const wantsRecommendation = !!(
         productAI?.wants_recommendation ||
         resolvedHairType ||
@@ -5310,6 +5363,7 @@ Si después necesita algo, estoy acá ✨`;
 
         const shortlist = shortlistProductsForRecommendation(pool.length ? pool : stock, {
           family: resolvedFamily,
+          focusTerm: resolvedFocusTerm,
           hairType: resolvedHairType,
           need: resolvedNeed,
           useType: resolvedUseType,
@@ -5343,6 +5397,7 @@ Si después necesita algo, estoy acá ✨`;
           if (replyReco) {
             setLastProductContext(waId, {
               family: resolvedFamily || detectProductFamily(text) || '',
+              focusTerm: resolvedFocusTerm || '',
               hairType: resolvedHairType || '',
               need: resolvedNeed || '',
               useType: resolvedUseType || '',
@@ -5363,6 +5418,7 @@ Si después necesita algo, estoy acá ✨`;
           const relatedSlice = related.slice(0, 12);
           setLastProductContext(waId, {
             family: resolvedFamily || detectProductFamily(resolvedQuery) || '',
+            focusTerm: resolvedFocusTerm || '',
             hairType: resolvedHairType || '',
             need: resolvedNeed || '',
             useType: resolvedUseType || '',
@@ -5396,6 +5452,7 @@ Si después necesita algo, estoy acá ✨`;
           lastProductByUser.set(waId, matches[0]);
           setLastProductContext(waId, {
             family: resolvedFamily || detectProductFamily(matches[0].nombre) || '',
+            focusTerm: resolvedFocusTerm || detectProductFocusTerm(matches[0].nombre) || '',
             hairType: resolvedHairType || '',
             need: resolvedNeed || '',
             useType: resolvedUseType || '',
@@ -5405,6 +5462,7 @@ Si después necesita algo, estoy acá ✨`;
         } else {
           setLastProductContext(waId, {
             family: resolvedFamily || detectProductFamily(resolvedQuery) || '',
+            focusTerm: resolvedFocusTerm || '',
             hairType: resolvedHairType || '',
             need: resolvedNeed || '',
             useType: resolvedUseType || '',
@@ -5442,6 +5500,7 @@ Si después necesita algo, estoy acá ✨`;
         const broaderSlice = broader.slice(0, 12);
         setLastProductContext(waId, {
           family: resolvedFamily || detectProductFamily(resolvedQuery) || '',
+          focusTerm: resolvedFocusTerm || '',
           hairType: resolvedHairType || '',
           need: resolvedNeed || '',
           useType: resolvedUseType || '',
@@ -5471,6 +5530,7 @@ Si después necesita algo, estoy acá ✨`;
 
       setLastProductContext(waId, {
         family: resolvedFamily || '',
+        focusTerm: resolvedFocusTerm || '',
         hairType: resolvedHairType || '',
         need: resolvedNeed || '',
         useType: resolvedUseType || '',
