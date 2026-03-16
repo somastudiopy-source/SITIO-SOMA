@@ -251,20 +251,21 @@ function cleanNameCandidate(value) {
   const badTokens = new Set([
     'interesada', 'interesado', 'estimada', 'estimado', 'cliente', 'clienta',
     'servicio', 'servicios', 'producto', 'productos', 'curso', 'cursos', 'turno', 'turnos',
-    'grupo', 'cata', 'cataleya', 'nuevo', 'nueva', 'salon', 'belleza'
+    'grupo', 'cata', 'cataleya', 'nuevo', 'nueva', 'salon', 'belleza',
+    'hola', 'buen', 'bueno', 'dia', 'días', 'dias', 'tarde', 'tardes', 'noche', 'noches',
+    'consulta', 'consulto', 'consultar', 'pregunta', 'pregunto', 'quisiera', 'quiero',
+    'precio', 'info', 'informacion', 'información', 'gracias'
   ]);
 
   const cleanedTokens = rawTokens.filter((token) => !badTokens.has(normalize(token)));
   txt = cleanedTokens.join(' ').trim();
   if (!txt) return '';
 
-  // Si quedó muy largo, casi seguro no es un nombre real.
   const parts = txt.split(' ').filter(Boolean);
   if (parts.length > 4) return '';
 
-  // Si contiene términos de servicios/productos, descartamos.
   const t = normalize(txt);
-  if (/(alisado|tintura|corte|unas|uñas|depil|pestan|pestañ|ceja|curso|mueble|shampoo|matizador|nutricion|nutrición|bano de crema|baño de crema|camilla|silla|mesa|barber)/i.test(t)) {
+  if (/(alisado|tintura|corte|unas|uñas|depil|pestan|pestañ|ceja|curso|mueble|shampoo|matizador|nutricion|nutrición|bano de crema|baño de crema|camilla|silla|mesa|barber|consult|precio|gracias|hola|buen dia|buen día|necesito|busco|quisiera)/i.test(t)) {
     return '';
   }
 
@@ -277,7 +278,7 @@ function isLikelyGenericContactName(value) {
   if (!cleaned) return true;
   if (cleaned.length < 3) return true;
   if (/^(cliente|clienta|nuevo cliente|nueva clienta|sin nombre|sin apellido|nombre pendiente)$/i.test(t)) return true;
-  if (/(interesad|estimad|servicio|producto|curso|turno|alisado|depilacion|depilación|mechita|mechas|tintura|corte|cliente salon|cliente salon de belleza)/i.test(t)) return true;
+  if (/(interesad|estimad|servicio|producto|curso|turno|alisado|depilacion|depilación|mechita|mechas|tintura|corte|cliente salon|cliente salon de belleza|consult|pregunt|hola|buen dia|buen día|gracias|quisiera|quiero)/i.test(t)) return true;
   return false;
 }
 
@@ -461,7 +462,8 @@ function buildHubSpotContactProperties(ctx, existingContact, { isClient = false 
   const combinedText = [ctx.interest, ctx.lastUserText].filter(Boolean).join(' | ');
   const categoriasFound = pickCategorias({ intentType: ctx.intentType || 'OTHER', text: combinedText });
   const productosFound = pickProductosList(combinedText);
-  const observacion = buildMiniObservacion({ text: combinedText, productos: productosFound, categorias: categoriasFound });
+  const observacionLine = buildMiniObservacion({ text: combinedText, productos: productosFound, categorias: categoriasFound });
+  const observacion = mergeObservationHistory(existing?.[HUBSPOT_PROPERTY.observacion] || '', observacionLine);
 
   const chosenName = chooseBestContactName({
     existingName: existing?.[HUBSPOT_PROPERTY.firstname] || '',
@@ -498,6 +500,9 @@ function buildHubSpotContactProperties(ctx, existingContact, { isClient = false 
     }
     properties[HUBSPOT_PROPERTY.nameSource] = chosenName.source || existing?.[HUBSPOT_PROPERTY.nameSource] || '';
     properties[HUBSPOT_PROPERTY.nameUpdatedAt] = hubspotDateTimeValue(now);
+  } else if (isLikelyGenericContactName([existing?.[HUBSPOT_PROPERTY.firstname], existing?.[HUBSPOT_PROPERTY.lastname]].filter(Boolean).join(' ')) && !chosenName.firstName) {
+    properties[HUBSPOT_PROPERTY.firstname] = '';
+    if (HUBSPOT_PROPERTY.lastname) properties[HUBSPOT_PROPERTY.lastname] = '';
   }
 
   if (!existing?.[HUBSPOT_PROPERTY.fechaIngresoBase]) {
@@ -1160,7 +1165,7 @@ function extractContactInfo(text) {
         cleaned.split(' ').length >= 2 &&
         cleaned.length >= 5 &&
         cleaned.length <= 60 &&
-        !/(quiero|turno|mañana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|servicio|producto|hora|hs|alisado|botox|keratina)/i.test(norm)
+        !/(quiero|quisiera|consulto|consulta|pregunto|pregunta|hola|buen dia|buen día|buenas|gracias|turno|mañana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|servicio|producto|hora|hs|alisado|botox|keratina|shampoo|matizador|nutricion|nutrición)/i.test(norm)
       );
       if (looksLikePureName) nombre = cleaned;
     }
@@ -2477,6 +2482,8 @@ const PRODUCT_KEYWORDS = [
   { label: "Planchas", patterns: [/\bplancha\b/, /\bplanchas\b/] },
   { label: "Secadores", patterns: [/\bsecador\b/, /\bsecadores\b/, /\bsecadora\b/] },
   { label: "Shampoo", patterns: [/\bshampoo\b/, /\bchampu\b/, /\bshampu\b/] },
+  { label: "Acondicionador", patterns: [/\bacondicionador\b/] },
+  { label: "Sérum", patterns: [/\bserum\b/, /\bsérum\b/] },
   { label: "Ácido", patterns: [/\bacido\b/, /\bácido\b/] },
   { label: "Nutrición", patterns: [/nutricion/, /nutrición/] },
   { label: "Tintura", patterns: [/\btintura\b/] },
@@ -2616,26 +2623,60 @@ function pickProductos(text) {
   return pickProductosList(text).join(" / ");
 }
 
-function buildMiniObservacion({ text = '', productos = [], categorias = [] } = {}) {
-  const raw = String(text || '').replace(/\s+/g, ' ').trim();
-  const t = normalize(raw);
+function ddmmyyAR() {
+  const d = new Date();
+  return d.toLocaleDateString("es-AR", { timeZone: TIMEZONE, year: '2-digit', month: '2-digit', day: '2-digit' });
+}
 
-  let accion = '';
-  if (/\bprecio\b|\bcuanto\b|\bcuánto\b|\bvale\b|\bcuesta\b|\bsale\b/.test(t)) accion = 'Consultó precio';
-  else if (/\bturno\b|\bcita\b|\bagenda\b/.test(t)) accion = 'Consultó por turno';
-  else if (/\btenes\b|\btenés\b|\bhay\b|\bstock\b|\bdisponible\b/.test(t)) accion = 'Consultó disponibilidad';
-  else if (/\bcurso\b|\bcursos\b|\btaller\b/.test(t)) accion = 'Consultó información';
-  else accion = 'Consultó';
-
-  const foco = productos.length ? productos.join(' / ') : (categorias[0] || '');
-  if (foco) return `${accion} por ${foco}`.slice(0, 180);
-
-  const clean = raw
+function fallbackTopicFromText(raw) {
+  const clean = String(raw || '')
+    .replace(/\s+/g, ' ')
     .replace(/^(hola+|buenas+|buen dia|buen día|buenas tardes|buenas noches)[,!\s]*/i, '')
-    .replace(/^(quiero saber|quisiera saber|queria saber|quería saber|consulto por|consultaba por)\s+/i, '')
+    .replace(/^(quiero saber|quisiera saber|queria saber|quería saber|consulto por|consultaba por|consulta sobre|consulta por)\s+/i, '')
+    .replace(/^(precio de|precio por|busco|necesito)\s+/i, '')
     .trim();
 
-  return (clean ? `Consultó: ${clean}` : 'Consultó información').slice(0, 180);
+  return clean ? clean.slice(0, 70) : '';
+}
+
+function extractObservationNote(rawText) {
+  const t = normalize(rawText || '');
+  const notes = [];
+
+  if (/pelo seco/.test(t)) notes.push('tiene pelo seco');
+  if (/pelo danado|pelo dañado|cabello danado|cabello dañado|cabello arruinado|pelo arruinado/.test(t)) notes.push('tiene el cabello dañado');
+  if (/frizz/.test(t)) notes.push('menciona frizz');
+  if (/para trabajar|para uso profesional|tengo una peluqueria|tiene una peluqueria|tengo una peluquería|tiene una peluquería|para la peluqueria|para la peluquería|salon|salón/.test(t)) notes.push('busca para trabajar, tiene una peluquería');
+  if (/para mi|para mí|para ella/.test(t)) notes.push('consulta para ella');
+  if (/para el|para él/.test(t)) notes.push('consulta para él');
+  if (/curso/.test(t) && /para mi|para mí|para ella/.test(t)) notes.push('consulta sobre cursos para ella');
+
+  return Array.from(new Set(notes)).join(', ');
+}
+
+function buildMiniObservacion({ text = '', productos = [], categorias = [] } = {}) {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  const foco = productos.length ? productos.join(' / ') : fallbackTopicFromText(raw) || (categorias[0] || 'su consulta');
+  const note = extractObservationNote(raw);
+  const line = `${ddmmyyAR()} Consulta sobre ${foco}${note ? `, ${note}` : ''}`;
+  return line.slice(0, 220);
+}
+
+function mergeObservationHistory(existingValue, newLine, maxLines = 8) {
+  const existingLines = String(existingValue || '')
+    .split(/\r?\n+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  const cleanNew = String(newLine || '').trim();
+  if (!cleanNew) return existingLines.join('\n');
+
+  if (existingLines[existingLines.length - 1] === cleanNew) {
+    return existingLines.slice(-maxLines).join('\n');
+  }
+
+  existingLines.push(cleanNew);
+  return existingLines.slice(-maxLines).join('\n');
 }
 
 // ===================== ✅ FUZZY MATCH (stock) =====================
