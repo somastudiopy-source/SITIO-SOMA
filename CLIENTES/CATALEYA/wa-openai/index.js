@@ -241,31 +241,34 @@ function titleCaseName(value) {
 }
 
 function cleanNameCandidate(value) {
-  let txt = String(value || '')
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (/[!?@#$%^&*_+=<>\[\]{}\/|~`",;:.0-9]/.test(raw)) return '';
+
+  const txt = raw
     .replace(/[^\p{L}\p{M}' -]/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   if (!txt) return '';
 
-  const rawTokens = txt.split(' ').filter(Boolean);
-  const badTokens = new Set([
+  const parts = txt.split(' ').filter(Boolean);
+  if (!parts.length || parts.length > 4) return '';
+
+  const banned = new Set([
     'interesada', 'interesado', 'estimada', 'estimado', 'cliente', 'clienta',
     'servicio', 'servicios', 'producto', 'productos', 'curso', 'cursos', 'turno', 'turnos',
     'grupo', 'cata', 'cataleya', 'nuevo', 'nueva', 'salon', 'belleza',
-    'hola', 'buen', 'bueno', 'dia', 'días', 'dias', 'tarde', 'tardes', 'noche', 'noches',
+    'hola', 'buen', 'bueno', 'dia', 'dias', 'tarde', 'tardes', 'noche', 'noches',
     'consulta', 'consulto', 'consultar', 'pregunta', 'pregunto', 'quisiera', 'quiero',
-    'precio', 'info', 'informacion', 'información', 'gracias'
+    'precio', 'info', 'informacion', 'gracias', 'te', 'me', 'mi', 'soy', 'que', 'por', 'para', 'necesito', 'busco'
   ]);
 
-  const cleanedTokens = rawTokens.filter((token) => !badTokens.has(normalize(token)));
-  txt = cleanedTokens.join(' ').trim();
-  if (!txt) return '';
-
-  const parts = txt.split(' ').filter(Boolean);
-  if (parts.length > 4) return '';
+  const normalizedParts = parts.map((p) => normalize(p));
+  if (normalizedParts.some((p) => banned.has(p))) return '';
+  if (parts.some((p) => p.length < 2)) return '';
 
   const t = normalize(txt);
-  if (/(alisado|tintura|corte|unas|uñas|depil|pestan|pestañ|ceja|curso|mueble|shampoo|matizador|nutricion|nutrición|bano de crema|baño de crema|camilla|silla|mesa|barber|consult|precio|gracias|hola|buen dia|buen día|necesito|busco|quisiera)/i.test(t)) {
+  if (/(alisado|tintura|corte|unas|uñas|depil|pestan|pestañ|ceja|curso|mueble|shampoo|matizador|nutricion|nutrición|bano de crema|baño de crema|camilla|silla|mesa|barber|consult|precio|gracias|hola|buen dia|buen día|necesito|busco|quisiera|ampolla)/i.test(t)) {
     return '';
   }
 
@@ -278,7 +281,7 @@ function isLikelyGenericContactName(value) {
   if (!cleaned) return true;
   if (cleaned.length < 3) return true;
   if (/^(cliente|clienta|nuevo cliente|nueva clienta|sin nombre|sin apellido|nombre pendiente)$/i.test(t)) return true;
-  if (/(interesad|estimad|servicio|producto|curso|turno|alisado|depilacion|depilación|mechita|mechas|tintura|corte|cliente salon|cliente salon de belleza|consult|pregunt|hola|buen dia|buen día|gracias|quisiera|quiero)/i.test(t)) return true;
+  if (/(interesad|estimad|servicio|producto|curso|turno|alisado|depilacion|depilación|mechita|mechas|tintura|corte|cliente salon|cliente salon de belleza|consult|pregunt|hola|buen dia|buen día|gracias|quisiera|quiero|ampolla)/i.test(t)) return true;
   return false;
 }
 
@@ -291,6 +294,15 @@ function splitNameParts(value) {
     lastName: parts.slice(1).join(' '),
     fullName: full,
   };
+}
+
+function isStrongProfileNameCandidate(value) {
+  const full = cleanNameCandidate(value);
+  if (!full) return false;
+  const parts = full.split(' ').filter(Boolean);
+  if (parts.length < 2 || parts.length > 3) return false;
+  if (parts.some((p) => p.length < 2)) return false;
+  return true;
 }
 
 function chooseBestContactName({ existingName = '', existingLastName = '', explicitName = '', profileName = '' } = {}) {
@@ -310,12 +322,11 @@ function chooseBestContactName({ existingName = '', existingLastName = '', expli
     return { ...explicit, source: 'chat_explicit' };
   }
 
-  // Del perfil solo usamos nombres razonables de 1 a 3 palabras.
-  if (profile.fullName && !isLikelyGenericContactName(profile.fullName) && profile.fullName.split(' ').length <= 3) {
+  if (isStrongProfileNameCandidate(profileName)) {
     return { ...profile, source: 'whatsapp_profile' };
   }
 
-  return { firstName: current.firstName || explicit.firstName || '', lastName: current.lastName || explicit.lastName || '', fullName: current.fullName || explicit.fullName || '', source: '' };
+  return { firstName: explicit.firstName || '', lastName: explicit.lastName || '', fullName: explicit.fullName || '', source: explicit.fullName ? 'chat_explicit' : '' };
 }
 
 function hubspotDateValue(dateInput) {
@@ -457,18 +468,20 @@ function chooseBestHubSpotMatch(results, phoneRaw) {
   return scored.find((x) => x.exact)?.row || rows[0] || null;
 }
 
-function buildHubSpotContactProperties(ctx, existingContact, { isClient = false } = {}) {
+async function buildHubSpotContactProperties(ctx, existingContact, { isClient = false } = {}) {
   const existing = existingContact?.properties || {};
-  const combinedText = [ctx.interest, ctx.lastUserText].filter(Boolean).join(' | ');
+  const conversationSnippet = getConversationSnippetForClose(ctx?.waId || '');
+  const combinedText = [conversationSnippet, ctx.interest, ctx.lastUserText].filter(Boolean).join(' | ');
   const categoriasFound = pickCategorias({ intentType: ctx.intentType || 'OTHER', text: combinedText });
   const productosFound = pickProductosList(combinedText);
-  const observacionLine = buildMiniObservacion({ text: combinedText, productos: productosFound, categorias: categoriasFound });
+  const aiAnalysis = await analyzeCloseSummaryWithOpenAI({ ctx, conversationSnippet, productos: productosFound, categorias: categoriasFound });
+  const observacionLine = aiAnalysis?.observacion || buildMiniObservacion({ text: combinedText, productos: productosFound, categorias: categoriasFound });
   const observacion = mergeObservationHistory(existing?.[HUBSPOT_PROPERTY.observacion] || '', observacionLine);
 
   const chosenName = chooseBestContactName({
     existingName: existing?.[HUBSPOT_PROPERTY.firstname] || '',
     existingLastName: existing?.[HUBSPOT_PROPERTY.lastname] || '',
-    explicitName: ctx.explicitName || '',
+    explicitName: aiAnalysis?.explicitName || ctx.explicitName || '',
     profileName: ctx.profileName || ctx.name || '',
   });
 
@@ -478,6 +491,8 @@ function buildHubSpotContactProperties(ctx, existingContact, { isClient = false 
 
   const mergedCategoria = mergeHubSpotMulti(existing?.[HUBSPOT_PROPERTY.categoria] || '', categoriasFound);
   const mergedProducto = mergeSlashText(existing?.[HUBSPOT_PROPERTY.producto] || '', productosFound, 8);
+  const existingFullName = [existing?.[HUBSPOT_PROPERTY.firstname], existing?.[HUBSPOT_PROPERTY.lastname]].filter(Boolean).join(' ').trim();
+  const existingIsGeneric = isLikelyGenericContactName(existingFullName);
 
   const properties = {
     [HUBSPOT_PROPERTY.phone]: normalizedPhone || rawPhone || existing?.[HUBSPOT_PROPERTY.phone] || '',
@@ -493,14 +508,14 @@ function buildHubSpotContactProperties(ctx, existingContact, { isClient = false 
     [HUBSPOT_PROPERTY.whatsappProfileName]: cleanNameCandidate(ctx.profileName || ctx.name || '') || existing?.[HUBSPOT_PROPERTY.whatsappProfileName] || '',
   };
 
-  if (chosenName.firstName && (chosenName.source === 'chat_explicit' || chosenName.source === 'whatsapp_profile' || isLikelyGenericContactName([existing?.[HUBSPOT_PROPERTY.firstname], existing?.[HUBSPOT_PROPERTY.lastname]].filter(Boolean).join(' ')))) {
+  if (chosenName.firstName && (chosenName.source === 'chat_explicit' || chosenName.source === 'whatsapp_profile' || existingIsGeneric)) {
     properties[HUBSPOT_PROPERTY.firstname] = chosenName.firstName;
     if (HUBSPOT_PROPERTY.lastname) {
-      properties[HUBSPOT_PROPERTY.lastname] = chosenName.lastName || existing?.[HUBSPOT_PROPERTY.lastname] || '';
+      properties[HUBSPOT_PROPERTY.lastname] = chosenName.lastName || '';
     }
     properties[HUBSPOT_PROPERTY.nameSource] = chosenName.source || existing?.[HUBSPOT_PROPERTY.nameSource] || '';
     properties[HUBSPOT_PROPERTY.nameUpdatedAt] = hubspotDateTimeValue(now);
-  } else if (isLikelyGenericContactName([existing?.[HUBSPOT_PROPERTY.firstname], existing?.[HUBSPOT_PROPERTY.lastname]].filter(Boolean).join(' ')) && !chosenName.firstName) {
+  } else if (existingIsGeneric && !chosenName.firstName) {
     properties[HUBSPOT_PROPERTY.firstname] = '';
     if (HUBSPOT_PROPERTY.lastname) properties[HUBSPOT_PROPERTY.lastname] = '';
   }
@@ -548,7 +563,7 @@ async function upsertHubSpotContactFromClose(ctx) {
   }
 
   const isClient = await hasAnyAppointmentForHubSpotContact({ waId, phoneRaw });
-  const properties = buildHubSpotContactProperties(ctx, contact, { isClient });
+  const properties = await buildHubSpotContactProperties(ctx, contact, { isClient });
 
   try {
     if (contact?.id) {
@@ -688,6 +703,69 @@ Campos:
 const PRIMARY_MODEL = process.env.PRIMARY_MODEL || "gpt-4.1-mini";
 const COMPLEX_MODEL = process.env.COMPLEX_MODEL || PRIMARY_MODEL;
 const TRANSCRIBE_MODEL = process.env.TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
+
+function getConversationSnippetForClose(waId, maxMessages = 12) {
+  if (!waId) return '';
+  const conv = ensureConv(waId);
+  const rows = Array.isArray(conv?.messages) ? conv.messages.slice(-maxMessages) : [];
+  return rows
+    .map((m) => `${m.role === 'assistant' ? 'Bot' : 'Cliente'}: ${String(m?.content || '').replace(/\s+/g, ' ').trim()}`)
+    .filter(Boolean)
+    .join('\n')
+    .slice(0, 3000);
+}
+
+function safeJsonParseFromText(raw) {
+  const txt = String(raw || '').trim();
+  if (!txt) return null;
+  try { return JSON.parse(txt); } catch {}
+  const match = txt.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try { return JSON.parse(match[0]); } catch { return null; }
+}
+
+async function analyzeCloseSummaryWithOpenAI({ ctx, conversationSnippet = '', productos = [], categorias = [] } = {}) {
+  const fallback = buildMiniObservacion({ text: [ctx?.interest, ctx?.lastUserText, conversationSnippet].filter(Boolean).join(' | '), productos, categorias });
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0.2,
+      messages: [
+        {
+          role: 'system',
+          content: 'Sos un analista de CRM. Devolvés solo JSON válido con dos claves: observacion y nombre_completo. observacion debe ser una conclusión breve en español sobre qué consultó la persona, qué parecía necesitar o para qué lo buscaba. No copies frases textuales del chat salvo nombres de productos. No saludes. No pongas comillas. nombre_completo solo si la persona dijo claramente su nombre y apellido en la charla; si no, devolvé cadena vacía.'
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            fecha: ddmmyyAR(),
+            nombre_perfil_whatsapp: ctx?.profileName || ctx?.name || '',
+            nombre_detectado_previo: ctx?.explicitName || '',
+            ultimo_mensaje_cliente: ctx?.lastUserText || '',
+            interes_detectado: ctx?.interest || '',
+            productos_detectados: productos,
+            categorias_detectadas: categorias,
+            historial_reciente: conversationSnippet || ''
+          })
+        }
+      ]
+    });
+
+    const parsed = safeJsonParseFromText(completion?.choices?.[0]?.message?.content || '');
+    let observacion = String(parsed?.observacion || '').replace(/\s+/g, ' ').trim();
+    let nombreCompleto = cleanNameCandidate(parsed?.nombre_completo || '');
+
+    observacion = observacion.replace(/^\d{2}\/\d{2}\/\d{2}\s*/, '').trim();
+    if (!observacion) observacion = fallback.replace(/^\d{2}\/\d{2}\/\d{2}\s*/, '').trim();
+    observacion = `${ddmmyyAR()} ${observacion}`.slice(0, 220);
+
+    if (nombreCompleto && nombreCompleto.split(' ').length < 2) nombreCompleto = '';
+
+    return { observacion, explicitName: nombreCompleto };
+  } catch (e) {
+    return { observacion: fallback, explicitName: cleanNameCandidate(ctx?.explicitName || '') };
+  }
+}
 
 // ===================== BOT =====================
 const SYSTEM_PROMPT = `
@@ -2482,6 +2560,7 @@ const PRODUCT_KEYWORDS = [
   { label: "Planchas", patterns: [/\bplancha\b/, /\bplanchas\b/] },
   { label: "Secadores", patterns: [/\bsecador\b/, /\bsecadores\b/, /\bsecadora\b/] },
   { label: "Shampoo", patterns: [/\bshampoo\b/, /\bchampu\b/, /\bshampu\b/] },
+  { label: "Ampolla", patterns: [/\bampolla\b/, /\bampollas\b/] },
   { label: "Acondicionador", patterns: [/\bacondicionador\b/] },
   { label: "Sérum", patterns: [/\bserum\b/, /\bsérum\b/] },
   { label: "Ácido", patterns: [/\bacido\b/, /\bácido\b/] },
@@ -2591,7 +2670,7 @@ function pickCategorias({ intentType, text }) {
   }
 
   const serviceProducts = ["Alisado", "Corte", "Uñas", "Pestañas", "Lifting", "Cejas", "Depilación", "Peinado", "Maquillaje", "Limpieza Facial", "Masajes", "Trenzas", "Permanente"];
-  const productProducts = ["Shampoo", "Ácido", "Nutrición", "Tintura", "Matizador", "Decolorante", "Cera", "Aceite máquina"];
+  const productProducts = ["Shampoo", "Ampolla", "Ácido", "Nutrición", "Tintura", "Matizador", "Decolorante", "Cera", "Aceite máquina"];
 
   if (hasServiceSignal || productHits.some((p) => serviceProducts.includes(p))) {
     found.push("SERVICIOS DE BELLEZA💄");
