@@ -541,7 +541,7 @@ const HUBSPOT_PROPERTY = {
 };
 
 const HUBSPOT_OPTION = {
-  clienteSi: "SI",
+  clienteSi: "true",
   empresaCataleya: "CATALEYA Salón de Belleza",
 };
 
