@@ -349,18 +349,49 @@ async function findHubSpotContactByWaId(waId) {
 }
 
 async function findHubSpotContactsByPhone(phoneRaw) {
-  const candidates = buildPhoneCandidates(phoneRaw).slice(0, 12);
+  const candidates = buildPhoneCandidates(phoneRaw).slice(0, 6);
   if (!candidates.length) return [];
 
-  const filterGroups = [];
-  for (const value of candidates) {
-    filterGroups.push({ filters: [{ propertyName: HUBSPOT_PROPERTY.phone, operator: 'EQ', value }] });
-    filterGroups.push({ filters: [{ propertyName: 'mobilephone', operator: 'EQ', value }] });
-    filterGroups.push({ filters: [{ propertyName: HUBSPOT_PROPERTY.whatsappPhoneNormalized, operator: 'EQ', value }] });
-    filterGroups.push({ filters: [{ propertyName: HUBSPOT_PROPERTY.whatsappPhoneRaw, operator: 'EQ', value }] });
+  const propertyNames = [
+    HUBSPOT_PROPERTY.phone,
+    'mobilephone',
+    HUBSPOT_PROPERTY.whatsappPhoneNormalized,
+    HUBSPOT_PROPERTY.whatsappPhoneRaw,
+  ];
+
+  const unique = new Map();
+
+  async function runSearchBatch(groups) {
+    if (!groups.length) return;
+    const results = await searchHubSpotContacts(groups, 20);
+    for (const row of results) {
+      if (row?.id && !unique.has(row.id)) unique.set(row.id, row);
+    }
   }
 
-  return searchHubSpotContacts(filterGroups.slice(0, 20), 20);
+  // 1) Primero probamos con el candidato principal sobre los 4 campos más importantes.
+  const primary = candidates[0];
+  await runSearchBatch(
+    propertyNames.map((propertyName) => ({
+      filters: [{ propertyName, operator: 'EQ', value: primary }],
+    }))
+  );
+  if (unique.size) return Array.from(unique.values());
+
+  // 2) Luego probamos el resto en tandas chicas para respetar el límite de HubSpot.
+  const groups = [];
+  for (const value of candidates.slice(1)) {
+    for (const propertyName of propertyNames) {
+      groups.push({ filters: [{ propertyName, operator: 'EQ', value }] });
+    }
+  }
+
+  for (let i = 0; i < groups.length; i += 4) {
+    await runSearchBatch(groups.slice(i, i + 4));
+    if (unique.size) break;
+  }
+
+  return Array.from(unique.values());
 }
 
 function chooseBestHubSpotMatch(results, phoneRaw) {
@@ -693,8 +724,8 @@ function updateLastCloseContext(waId, patch = {}) {
   return next;
 }
 
-const INACTIVITY_MS = 10 * 60 * 1000; // 10 minutos (mensaje de cierre)
-const CLOSE_LOG_MS = 10 * 60 * 1000;  // 10 minutos más (si no responde, se registra)
+const INACTIVITY_MS = Number(process.env.INACTIVITY_FOLLOWUP_MS || 2 * 60 * 1000); // 2 minutos por defecto (mensaje de cierre)
+const CLOSE_LOG_MS = Number(process.env.CLOSE_LOG_MS || 1 * 60 * 1000);  // 1 minuto más por defecto (si no responde, se registra)
 
 async function logConversationClose(waId) {
   const ctx = lastCloseContext.get(waId);
