@@ -232,7 +232,6 @@ function buildPhoneCandidates(raw) {
 function titleCaseName(value) {
   const txt = String(value || '').replace(/\s+/g, ' ').trim();
   if (!txt) return '';
-  if (/[a-záéíóúñ]/.test(txt)) return txt;
   return txt
     .toLowerCase()
     .split(' ')
@@ -241,41 +240,81 @@ function titleCaseName(value) {
     .join(' ');
 }
 
+function cleanNameCandidate(value) {
+  let txt = String(value || '')
+    .replace(/[^\p{L}\p{M}' -]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!txt) return '';
+
+  const rawTokens = txt.split(' ').filter(Boolean);
+  const badTokens = new Set([
+    'interesada', 'interesado', 'estimada', 'estimado', 'cliente', 'clienta',
+    'servicio', 'servicios', 'producto', 'productos', 'curso', 'cursos', 'turno', 'turnos',
+    'grupo', 'cata', 'cataleya', 'nuevo', 'nueva', 'salon', 'belleza'
+  ]);
+
+  const cleanedTokens = rawTokens.filter((token) => !badTokens.has(normalize(token)));
+  txt = cleanedTokens.join(' ').trim();
+  if (!txt) return '';
+
+  // Si quedó muy largo, casi seguro no es un nombre real.
+  const parts = txt.split(' ').filter(Boolean);
+  if (parts.length > 4) return '';
+
+  // Si contiene términos de servicios/productos, descartamos.
+  const t = normalize(txt);
+  if (/(alisado|tintura|corte|unas|uñas|depil|pestan|pestañ|ceja|curso|mueble|shampoo|matizador|nutricion|nutrición|bano de crema|baño de crema|camilla|silla|mesa|barber)/i.test(t)) {
+    return '';
+  }
+
+  return titleCaseName(txt);
+}
+
 function isLikelyGenericContactName(value) {
+  const cleaned = cleanNameCandidate(value);
   const t = normalize(value || '');
-  if (!t) return true;
-  if (t.length < 3) return true;
+  if (!cleaned) return true;
+  if (cleaned.length < 3) return true;
   if (/^(cliente|clienta|nuevo cliente|nueva clienta|sin nombre|sin apellido|nombre pendiente)$/i.test(t)) return true;
-  if (/(interesad|interesada|estimad|servicio|producto|curso|turno|alisado|depilacion|depilación|mechita|mechas|tintura|corte|cliente salon|cliente salon de belleza)/i.test(t)) return true;
+  if (/(interesad|estimad|servicio|producto|curso|turno|alisado|depilacion|depilación|mechita|mechas|tintura|corte|cliente salon|cliente salon de belleza)/i.test(t)) return true;
   return false;
 }
 
-function chooseBestContactName({ existingName = '', explicitName = '', profileName = '' } = {}) {
-  const current = titleCaseName(existingName);
-  const explicit = titleCaseName(explicitName);
-  const profile = titleCaseName(profileName);
+function splitNameParts(value) {
+  const full = cleanNameCandidate(value);
+  if (!full) return { firstName: '', lastName: '', fullName: '' };
+  const parts = full.split(' ').filter(Boolean);
+  return {
+    firstName: parts[0] || '',
+    lastName: parts.slice(1).join(' '),
+    fullName: full,
+  };
+}
 
-  if (explicit && !isLikelyGenericContactName(explicit) && explicit.split(' ').length >= 2) {
-    return { value: explicit, source: 'chat_explicit' };
+function chooseBestContactName({ existingName = '', existingLastName = '', explicitName = '', profileName = '' } = {}) {
+  const current = splitNameParts([existingName, existingLastName].filter(Boolean).join(' ').trim());
+  const explicit = splitNameParts(explicitName);
+  const profile = splitNameParts(profileName);
+
+  if (explicit.fullName && !isLikelyGenericContactName(explicit.fullName) && explicit.fullName.split(' ').length >= 2) {
+    return { ...explicit, source: 'chat_explicit' };
   }
 
-  if (current && !isLikelyGenericContactName(current)) {
-    return { value: current, source: 'existing' };
+  if (current.fullName && !isLikelyGenericContactName(current.fullName)) {
+    return { ...current, source: 'existing' };
   }
 
-  if (explicit && !isLikelyGenericContactName(explicit)) {
-    return { value: explicit, source: 'chat_explicit' };
+  if (explicit.fullName && !isLikelyGenericContactName(explicit.fullName)) {
+    return { ...explicit, source: 'chat_explicit' };
   }
 
-  if (profile && !isLikelyGenericContactName(profile)) {
-    return { value: profile, source: 'whatsapp_profile' };
+  // Del perfil solo usamos nombres razonables de 1 a 3 palabras.
+  if (profile.fullName && !isLikelyGenericContactName(profile.fullName) && profile.fullName.split(' ').length <= 3) {
+    return { ...profile, source: 'whatsapp_profile' };
   }
 
-  if (current && !isLikelyGenericContactName(current)) {
-    return { value: current, source: 'existing' };
-  }
-
-  return { value: current || explicit || profile || '', source: '' };
+  return { firstName: current.firstName || explicit.firstName || '', lastName: current.lastName || explicit.lastName || '', fullName: current.fullName || explicit.fullName || '', source: '' };
 }
 
 function hubspotDateValue(dateInput) {
@@ -312,6 +351,7 @@ async function searchHubSpotContacts(filterGroups = [], limit = 10) {
     limit,
     properties: [
       HUBSPOT_PROPERTY.firstname,
+      HUBSPOT_PROPERTY.lastname,
       HUBSPOT_PROPERTY.phone,
       HUBSPOT_PROPERTY.observacion,
       HUBSPOT_PROPERTY.producto,
@@ -418,14 +458,14 @@ function chooseBestHubSpotMatch(results, phoneRaw) {
 
 function buildHubSpotContactProperties(ctx, existingContact, { isClient = false } = {}) {
   const existing = existingContact?.properties || {};
-  const categoria = pickCategoria({ intentType: ctx.intentType || 'OTHER', text: ctx.lastUserText || '' });
-  const productos = pickProductos(ctx.interest || ctx.lastUserText || '');
-  const resumenBase = String(ctx.interest || ctx.lastUserText || '(sin detalle)').trim();
-  const resumenCorto = resumenBase.length > 500 ? resumenBase.slice(0, 500) : resumenBase;
-  const observacion = `${new Date().toLocaleDateString('es-AR', { timeZone: TIMEZONE })} ${resumenCorto}`.trim();
+  const combinedText = [ctx.interest, ctx.lastUserText].filter(Boolean).join(' | ');
+  const categoriasFound = pickCategorias({ intentType: ctx.intentType || 'OTHER', text: combinedText });
+  const productosFound = pickProductosList(combinedText);
+  const observacion = buildMiniObservacion({ text: combinedText, productos: productosFound, categorias: categoriasFound });
 
   const chosenName = chooseBestContactName({
     existingName: existing?.[HUBSPOT_PROPERTY.firstname] || '',
+    existingLastName: existing?.[HUBSPOT_PROPERTY.lastname] || '',
     explicitName: ctx.explicitName || '',
     profileName: ctx.profileName || ctx.name || '',
   });
@@ -434,22 +474,28 @@ function buildHubSpotContactProperties(ctx, existingContact, { isClient = false 
   const rawPhone = String(ctx.phoneRaw || ctx.phone || '').trim();
   const now = new Date();
 
+  const mergedCategoria = mergeHubSpotMulti(existing?.[HUBSPOT_PROPERTY.categoria] || '', categoriasFound);
+  const mergedProducto = mergeSlashText(existing?.[HUBSPOT_PROPERTY.producto] || '', productosFound, 8);
+
   const properties = {
     [HUBSPOT_PROPERTY.phone]: normalizedPhone || rawPhone || existing?.[HUBSPOT_PROPERTY.phone] || '',
     [HUBSPOT_PROPERTY.observacion]: observacion,
-    [HUBSPOT_PROPERTY.producto]: productos || existing?.[HUBSPOT_PROPERTY.producto] || '',
-    [HUBSPOT_PROPERTY.categoria]: categoria || existing?.[HUBSPOT_PROPERTY.categoria] || '',
+    [HUBSPOT_PROPERTY.producto]: mergedProducto || existing?.[HUBSPOT_PROPERTY.producto] || '',
+    [HUBSPOT_PROPERTY.categoria]: mergedCategoria || existing?.[HUBSPOT_PROPERTY.categoria] || '',
     [HUBSPOT_PROPERTY.ultimoContacto]: hubspotDateValue(now),
     [HUBSPOT_PROPERTY.empresa]: existing?.[HUBSPOT_PROPERTY.empresa] || HUBSPOT_OPTION.empresaCataleya,
     [HUBSPOT_PROPERTY.whatsappContact]: 'true',
     [HUBSPOT_PROPERTY.whatsappWaId]: ctx.waId || existing?.[HUBSPOT_PROPERTY.whatsappWaId] || '',
     [HUBSPOT_PROPERTY.whatsappPhoneRaw]: rawPhone || existing?.[HUBSPOT_PROPERTY.whatsappPhoneRaw] || '',
     [HUBSPOT_PROPERTY.whatsappPhoneNormalized]: normalizedPhone || existing?.[HUBSPOT_PROPERTY.whatsappPhoneNormalized] || '',
-    [HUBSPOT_PROPERTY.whatsappProfileName]: titleCaseName(ctx.profileName || ctx.name || '') || existing?.[HUBSPOT_PROPERTY.whatsappProfileName] || '',
+    [HUBSPOT_PROPERTY.whatsappProfileName]: cleanNameCandidate(ctx.profileName || ctx.name || '') || existing?.[HUBSPOT_PROPERTY.whatsappProfileName] || '',
   };
 
-  if (chosenName.value && (chosenName.source === 'chat_explicit' || chosenName.source === 'whatsapp_profile' || isLikelyGenericContactName(existing?.[HUBSPOT_PROPERTY.firstname] || ''))) {
-    properties[HUBSPOT_PROPERTY.firstname] = chosenName.value;
+  if (chosenName.firstName && (chosenName.source === 'chat_explicit' || chosenName.source === 'whatsapp_profile' || isLikelyGenericContactName([existing?.[HUBSPOT_PROPERTY.firstname], existing?.[HUBSPOT_PROPERTY.lastname]].filter(Boolean).join(' ')))) {
+    properties[HUBSPOT_PROPERTY.firstname] = chosenName.firstName;
+    if (HUBSPOT_PROPERTY.lastname) {
+      properties[HUBSPOT_PROPERTY.lastname] = chosenName.lastName || existing?.[HUBSPOT_PROPERTY.lastname] || '';
+    }
     properties[HUBSPOT_PROPERTY.nameSource] = chosenName.source || existing?.[HUBSPOT_PROPERTY.nameSource] || '';
     properties[HUBSPOT_PROPERTY.nameUpdatedAt] = hubspotDateTimeValue(now);
   }
@@ -554,6 +600,7 @@ const ENABLE_APPOINTMENT_TEMPLATES = String(process.env.ENABLE_APPOINTMENT_TEMPL
 
 const HUBSPOT_PROPERTY = {
   firstname: "firstname",
+  lastname: "lastname",
   phone: "phone",
   observacion: "observacion",
   producto: "producto",
@@ -2413,59 +2460,182 @@ const CATEGORIAS_OK = [
   "MÁQUINAS⚙️",
 ];
 
-const PRODUCTOS_OK = [
-  "Silla Hidráulica", "Camillas", "Puff", "Espejos / Muebles", "Mesas", "Planchas", "Secadores",
-  "Shampoo ácido", "Nutrición", "Tintura", "Baño de crema", "Matizador",
-  "Ojos", "Peinado", "Limpieza Facial", "Lifting", "Pestañas", "Cejas", "Pies", "Uñas", "Cera",
-  "Alisado", "Corte", "Tintura", "Maquillaje",
-  "Aceite maquina", "Tijeras", "Trenzas", "Depilación", "Masajes", "Permanente",
-  "Mesa", "Manicura", "Barber"
+const PRODUCT_KEYWORDS = [
+  { label: "Baño de crema", patterns: [/bano de crema/, /baño de crema/] },
+  { label: "Limpieza Facial", patterns: [/limpieza facial/] },
+  { label: "Mesa Manicura", patterns: [/mesa manicura/] },
+  { label: "Silla Hidráulica", patterns: [/silla hidraulica/, /silla hidráulica/] },
+  { label: "Aceite máquina", patterns: [/aceite maquina/, /aceite máquina/] },
+  { label: "Curso Barbería", patterns: [/curso barber/, /curso barberia/, /curso barbería/] },
+  { label: "Curso Peluquería", patterns: [/curso peluqueria/, /curso peluquería/] },
+  { label: "Curso Niños", patterns: [/curso ninos/, /curso niños/] },
+  { label: "Espejos", patterns: [/\bespejo\b/, /\bespejos\b/] },
+  { label: "Camillas", patterns: [/\bcamilla\b/, /\bcamillas\b/] },
+  { label: "Mesas", patterns: [/\bmesa\b/, /\bmesas\b/] },
+  { label: "Respaldo", patterns: [/respaldo/] },
+  { label: "Puff", patterns: [/\bpuff\b/] },
+  { label: "Planchas", patterns: [/\bplancha\b/, /\bplanchas\b/] },
+  { label: "Secadores", patterns: [/\bsecador\b/, /\bsecadores\b/, /\bsecadora\b/] },
+  { label: "Shampoo", patterns: [/\bshampoo\b/, /\bchampu\b/, /\bshampu\b/] },
+  { label: "Ácido", patterns: [/\bacido\b/, /\bácido\b/] },
+  { label: "Nutrición", patterns: [/nutricion/, /nutrición/] },
+  { label: "Tintura", patterns: [/\btintura\b/] },
+  { label: "Matizador", patterns: [/matizador/] },
+  { label: "Decolorante", patterns: [/decolorante/] },
+  { label: "Cera", patterns: [/\bcera\b/] },
+  { label: "Alisado", patterns: [/\balisado\b/] },
+  { label: "Corte", patterns: [/\bcorte\b/] },
+  { label: "Uñas", patterns: [/\bunas\b/, /\buñas\b/, /manicura/] },
+  { label: "Pestañas", patterns: [/pestan/, /pestañ/] },
+  { label: "Lifting", patterns: [/lifting/] },
+  { label: "Cejas", patterns: [/\bcejas\b/, /\bceja\b/] },
+  { label: "Depilación", patterns: [/depil/] },
+  { label: "Peinado", patterns: [/peinad/] },
+  { label: "Maquillaje", patterns: [/maquill/] },
+  { label: "Masajes", patterns: [/masaj/] },
+  { label: "Trenzas", patterns: [/trenza/] },
+  { label: "Permanente", patterns: [/permanente/] },
+  { label: "Tijeras", patterns: [/tijera/] },
+  { label: "Barbería", patterns: [/barber/, /\bbarba\b/] },
+  { label: "Cursos", patterns: [/\bcurso\b/, /\bcursos\b/, /\btaller\b/, /\btalleres\b/] },
+  { label: "Muebles", patterns: [/\bmueble\b/, /\bmuebles\b/] },
 ];
 
+function mergeHubSpotMulti(existingValue, newValues = []) {
+  const list = [];
+  const pushMany = (raw, splitter) => {
+    String(raw || '')
+      .split(splitter)
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .forEach((x) => { if (!list.includes(x)) list.push(x); });
+  };
+  pushMany(existingValue, ';');
+  (Array.isArray(newValues) ? newValues : []).forEach((x) => {
+    const v = String(x || '').trim();
+    if (v && !list.includes(v)) list.push(v);
+  });
+  return list.join('; ');
+}
+
+function mergeSlashText(existingValue, newValues = [], maxItems = 6) {
+  const list = [];
+  const pushMany = (raw) => {
+    String(raw || '')
+      .split(/[\/\n;,]+/)
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .forEach((x) => { if (!list.includes(x)) list.push(x); });
+  };
+  pushMany(existingValue);
+  (Array.isArray(newValues) ? newValues : []).forEach((x) => {
+    const v = String(x || '').trim();
+    if (v && !list.includes(v)) list.push(v);
+  });
+  return list.slice(0, maxItems).join(' / ');
+}
+
+function detectProductKeywords(text) {
+  const t = canonicalizeQuery(text);
+  const hits = [];
+  for (const item of PRODUCT_KEYWORDS) {
+    if (item.patterns.some((rx) => rx.test(t))) hits.push(item.label);
+  }
+  return Array.from(new Set(hits));
+}
+
+function pickCategorias({ intentType, text }) {
+  const t = canonicalizeQuery(text);
+  const found = [];
+
+  const hasServiceSignal =
+    intentType === "SERVICE" ||
+    /\bturno\b|\bservicio\b|\bagenda\b|\bcita\b|\bhacerme\b|\bpara hacerme\b|\bme quiero hacer\b|\bme gustaria hacerme\b/.test(t);
+
+  const hasProductSignal =
+    intentType === "PRODUCT" ||
+    /\bproducto\b|\binsumo\b|\binsumos\b|\btenes\b|\btenés\b|\bvenden\b|\bcomprar\b|\bstock\b|\bprecio\b/.test(t);
+
+  const hasCourseSignal =
+    intentType === "COURSE" || /\bcurso\b|\bcursos\b|\btaller\b|\btalleres\b/.test(t);
+
+  const productHits = detectProductKeywords(t);
+
+  if (hasCourseSignal || productHits.some((p) => String(p).startsWith('Curso')) || productHits.includes('Cursos')) {
+    found.push("CURSOS📝");
+  }
+
+  if (
+    /\bcamilla\b|\bcamillas\b|\bespejo\b|\bespejos\b|\brespaldo\b|\bmueble\b|\bmuebles\b|\bmesa\b|\bmesas\b|\bpuff\b|\bsilla\b/.test(t)
+  ) {
+    found.push("MUEBLES🪑");
+  }
+
+  if (
+    /\bmaquina\b|\bmáquina\b|\bmaquinas\b|\bmáquinas\b|\bplancha\b|\bplanchas\b|\bsecador\b|\bsecadores\b/.test(t)
+  ) {
+    found.push("MÁQUINAS⚙️");
+  }
+
+  if (
+    /\bbarber\b|\bbarberia\b|\bbarbería\b|\bbarba\b|\btijera\b|\baceite maquina\b|\baceite máquina\b/.test(t)
+  ) {
+    found.push("BARBER💈");
+  }
+
+  const serviceProducts = ["Alisado", "Corte", "Uñas", "Pestañas", "Lifting", "Cejas", "Depilación", "Peinado", "Maquillaje", "Limpieza Facial", "Masajes", "Trenzas", "Permanente"];
+  const productProducts = ["Shampoo", "Ácido", "Nutrición", "Tintura", "Matizador", "Decolorante", "Cera", "Aceite máquina"];
+
+  if (hasServiceSignal || productHits.some((p) => serviceProducts.includes(p))) {
+    found.push("SERVICIOS DE BELLEZA💄");
+  }
+
+  if (hasProductSignal || productHits.some((p) => productProducts.includes(p))) {
+    found.push("INSUMOS🧴");
+  }
+
+  // Ambiguos como "tintura" o "nutrición" sin pista: respetar intención.
+  if (!found.length) {
+    if (intentType === "SERVICE") found.push("SERVICIOS DE BELLEZA💄");
+    if (intentType === "PRODUCT") found.push("INSUMOS🧴");
+    if (intentType === "COURSE") found.push("CURSOS📝");
+  }
+
+  return Array.from(new Set(found)).filter((x) => CATEGORIAS_OK.includes(x));
+}
+
 function pickCategoria({ intentType, text }) {
-  const t = normalize(text);
+  return pickCategorias({ intentType, text })[0] || "";
+}
 
-  if (intentType === "COURSE" || t.includes("curso") || t.includes("taller")) return "CURSOS📝";
-
-  if (intentType === "SERVICE" || t.includes("turno") || t.includes("servicio") ||
-      t.includes("limpieza facial") || t.includes("lifting") || t.includes("pesta") || t.includes("ceja") ||
-      t.includes("uñas") || t.includes("unas") || t.includes("depil") || t.includes("masaje") ||
-      t.includes("alisado") || t.includes("peinado") || t.includes("maquill")) {
-    return "SERVICIOS DE BELLEZA💄";
-  }
-
-  if (t.includes("barber") || t.includes("barbero") || t.includes("maquina de cortar") ||
-      t.includes("máquina de cortar") || t.includes("tijera") || t.includes("aceite maquina") ||
-      t.includes("aceite máquina") || t.includes("insumo para maquina") || t.includes("insumo para máquina")) {
-    return "BARBER💈";
-  }
-
-  if (t.includes("camilla") || t.includes("espejo") || t.includes("respaldo") || t.includes("maquillador") ||
-      t.includes("mueble") || t.includes("mesa") || t.includes("puff") || t.includes("silla")) {
-    return "MUEBLES🪑";
-  }
-
-  if (t.includes("maquina") || t.includes("máquina") || t.includes("herramienta") ||
-      t.includes("plancha") || t.includes("secador")) {
-    return "MÁQUINAS⚙️";
-  }
-
-  if (intentType === "PRODUCT" || t.includes("shampoo") || t.includes("baño de crema") || t.includes("baño de crema") ||
-      t.includes("matizador") || t.includes("tintura") || t.includes("nutricion") || t.includes("nutrición")) {
-    return "INSUMOS🧴";
-  }
-
-  return "";
+function pickProductosList(text) {
+  return detectProductKeywords(text).slice(0, 6);
 }
 
 function pickProductos(text) {
-  const t = normalize(text);
-  const hits = [];
-  for (const p of PRODUCTOS_OK) {
-    const k = normalize(p);
-    if (k && t.includes(k)) hits.push(p);
-  }
-  return Array.from(new Set(hits)).slice(0, 6).join(" / ");
+  return pickProductosList(text).join(" / ");
+}
+
+function buildMiniObservacion({ text = '', productos = [], categorias = [] } = {}) {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  const t = normalize(raw);
+
+  let accion = '';
+  if (/\bprecio\b|\bcuanto\b|\bcuánto\b|\bvale\b|\bcuesta\b|\bsale\b/.test(t)) accion = 'Consultó precio';
+  else if (/\bturno\b|\bcita\b|\bagenda\b/.test(t)) accion = 'Consultó por turno';
+  else if (/\btenes\b|\btenés\b|\bhay\b|\bstock\b|\bdisponible\b/.test(t)) accion = 'Consultó disponibilidad';
+  else if (/\bcurso\b|\bcursos\b|\btaller\b/.test(t)) accion = 'Consultó información';
+  else accion = 'Consultó';
+
+  const foco = productos.length ? productos.join(' / ') : (categorias[0] || '');
+  if (foco) return `${accion} por ${foco}`.slice(0, 180);
+
+  const clean = raw
+    .replace(/^(hola+|buenas+|buen dia|buen día|buenas tardes|buenas noches)[,!\s]*/i, '')
+    .replace(/^(quiero saber|quisiera saber|queria saber|quería saber|consulto por|consultaba por)\s+/i, '')
+    .trim();
+
+  return (clean ? `Consultó: ${clean}` : 'Consultó información').slice(0, 180);
 }
 
 // ===================== ✅ FUZZY MATCH (stock) =====================
