@@ -1094,7 +1094,6 @@ async function getAppointmentRowById(appointmentId) {
             to_char(appointment_time, 'HH24:MI') AS appointment_time,
             status,
             stylist_notified_at,
-            reminder_client_2h_at,
             reminder_client_24h_at,
             reminder_stylist_24h_at,
             reminder_stylist_2h_at
@@ -1116,7 +1115,6 @@ async function processAppointmentTemplateNotifications() {
             to_char(appointment_time, 'HH24:MI') AS appointment_time,
             status,
             stylist_notified_at,
-            reminder_client_2h_at,
             reminder_client_24h_at,
             reminder_stylist_24h_at,
             reminder_stylist_2h_at
@@ -1143,14 +1141,14 @@ async function processAppointmentTemplateNotifications() {
       }
 
       const clientRecipient = normalizeWhatsAppRecipient(appt.contact_phone || appt.wa_phone || '');
-      if (!appt.reminder_client_2h_at && clientRecipient && msUntil <= (2 * 60 * 60 * 1000)) {
+      if (!appt.reminder_client_24h_at && clientRecipient && msUntil <= (24 * 60 * 60 * 1000)) {
         await sendAppointmentTemplateAndLog({
           appointmentId: appt.id,
           recipientPhone: clientRecipient,
           templateName: TEMPLATE_RECORDATORIO_CLIENTE,
-          notificationType: 'client_reminder_2h',
+          notificationType: 'client_reminder_24h',
           vars: buildAppointmentTemplateVarsForClient(appt),
-          markField: 'reminder_client_2h_at',
+          markField: 'reminder_client_24h_at',
         });
       }
 
@@ -3881,7 +3879,6 @@ function buildAppointmentData(row = {}) {
     appointment_time: formatAppointmentTimeForTemplate(row.appointment_time || ''),
     status: String(row.status || '').trim(),
     stylist_notified_at: row.stylist_notified_at || null,
-    reminder_client_2h_at: row.reminder_client_2h_at || null,
     reminder_client_24h_at: row.reminder_client_24h_at || null,
     reminder_stylist_24h_at: row.reminder_stylist_24h_at || null,
     reminder_stylist_2h_at: row.reminder_stylist_2h_at || null,
@@ -3935,7 +3932,6 @@ async function insertAppointmentNotificationLog({ appointmentId, notificationTyp
 async function markAppointmentNotificationField(appointmentId, fieldName) {
   const allowed = new Set([
     'stylist_notified_at',
-    'reminder_client_2h_at',
     'reminder_client_24h_at',
     'reminder_stylist_24h_at',
     'reminder_stylist_2h_at',
