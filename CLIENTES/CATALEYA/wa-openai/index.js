@@ -300,7 +300,7 @@ function isStrongProfileNameCandidate(value) {
   const full = cleanNameCandidate(value);
   if (!full) return false;
   const parts = full.split(' ').filter(Boolean);
-  if (parts.length < 2 || parts.length > 3) return false;
+  if (!parts.length || parts.length > 4) return false;
   if (parts.some((p) => p.length < 2)) return false;
   return true;
 }
@@ -310,7 +310,7 @@ function chooseBestContactName({ existingName = '', existingLastName = '', expli
   const explicit = splitNameParts(explicitName);
   const profile = splitNameParts(profileName);
 
-  if (explicit.fullName && !isLikelyGenericContactName(explicit.fullName) && explicit.fullName.split(' ').length >= 2) {
+  if (explicit.fullName && !isLikelyGenericContactName(explicit.fullName)) {
     return { ...explicit, source: 'chat_explicit' };
   }
 
@@ -318,15 +318,11 @@ function chooseBestContactName({ existingName = '', existingLastName = '', expli
     return { ...current, source: 'existing' };
   }
 
-  if (explicit.fullName && !isLikelyGenericContactName(explicit.fullName)) {
-    return { ...explicit, source: 'chat_explicit' };
-  }
-
-  if (isStrongProfileNameCandidate(profileName)) {
+  if (isStrongProfileNameCandidate(profileName) && !isLikelyGenericContactName(profile.fullName)) {
     return { ...profile, source: 'whatsapp_profile' };
   }
 
-  return { firstName: explicit.firstName || '', lastName: explicit.lastName || '', fullName: explicit.fullName || '', source: explicit.fullName ? 'chat_explicit' : '' };
+  return { firstName: '', lastName: '', fullName: '', source: '' };
 }
 
 function hubspotDateValue(dateInput) {
@@ -515,9 +511,6 @@ async function buildHubSpotContactProperties(ctx, existingContact, { isClient = 
     }
     properties[HUBSPOT_PROPERTY.nameSource] = chosenName.source || existing?.[HUBSPOT_PROPERTY.nameSource] || '';
     properties[HUBSPOT_PROPERTY.nameUpdatedAt] = hubspotDateTimeValue(now);
-  } else if (existingIsGeneric && !chosenName.firstName) {
-    properties[HUBSPOT_PROPERTY.firstname] = '';
-    if (HUBSPOT_PROPERTY.lastname) properties[HUBSPOT_PROPERTY.lastname] = '';
   }
 
   if (!existing?.[HUBSPOT_PROPERTY.fechaIngresoBase]) {
@@ -733,7 +726,7 @@ async function analyzeCloseSummaryWithOpenAI({ ctx, conversationSnippet = '', pr
       messages: [
         {
           role: 'system',
-          content: 'Sos un analista de CRM. Devolvés solo JSON válido con dos claves: observacion y nombre_completo. observacion debe ser una conclusión breve en español sobre qué consultó la persona, qué parecía necesitar o para qué lo buscaba. No copies frases textuales del chat salvo nombres de productos. No saludes. No pongas comillas. nombre_completo solo si la persona dijo claramente su nombre y apellido en la charla; si no, devolvé cadena vacía.'
+          content: 'Sos un analista de CRM. Devolvés solo JSON válido con dos claves: observacion y nombre_completo. observacion debe ser una conclusión breve y natural en español sobre qué consultó la persona, qué parecía necesitar o para qué lo buscaba. No copies textual el chat. No pongas preguntas. No saludes. No pongas comillas. Puede mencionar productos concretos si corresponde. nombre_completo solo si la persona dijo claramente su nombre o si el nombre de perfil de WhatsApp parece un nombre real; si no, devolvé cadena vacía.'
         },
         {
           role: 'user',
@@ -757,9 +750,7 @@ async function analyzeCloseSummaryWithOpenAI({ ctx, conversationSnippet = '', pr
 
     observacion = observacion.replace(/^\d{2}\/\d{2}\/\d{2}\s*/, '').trim();
     if (!observacion) observacion = fallback.replace(/^\d{2}\/\d{2}\/\d{2}\s*/, '').trim();
-    observacion = `${ddmmyyAR()} ${observacion}`.slice(0, 220);
-
-    if (nombreCompleto && nombreCompleto.split(' ').length < 2) nombreCompleto = '';
+    observacion = `${ddmmyyAR()} ${sentenceCase(observacion)}`.slice(0, 220);
 
     return { observacion, explicitName: nombreCompleto };
   } catch (e) {
@@ -2718,6 +2709,12 @@ function fallbackTopicFromText(raw) {
   return clean ? clean.slice(0, 70) : '';
 }
 
+function sentenceCase(value) {
+  const txt = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!txt) return '';
+  return txt.charAt(0).toUpperCase() + txt.slice(1);
+}
+
 function extractObservationNote(rawText) {
   const t = normalize(rawText || '');
   const notes = [];
@@ -2737,7 +2734,8 @@ function buildMiniObservacion({ text = '', productos = [], categorias = [] } = {
   const raw = String(text || '').replace(/\s+/g, ' ').trim();
   const foco = productos.length ? productos.join(' / ') : fallbackTopicFromText(raw) || (categorias[0] || 'su consulta');
   const note = extractObservationNote(raw);
-  const line = `${ddmmyyAR()} Consulta sobre ${foco}${note ? `, ${note}` : ''}`;
+  const cuerpo = sentenceCase(`Consulta sobre ${foco}${note ? `. ${note}` : ''}`.trim());
+  const line = `${ddmmyyAR()} ${cuerpo}`;
   return line.slice(0, 220);
 }
 
