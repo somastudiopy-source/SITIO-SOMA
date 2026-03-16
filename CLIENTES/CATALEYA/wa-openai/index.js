@@ -325,6 +325,24 @@ function chooseBestContactName({ existingName = '', existingLastName = '', expli
   return { firstName: '', lastName: '', fullName: '', source: '' };
 }
 
+
+function extractExplicitNameFromSnippet(snippet = '') {
+  const raw = String(snippet || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return '';
+  const patterns = [
+    /(?:me llamo|mi nombre es|soy|habla)\s+([A-Za-zÁÉÍÓÚÑáéíóúñ' ]{2,60})/i,
+    /(?:soy)\s+([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñ']{1,30})(?:\s+([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñ']{1,30}))?/,
+  ];
+  for (const rx of patterns) {
+    const m = raw.match(rx);
+    if (!m) continue;
+    const cand = [m[1], m[2]].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    const cleaned = cleanNameCandidate(cand);
+    if (cleaned) return cleaned;
+  }
+  return '';
+}
+
 function hubspotDateValue(dateInput) {
   const d = dateInput instanceof Date ? dateInput : new Date(dateInput || Date.now());
   if (Number.isNaN(d.getTime())) return '';
@@ -467,17 +485,22 @@ function chooseBestHubSpotMatch(results, phoneRaw) {
 async function buildHubSpotContactProperties(ctx, existingContact, { isClient = false } = {}) {
   const existing = existingContact?.properties || {};
   const conversationSnippet = getConversationSnippetForClose(ctx?.waId || '');
-  const combinedText = [conversationSnippet, ctx.interest, ctx.lastUserText].filter(Boolean).join(' | ');
+  const focusText = [ctx.interest, ctx.lastUserText].filter(Boolean).join(' | ');
+  const combinedText = [conversationSnippet, focusText].filter(Boolean).join(' | ');
   const categoriasFound = pickCategorias({ intentType: ctx.intentType || 'OTHER', text: combinedText });
-  const productosFound = pickProductosList(combinedText);
+  const primaryProduct = pickPrimaryProducto(focusText || conversationSnippet || '');
+  const productosFound = primaryProduct ? [primaryProduct] : [];
   const aiAnalysis = await analyzeCloseSummaryWithOpenAI({ ctx, conversationSnippet, productos: productosFound, categorias: categoriasFound });
-  const observacionLine = aiAnalysis?.observacion || buildMiniObservacion({ text: combinedText, productos: productosFound, categorias: categoriasFound });
+  const finalPrimaryProduct = cleanProductLabel(aiAnalysis?.productoPrincipal || '') || primaryProduct;
+  const finalProductos = finalPrimaryProduct ? [finalPrimaryProduct] : [];
+  const observacionLine = aiAnalysis?.observacion || buildMiniObservacion({ text: combinedText, productos: finalProductos, categorias: categoriasFound });
   const observacion = mergeObservationHistory(existing?.[HUBSPOT_PROPERTY.observacion] || '', observacionLine);
 
+  const explicitFromSnippet = extractExplicitNameFromSnippet(conversationSnippet);
   const chosenName = chooseBestContactName({
     existingName: existing?.[HUBSPOT_PROPERTY.firstname] || '',
     existingLastName: existing?.[HUBSPOT_PROPERTY.lastname] || '',
-    explicitName: aiAnalysis?.explicitName || ctx.explicitName || '',
+    explicitName: aiAnalysis?.explicitName || ctx.explicitName || explicitFromSnippet || '',
     profileName: ctx.profileName || ctx.name || '',
   });
 
@@ -486,7 +509,7 @@ async function buildHubSpotContactProperties(ctx, existingContact, { isClient = 
   const now = new Date();
 
   const mergedCategoria = mergeHubSpotMulti(existing?.[HUBSPOT_PROPERTY.categoria] || '', categoriasFound);
-  const mergedProducto = mergeSlashText(existing?.[HUBSPOT_PROPERTY.producto] || '', productosFound, 8);
+  const mergedProducto = mergeSlashText(existing?.[HUBSPOT_PROPERTY.producto] || '', finalProductos, 8);
   const existingFullName = [existing?.[HUBSPOT_PROPERTY.firstname], existing?.[HUBSPOT_PROPERTY.lastname]].filter(Boolean).join(' ').trim();
   const existingIsGeneric = isLikelyGenericContactName(existingFullName);
 
@@ -507,7 +530,7 @@ async function buildHubSpotContactProperties(ctx, existingContact, { isClient = 
   if (chosenName.firstName && (chosenName.source === 'chat_explicit' || chosenName.source === 'whatsapp_profile' || existingIsGeneric)) {
     properties[HUBSPOT_PROPERTY.firstname] = chosenName.firstName;
     if (HUBSPOT_PROPERTY.lastname) {
-      properties[HUBSPOT_PROPERTY.lastname] = chosenName.lastName || '';
+      properties[HUBSPOT_PROPERTY.lastname] = chosenName.lastName || existing?.[HUBSPOT_PROPERTY.lastname] || '';
     }
     properties[HUBSPOT_PROPERTY.nameSource] = chosenName.source || existing?.[HUBSPOT_PROPERTY.nameSource] || '';
     properties[HUBSPOT_PROPERTY.nameUpdatedAt] = hubspotDateTimeValue(now);
@@ -718,7 +741,9 @@ function safeJsonParseFromText(raw) {
 }
 
 async function analyzeCloseSummaryWithOpenAI({ ctx, conversationSnippet = '', productos = [], categorias = [] } = {}) {
-  const fallback = buildMiniObservacion({ text: [ctx?.interest, ctx?.lastUserText, conversationSnippet].filter(Boolean).join(' | '), productos, categorias });
+  const latestFocusText = [ctx?.interest, ctx?.lastUserText].filter(Boolean).join(' | ');
+  const fallback = buildMiniObservacion({ text: [latestFocusText, conversationSnippet].filter(Boolean).join(' | '), productos, categorias });
+  const fallbackProduct = pickPrimaryProducto(latestFocusText || conversationSnippet || '');
   try {
     const completion = await openai.chat.completions.create({
       model: PRIMARY_MODEL,
@@ -726,7 +751,7 @@ async function analyzeCloseSummaryWithOpenAI({ ctx, conversationSnippet = '', pr
       messages: [
         {
           role: 'system',
-          content: 'Sos un analista de CRM. Devolvés solo JSON válido con dos claves: observacion y nombre_completo. observacion debe ser una conclusión breve y natural en español sobre qué consultó la persona, qué parecía necesitar o para qué lo buscaba. No copies textual el chat. No pongas preguntas. No saludes. No pongas comillas. Puede mencionar productos concretos si corresponde. nombre_completo solo si la persona dijo claramente su nombre o si el nombre de perfil de WhatsApp parece un nombre real; si no, devolvé cadena vacía.'
+          content: 'Sos un analista de CRM. Devolvés solo JSON válido con tres claves: observacion, nombre_completo y producto_principal. observacion debe ser una conclusión muy breve, natural y concreta en español sobre qué consultó la persona. Máximo 12 palabras, sin copiar textual el chat, sin preguntas, sin saludo y sin comillas. nombre_completo solo si la persona dijo claramente su nombre o si el nombre de perfil de WhatsApp parece un nombre real; si no, devolvé cadena vacía. producto_principal debe contener solo un producto o tema puntual realmente consultado, nunca una lista.'
         },
         {
           role: 'user',
@@ -747,14 +772,21 @@ async function analyzeCloseSummaryWithOpenAI({ ctx, conversationSnippet = '', pr
     const parsed = safeJsonParseFromText(completion?.choices?.[0]?.message?.content || '');
     let observacion = String(parsed?.observacion || '').replace(/\s+/g, ' ').trim();
     let nombreCompleto = cleanNameCandidate(parsed?.nombre_completo || '');
+    let productoPrincipal = cleanProductLabel(parsed?.producto_principal || '');
 
     observacion = observacion.replace(/^\d{2}\/\d{2}\/\d{2}\s*/, '').trim();
     if (!observacion) observacion = fallback.replace(/^\d{2}\/\d{2}\/\d{2}\s*/, '').trim();
-    observacion = `${ddmmyyAR()} ${sentenceCase(observacion)}`.slice(0, 220);
+    observacion = `${ddmmyyAR()} ${sentenceCase(observacion)}`.slice(0, 120);
 
-    return { observacion, explicitName: nombreCompleto };
+    if (!productoPrincipal) productoPrincipal = fallbackProduct;
+
+    return { observacion, explicitName: nombreCompleto, productoPrincipal };
   } catch (e) {
-    return { observacion: fallback, explicitName: cleanNameCandidate(ctx?.explicitName || '') };
+    return {
+      observacion: fallback,
+      explicitName: cleanNameCandidate(ctx?.explicitName || '') || extractExplicitNameFromSnippet(conversationSnippet),
+      productoPrincipal: fallbackProduct,
+    };
   }
 }
 
@@ -2693,6 +2725,22 @@ function pickProductos(text) {
   return pickProductosList(text).join(" / ");
 }
 
+function cleanProductLabel(value) {
+  const txt = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!txt) return '';
+  const direct = PRODUCT_KEYWORDS.find((item) => normalize(item.label) === normalize(txt));
+  if (direct) return direct.label;
+  const detected = detectProductKeywords(txt);
+  return detected[0] || '';
+}
+
+function pickPrimaryProducto(text) {
+  const source = String(text || '').trim();
+  if (!source) return '';
+  const hits = detectProductKeywords(source);
+  return hits[0] || '';
+}
+
 function ddmmyyAR() {
   const d = new Date();
   return d.toLocaleDateString("es-AR", { timeZone: TIMEZONE, year: '2-digit', month: '2-digit', day: '2-digit' });
@@ -2736,7 +2784,7 @@ function buildMiniObservacion({ text = '', productos = [], categorias = [] } = {
   const note = extractObservationNote(raw);
   const cuerpo = sentenceCase(`Consulta sobre ${foco}${note ? `. ${note}` : ''}`.trim());
   const line = `${ddmmyyAR()} ${cuerpo}`;
-  return line.slice(0, 220);
+  return line.slice(0, 120);
 }
 
 function mergeObservationHistory(existingValue, newLine, maxLines = 8) {
