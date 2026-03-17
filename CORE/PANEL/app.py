@@ -827,11 +827,11 @@ def api_chat(request: Request, wa_peer: str, limit: int = 50, before_id: Optiona
     con = db_connect(u.get("db_path", ""))
     ensure_tables(con)
 
- query = """
-  SELECT id, direction, wa_peer, name, text, msg_type, ts_utc::text AS ts_utc, raw_json
-  FROM messages
-  WHERE client_id = %s AND wa_peer = %s
-"""
+    query = """
+      SELECT id, direction, wa_peer, name, text, msg_type, ts_utc::text AS ts_utc, raw_json
+      FROM messages
+      WHERE client_id = %s AND wa_peer = %s
+    """
     params: List[Any] = [client_id, wa_peer]
 
     if before_id is not None:
@@ -865,19 +865,19 @@ def api_chat(request: Request, wa_peer: str, limit: int = 50, before_id: Optiona
                 if filename:
                     media_url = f"/media-file?file={safe_basename(filename)}"
 
-          msgs.append({
-    "id": int(r["id"]),
-    "direction": r["direction"],
-    "wa_peer": r["wa_peer"],
-    "name": r["name"] or "",
-    "msg_type": r["msg_type"] or "text",
-    "text": r["text"] or "",
-    "ts_utc": r.get("ts_utc"),
-    "media_url": media_url,
-    "media_kind": media_kind,
-    "content_type": content_type,
-    "raw_json": raw
-})
+            msgs.append({
+                "id": int(r["id"]),
+                "direction": r["direction"],
+                "wa_peer": r["wa_peer"],
+                "name": r["name"] or "",
+                "msg_type": r["msg_type"] or "text",
+                "text": r["text"] or "",
+                "ts_utc": r.get("ts_utc"),
+                "media_url": media_url,
+                "media_kind": media_kind,
+                "content_type": content_type,
+                "raw_json": raw,
+            })
 
         has_more = False
         if rows:
@@ -1227,4 +1227,3 @@ async def verify_webhook(request: Request):
         return PlainTextResponse(challenge or "", status_code=200)
 
     return PlainTextResponse("Forbidden", status_code=403)
-
