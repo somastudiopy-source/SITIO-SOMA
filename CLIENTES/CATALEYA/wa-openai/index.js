@@ -877,13 +877,30 @@ function updateLastCloseContext(waId, patch = {}) {
   return next;
 }
 
-const INACTIVITY_MS = Number(process.env.INACTIVITY_FOLLOWUP_MS || 2 * 60 * 1000); // 2 minutos por defecto (mensaje de cierre)
-const CLOSE_LOG_MS = Number(process.env.CLOSE_LOG_MS || 1 * 60 * 1000);  // 1 minuto más por defecto (si no responde, se registra)
+const INACTIVITY_MS = Number(process.env.INACTIVITY_FOLLOWUP_MS || 10 * 60 * 1000); // 10 minutos por defecto (mensaje de cierre)
+const CLOSE_LOG_MS = Number(process.env.CLOSE_LOG_MS || 10 * 60 * 1000);  // 10 minutos más por defecto (si no responde, se registra)
 
 async function logConversationClose(waId) {
   const ctx = lastCloseContext.get(waId);
   if (!ctx?.phone && !ctx?.phoneRaw && !ctx?.waId) return;
   await upsertHubSpotContactFromClose(ctx);
+}
+
+async function shouldSuppressInactivityFollowUp(waId) {
+  if (!waId) return false;
+
+  const ctx = lastCloseContext.get(waId) || {};
+  if (ctx.suppressInactivityPrompt) return true;
+
+  try {
+    const draft = await getAppointmentDraft(waId);
+    if (draft) return true;
+  } catch (e) {
+    console.error("Error verificando borrador de turno para inactividad:", e?.response?.data || e?.message || e);
+  }
+
+  if (lastAssistantLooksLikeTurnoMessage(waId)) return true;
+  return false;
 }
 
 function scheduleInactivityFollowUp(waId, phone) {
@@ -895,17 +912,25 @@ function scheduleInactivityFollowUp(waId, phone) {
 
   const timer = setTimeout(async () => {
     try {
+      const suppress = await shouldSuppressInactivityFollowUp(waId);
+      if (suppress) {
+        return;
+      }
+
       await sendWhatsAppText(
         phone,
         "¿Quiere que le ayudemos en algo más o damos por finalizada la consulta?"
       );
     } catch (e) {
       console.error("Error enviando mensaje por inactividad:", e?.response?.data || e?.message || e);
+      return;
     }
 
     // Si NO respondió luego del mensaje de cierre, registramos el seguimiento
     const timer2 = setTimeout(async () => {
       try {
+        const suppress = await shouldSuppressInactivityFollowUp(waId);
+        if (suppress) return;
         await logConversationClose(waId);
       } catch (e) {
         console.error("Error guardando seguimiento por cierre:", e?.response?.data || e?.message || e);
@@ -1603,6 +1628,7 @@ async function getAppointmentRowById(appointmentId) {
             status,
             stylist_notified_at,
             reminder_client_2h_at,
+            reminder_client_24h_at,
             reminder_stylist_24h_at,
             reminder_stylist_2h_at
        FROM appointments
@@ -1624,6 +1650,7 @@ async function processAppointmentTemplateNotifications() {
             status,
             stylist_notified_at,
             reminder_client_2h_at,
+            reminder_client_24h_at,
             reminder_stylist_24h_at,
             reminder_stylist_2h_at
        FROM appointments
@@ -1717,6 +1744,7 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
       console.error('❌ Error notificando nuevo turno pendiente a la peluquera:', e?.response?.data || e?.message || e);
     }
     await deleteAppointmentDraft(waId);
+        updateLastCloseContext(waId, { suppressInactivityPrompt: false });
     return { type: "pending_stylist_confirmation" };
   }
 
@@ -1774,6 +1802,7 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
   }
 
   await deleteAppointmentDraft(waId);
+        updateLastCloseContext(waId, { suppressInactivityPrompt: false });
   return { type: "booked", eventId: ev?.eventId || null };
 }
 
@@ -4615,6 +4644,7 @@ function buildAppointmentData(row = {}) {
     status: String(row.status || '').trim(),
     stylist_notified_at: row.stylist_notified_at || null,
     reminder_client_2h_at: row.reminder_client_2h_at || null,
+    reminder_client_24h_at: row.reminder_client_24h_at || null,
     reminder_stylist_24h_at: row.reminder_stylist_24h_at || null,
     reminder_stylist_2h_at: row.reminder_stylist_2h_at || null,
   };
@@ -4668,6 +4698,7 @@ async function markAppointmentNotificationField(appointmentId, fieldName) {
   const allowed = new Set([
     'stylist_notified_at',
     'reminder_client_2h_at',
+    'reminder_client_24h_at',
     'reminder_stylist_24h_at',
     'reminder_stylist_2h_at',
   ]);
@@ -5135,7 +5166,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     const phoneRaw = msg.from;
-    const phone = phoneRaw?.startsWith("549") ? "54" + phoneRaw.slice(3) : phoneRaw;
+    const phone = String(contact?.wa_id || phoneRaw || '').replace(/[^\d]/g, '');
     const waId = contact?.wa_id || phoneRaw;
     const name = contact?.profile?.name || "";
 
@@ -5173,6 +5204,7 @@ lastCloseContext.set(waId, {
   lastUserText: text,
   intentType: "OTHER",
   interest: null,
+  suppressInactivityPrompt: false,
 });
 
     // ✅ Guardar mensaje ENTRANTE (IN) para que el panel lo vea
@@ -5430,6 +5462,7 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
     async function askForContactData(base) {
       const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_contact', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
+      updateLastCloseContext(waId, { suppressInactivityPrompt: true });
       const msgContacto = `Perfecto 😊
 
 Para dejar el turno listo necesito estos datos 😊
@@ -5444,6 +5477,7 @@ Para dejar el turno listo necesito estos datos 😊
     async function askForName(base) {
       const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_name', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
+      updateLastCloseContext(waId, { suppressInactivityPrompt: true });
       const msgSoloNombre = `Perfecto 
 
 Ahora necesito este dato 😊
@@ -5457,6 +5491,7 @@ Ahora necesito este dato 😊
     async function askForPhone(base) {
       const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_phone', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
+      updateLastCloseContext(waId, { suppressInactivityPrompt: true });
       const msgTelefono = `Perfecto 
 
 Ahora necesito este dato 😊
@@ -5469,6 +5504,7 @@ Ahora necesito este dato 😊
 
     async function askForPayment(base) {
       await saveAppointmentDraft(waId, phone, { ...base, awaiting_contact: false, flow_step: 'awaiting_payment', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' });
+      updateLastCloseContext(waId, { suppressInactivityPrompt: true });
       const diaOk = base.fecha ? weekdayEsFromYMD(base.fecha) : '';
       const fechaTxt = base.fecha ? ymdToDMY(base.fecha) : '';
       const lines = [
@@ -5576,6 +5612,7 @@ Lo estoy validando con los datos del turno. En cuanto quede confirmado, le aviso
 
 Lo estoy validando con los datos del turno. En cuanto quede confirmado, le aviso por aquí.`;
           await saveAppointmentDraft(waId, phone, { ...base, awaiting_contact: false, flow_step: 'payment_review', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' });
+          updateLastCloseContext(waId, { suppressInactivityPrompt: true });
           pushHistory(waId, 'assistant', msgRev);
           await sendWhatsAppText(phone, msgRev);
           scheduleInactivityFollowUp(waId, phone);
@@ -5678,6 +5715,7 @@ Seña recibida ✔`.trim();
         merged.last_intent = 'book_appointment';
         merged.last_service_name = merged.servicio || merged.last_service_name || '';
         await saveAppointmentDraft(waId, phone, merged);
+        updateLastCloseContext(waId, { suppressInactivityPrompt: true });
         await askForMissingTurnoData(merged);
         return;
       }
@@ -5743,6 +5781,7 @@ Seña recibida ✔`.trim();
           mergedWithPayment.last_intent = 'book_appointment';
           mergedWithPayment.last_service_name = mergedWithPayment.servicio || mergedWithPayment.last_service_name || '';
           await saveAppointmentDraft(waId, phone, mergedWithPayment);
+        updateLastCloseContext(waId, { suppressInactivityPrompt: true });
           await askForMissingTurnoData(mergedWithPayment);
           return;
         }
@@ -5769,6 +5808,7 @@ Seña recibida ✔`.trim();
           last_service_name: pendingDraft?.servicio || pendingDraft?.last_service_name || lastKnownService?.nombre || rawTrim,
         };
         await saveAppointmentDraft(waId, phone, repairedDraft);
+        updateLastCloseContext(waId, { suppressInactivityPrompt: true });
         await askForMissingTurnoData(repairedDraft);
         return;
       }
@@ -5781,7 +5821,7 @@ Seña recibida ✔`.trim();
 Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
       pushHistory(waId, "assistant", msgCierreTurno);
       await sendWhatsAppText(phone, msgCierreTurno);
-      scheduleInactivityFollowUp(waId, phone);
+      updateLastCloseContext(waId, { suppressInactivityPrompt: true });
       return;
     }
 
