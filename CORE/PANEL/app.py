@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 # WhatsApp Cloud API (Meta) - standard library HTTP
 import urllib.request
 import urllib.error
+import urllib.parse
 
 # PostgreSQL
 import psycopg2
@@ -40,6 +41,12 @@ DATABASE_URL = (
 WA_GRAPH_VERSION = os.getenv("WA_GRAPH_VERSION", "v19.0")
 WA_TOKEN_DEFAULT = os.getenv("WA_TOKEN", "")
 WA_PHONE_NUMBER_ID_DEFAULT = os.getenv("WA_PHONE_NUMBER_ID", "")
+
+META_APP_ID = os.getenv("META_APP_ID", "").strip()
+WA_EMBEDDED_SIGNUP_CONFIG_ID = os.getenv("WA_EMBEDDED_SIGNUP_CONFIG_ID", "").strip()
+WA_EMBEDDED_SIGNUP_URL = os.getenv("WA_EMBEDDED_SIGNUP_URL", "").strip()
+WA_EMBEDDED_MODE = os.getenv("WA_EMBEDDED_MODE", "hosted").strip().lower() or "hosted"
+WA_EMBEDDED_FEATURE = os.getenv("WA_EMBEDDED_FEATURE", "coexistence").strip() or "coexistence"
 
 app = FastAPI()
 
@@ -160,9 +167,231 @@ def get_panel_client_id(u: Dict[str, Any]) -> str:
 
 
 # ---------------- WhatsApp (Meta Cloud API) ----------------
+def find_user_by_client_id(client_id: str) -> Optional[Dict[str, Any]]:
+    target = (client_id or "").strip()
+    if not target:
+        return None
+    for u in load_users():
+        if get_panel_client_id(u) == target:
+            return u
+    return None
+
+
+def fetch_connected_phone_number_id(client_id: str) -> str:
+    cid = (client_id or "").strip()
+    if not cid or not DATABASE_URL:
+        return ""
+
+    con = None
+    try:
+        con = db_connect("")
+        ensure_tables(con)
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                SELECT phone_number_id
+                FROM wa_panel_connections
+                WHERE client_id = %s
+                ORDER BY updated_utc DESC NULLS LAST, connected_utc DESC NULLS LAST
+                LIMIT 1
+                """,
+                (cid,),
+            )
+            row = fetchone_dict(cur)
+            return str((row or {}).get("phone_number_id") or "").strip()
+    except Exception:
+        return ""
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+
+def find_user_by_phone_number_id(phone_number_id: str) -> Optional[Dict[str, Any]]:
+    target = str(phone_number_id or "").strip()
+    if not target:
+        return None
+
+    for user in load_users():
+        if str(user.get("phone_number_id", "")).strip() == target:
+            return user
+
+    if DATABASE_URL:
+        con = None
+        try:
+            con = db_connect("")
+            ensure_tables(con)
+            with con.cursor() as cur:
+                cur.execute(
+                    "SELECT client_id FROM wa_panel_connections WHERE phone_number_id = %s LIMIT 1",
+                    (target,),
+                )
+                row = fetchone_dict(cur)
+            if row and row.get("client_id"):
+                return find_user_by_client_id(row["client_id"])
+        except Exception:
+            return None
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+    return None
+
+
+def deep_get(data: Any, *paths: str) -> Any:
+    for path in paths:
+        current = data
+        ok = True
+        for part in path.split("."):
+            if isinstance(current, dict) and part in current:
+                current = current.get(part)
+            else:
+                ok = False
+                break
+        if ok and current not in (None, "", []):
+            return current
+    return None
+
+
+def normalize_wa_connection_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    raw = payload or {}
+    phone_number_id = deep_get(
+        raw,
+        "phone_number_id",
+        "metadata.phone_number_id",
+        "phone_number.id",
+        "phone_number.phone_number_id",
+        "setup_info.phone_number_id",
+        "data.phone_number_id",
+    )
+    display_phone_number = deep_get(
+        raw,
+        "display_phone_number",
+        "phone_number.display_phone_number",
+        "phone_number.number",
+        "phone.display_phone_number",
+        "data.display_phone_number",
+    )
+    waba_id = deep_get(
+        raw,
+        "waba_id",
+        "whatsapp_business_account.id",
+        "waba.id",
+        "data.waba_id",
+    )
+    business_id = deep_get(
+        raw,
+        "business_id",
+        "business.id",
+        "business_account.id",
+        "data.business_id",
+    )
+    connection_name = deep_get(raw, "business_name", "business.name", "name", "data.business_name")
+    event_name = deep_get(raw, "event", "status", "change", "type") or "unknown"
+
+    return {
+        "phone_number_id": str(phone_number_id or "").strip(),
+        "display_phone_number": str(display_phone_number or "").strip(),
+        "waba_id": str(waba_id or "").strip(),
+        "business_id": str(business_id or "").strip(),
+        "connection_name": str(connection_name or "").strip(),
+        "event_name": str(event_name or "unknown").strip(),
+    }
+
+
+def build_wa_embedded_launch_url(u: Dict[str, Any]) -> str:
+    base = WA_EMBEDDED_SIGNUP_URL.strip()
+    if not base:
+        return ""
+
+    state_payload = {
+        "email": u.get("email", ""),
+        "client_id": get_panel_client_id(u),
+        "ts": now_iso(),
+    }
+    state_json = json.dumps(state_payload, separators=(",", ":"), ensure_ascii=False)
+    signed = sign(state_json)
+    state_token = base64.urlsafe_b64encode(f"{state_json}|{signed}".encode("utf-8")).decode("utf-8")
+
+    sep = "&" if "?" in base else "?"
+    return f"{base}{sep}state={urllib.parse.quote(state_token)}"
+
+
+def log_wa_connection_event(con, client_id: str, user_email: str, event_name: str, payload: Dict[str, Any]):
+    with con.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO wa_panel_events (client_id, user_email, event_name, payload, created_utc)
+            VALUES (%s, %s, %s, %s::jsonb, %s)
+            """,
+            (client_id, user_email, event_name, json.dumps(payload or {}), now_iso()),
+        )
+
+
+def upsert_wa_connection_record(
+    con,
+    *,
+    client_id: str,
+    user_email: str,
+    status: str,
+    flow_mode: str,
+    normalized: Dict[str, Any],
+    raw_payload: Dict[str, Any],
+):
+    connected_utc = now_iso() if status == "connected" else None
+    with con.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO wa_panel_connections (
+              client_id, user_email, status, flow_mode, connection_name, meta_business_id,
+              waba_id, phone_number_id, display_phone_number, last_event, connected_utc, updated_utc, raw_json
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            ON CONFLICT (client_id)
+            DO UPDATE SET
+              user_email = EXCLUDED.user_email,
+              status = EXCLUDED.status,
+              flow_mode = EXCLUDED.flow_mode,
+              connection_name = COALESCE(NULLIF(EXCLUDED.connection_name, ''), wa_panel_connections.connection_name),
+              meta_business_id = COALESCE(NULLIF(EXCLUDED.meta_business_id, ''), wa_panel_connections.meta_business_id),
+              waba_id = COALESCE(NULLIF(EXCLUDED.waba_id, ''), wa_panel_connections.waba_id),
+              phone_number_id = COALESCE(NULLIF(EXCLUDED.phone_number_id, ''), wa_panel_connections.phone_number_id),
+              display_phone_number = COALESCE(NULLIF(EXCLUDED.display_phone_number, ''), wa_panel_connections.display_phone_number),
+              last_event = EXCLUDED.last_event,
+              connected_utc = COALESCE(EXCLUDED.connected_utc, wa_panel_connections.connected_utc),
+              updated_utc = EXCLUDED.updated_utc,
+              raw_json = EXCLUDED.raw_json
+            """,
+            (
+                client_id,
+                user_email,
+                status,
+                flow_mode,
+                normalized.get("connection_name", ""),
+                normalized.get("business_id", ""),
+                normalized.get("waba_id", ""),
+                normalized.get("phone_number_id", ""),
+                normalized.get("display_phone_number", ""),
+                normalized.get("event_name", "unknown"),
+                connected_utc,
+                now_iso(),
+                json.dumps(raw_payload or {}),
+            ),
+        )
+
+
 def get_whatsapp_config_for_user(u: Dict[str, Any]) -> Dict[str, str]:
     token = (u.get("wa_token") or WA_TOKEN_DEFAULT or "").strip()
     phone_number_id = (u.get("phone_number_id") or WA_PHONE_NUMBER_ID_DEFAULT or "").strip()
+
+    if not phone_number_id:
+        phone_number_id = fetch_connected_phone_number_id(get_panel_client_id(u))
+
     return {"wa_token": token, "phone_number_id": phone_number_id}
 
 
@@ -405,6 +634,33 @@ def ensure_tables(con):
           PRIMARY KEY (user_email, client_id, wa_peer)
         )
         """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS wa_panel_connections (
+          client_id TEXT PRIMARY KEY,
+          user_email TEXT,
+          status TEXT,
+          flow_mode TEXT,
+          connection_name TEXT,
+          meta_business_id TEXT,
+          waba_id TEXT,
+          phone_number_id TEXT,
+          display_phone_number TEXT,
+          last_event TEXT,
+          connected_utc TIMESTAMPTZ,
+          updated_utc TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          raw_json JSONB
+        )
+        """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS wa_panel_events (
+          id SERIAL PRIMARY KEY,
+          client_id TEXT,
+          user_email TEXT,
+          event_name TEXT,
+          payload JSONB,
+          created_utc TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """)
     con.commit()
 
 
@@ -621,6 +877,9 @@ def dashboard(request: Request):
           <img class="gcal-icon" src="/panel-static/google-calendar.png" alt="Google Calendar" />
           Calendario
         </button>
+        <button class="link-pill whatsapp-pill" id="openWaConnectBtn" type="button">
+          💬 Conectar WhatsApp
+        </button>
         <a class="link-pill" href="/logout">Salir</a>
       </div>
     </div>
@@ -725,6 +984,49 @@ def dashboard(request: Request):
     </div>
   </div>
 
+  <div class="modal" id="waConnectModal" aria-hidden="true">
+    <div class="modal-card glass wa-modal-card">
+      <div class="modal-head">
+        <div class="modal-title">💬 WhatsApp Business Platform</div>
+        <div class="modal-actions">
+          <button class="ghost-btn" id="waRefreshBtn" type="button">Actualizar</button>
+          <button class="icon-btn" id="waConnectCloseBtn" type="button" aria-label="Cerrar">✕</button>
+        </div>
+      </div>
+
+      <div class="wa-connect-body">
+        <div class="wa-connect-grid">
+          <section class="wa-connect-main">
+            <div class="wa-status-pill" id="waStatusPill">Sin revisar</div>
+            <div class="wa-status-text" id="waStatusText">Abrí esta opción para revisar el estado de conexión del WhatsApp Business del cliente.</div>
+
+            <div class="wa-connect-actions">
+              <button class="send-btn" id="waLaunchBtn" type="button">Iniciar conexión oficial</button>
+            </div>
+
+            <div class="tiny wa-connect-note">
+              El QR o el paso de vinculación no lo genera este panel: lo muestra Meta dentro del flujo oficial de coexistencia.
+            </div>
+          </section>
+
+          <aside class="wa-connect-side glass">
+            <div class="wa-kv"><span>Modo</span><strong id="waModeValue">—</strong></div>
+            <div class="wa-kv"><span>Función</span><strong id="waFeatureValue">—</strong></div>
+            <div class="wa-kv"><span>WABA ID</span><strong id="waWabaValue">—</strong></div>
+            <div class="wa-kv"><span>Phone Number ID</span><strong id="waPhoneIdValue">—</strong></div>
+            <div class="wa-kv"><span>Número</span><strong id="waDisplayNumberValue">—</strong></div>
+            <div class="wa-kv"><span>Último evento</span><strong id="waLastEventValue">—</strong></div>
+          </aside>
+        </div>
+
+        <section class="wa-events glass">
+          <div class="label">Últimos eventos</div>
+          <div id="waEvents" class="wa-events-list">Todavía no hay eventos registrados.</div>
+        </section>
+      </div>
+    </div>
+  </div>
+
   <script src="/panel-static/panel.js"></script>
 </body>
 </html>
@@ -747,6 +1049,120 @@ def api_me(request: Request):
         "calendar_id": cal.get("calendar_id", ""),
         "calendar_tz": cal.get("calendar_tz", "America/Argentina/Buenos_Aires"),
     }
+
+
+@app.get("/api/wa/connect-status")
+def api_wa_connect_status(request: Request):
+    u = require_user(request)
+    client_id = get_panel_client_id(u)
+
+    con = db_connect(u.get("db_path", ""))
+    ensure_tables(con)
+
+    connection = None
+    events = []
+    with con.cursor() as cur:
+        cur.execute(
+            """
+            SELECT client_id, user_email, status, flow_mode, connection_name, meta_business_id,
+                   waba_id, phone_number_id, display_phone_number, last_event,
+                   connected_utc::text AS connected_utc, updated_utc::text AS updated_utc, raw_json
+            FROM wa_panel_connections
+            WHERE client_id = %s
+            LIMIT 1
+            """,
+            (client_id,),
+        )
+        connection = fetchone_dict(cur)
+
+        cur.execute(
+            """
+            SELECT event_name, created_utc::text AS created_utc, payload
+            FROM wa_panel_events
+            WHERE client_id = %s
+            ORDER BY id DESC
+            LIMIT 8
+            """,
+            (client_id,),
+        )
+        events = fetchall_dicts(cur)
+
+    con.close()
+
+    launch_url = build_wa_embedded_launch_url(u)
+    configured = bool(WA_EMBEDDED_SIGNUP_URL or (META_APP_ID and WA_EMBEDDED_SIGNUP_CONFIG_ID))
+
+    return {
+        "ok": True,
+        "configured": configured,
+        "mode": WA_EMBEDDED_MODE,
+        "feature": WA_EMBEDDED_FEATURE,
+        "launch_url": launch_url,
+        "meta_app_id": META_APP_ID,
+        "config_id": WA_EMBEDDED_SIGNUP_CONFIG_ID,
+        "connection": connection,
+        "events": events,
+    }
+
+
+@app.post("/api/wa/connect-session")
+async def api_wa_connect_session(request: Request):
+    u = require_user(request)
+    client_id = get_panel_client_id(u)
+    body = await request.json()
+
+    raw_payload = body.get("raw") if isinstance(body, dict) else None
+    if not isinstance(raw_payload, dict):
+        raw_payload = body if isinstance(body, dict) else {}
+
+    normalized = normalize_wa_connection_payload(raw_payload)
+    requested_status = str(body.get("status") or "pending").strip() if isinstance(body, dict) else "pending"
+    status = requested_status
+    if normalized.get("phone_number_id") and requested_status in ("pending", "started"):
+        status = "connected"
+
+    con = db_connect(u.get("db_path", ""))
+    ensure_tables(con)
+    log_wa_connection_event(con, client_id, u.get("email", ""), normalized.get("event_name", requested_status), raw_payload)
+    upsert_wa_connection_record(
+        con,
+        client_id=client_id,
+        user_email=u.get("email", ""),
+        status=status,
+        flow_mode=WA_EMBEDDED_MODE,
+        normalized=normalized,
+        raw_payload=raw_payload,
+    )
+    con.commit()
+    con.close()
+
+    return {"ok": True, "status": status, "normalized": normalized}
+
+
+@app.post("/api/delete_conversation")
+async def api_delete_conversation(request: Request):
+    u = require_user(request)
+    client_id = get_panel_client_id(u)
+    email = u.get("email", "")
+
+    body = await request.json()
+    wa_peer = (body.get("wa_peer") or "").strip()
+    if not wa_peer:
+        return JSONResponse({"ok": False, "error": "missing wa_peer"}, status_code=400)
+
+    con = db_connect(u.get("db_path", ""))
+    ensure_tables(con)
+
+    with con.cursor() as cur:
+        cur.execute("DELETE FROM messages WHERE client_id = %s AND wa_peer = %s", (client_id, wa_peer))
+        cur.execute(
+            "DELETE FROM conv_reads WHERE user_email = %s AND client_id = %s AND wa_peer = %s",
+            (email, client_id, wa_peer),
+        )
+    con.commit()
+    con.close()
+
+    return {"ok": True}
 
 
 @app.get("/api/conversations")
@@ -1101,119 +1517,147 @@ async def whatsapp_webhook(request: Request):
     data = await request.json()
 
     try:
-        entry = data.get("entry", [])
-        if not entry:
-            return {"ok": True}
-
-        changes = entry[0].get("changes", [])
-        if not changes:
-            return {"ok": True}
-
-        value = changes[0].get("value", {})
-        messages = value.get("messages", [])
-        if not messages:
-            return {"ok": True}
-
-        msg = messages[0]
-
-        wa_peer = msg.get("from", "")
-        text = msg.get("text", {}).get("body", "")
-        msg_type = msg.get("type", "text")
-        wa_msg_id = msg.get("id")
-        phone_number_id = str(value.get("metadata", {}).get("phone_number_id", "")).strip()
-
-        contacts = value.get("contacts", [])
-        contact_name = ""
-        if contacts:
-            contact_name = contacts[0].get("profile", {}).get("name", "")
-
+        entries = data.get("entry", []) or []
         users = load_users()
-        if not users:
-            return {"ok": False, "error": "NO_USERS"}
 
-        u = None
-        for user in users:
-            if str(user.get("phone_number_id", "")).strip() == phone_number_id:
-                u = user
-                break
+        for entry in entries:
+            for change in entry.get("changes", []) or []:
+                field = change.get("field") or "messages"
+                value = change.get("value", {}) or {}
 
-        if not u:
-            u = users[0]
+                if field in ("account_update", "partner_solutions"):
+                    normalized = normalize_wa_connection_payload(value)
+                    phone_number_id = normalized.get("phone_number_id", "")
 
-        client_id = get_panel_client_id(u)
-        cfg = get_whatsapp_config_for_user(u)
-        token = cfg.get("wa_token", "")
+                    u = find_user_by_phone_number_id(phone_number_id) if phone_number_id else None
+                    if not u and users:
+                        u = users[0]
 
-        raw_to_store = msg
-        media_info = None
+                    if u:
+                        client_id = get_panel_client_id(u)
+                        con = db_connect(u.get("db_path", ""))
+                        ensure_tables(con)
+                        log_wa_connection_event(
+                            con,
+                            client_id,
+                            u.get("email", ""),
+                            normalized.get("event_name", field),
+                            value,
+                        )
+                        status = "connected" if normalized.get("phone_number_id") else "pending"
+                        upsert_wa_connection_record(
+                            con,
+                            client_id=client_id,
+                            user_email=u.get("email", ""),
+                            status=status,
+                            flow_mode=WA_EMBEDDED_MODE,
+                            normalized=normalized,
+                            raw_payload=value,
+                        )
+                        con.commit()
+                        con.close()
+                    continue
 
-        if msg_type in ("image", "document", "audio", "video", "sticker"):
-            media_obj = msg.get(msg_type, {}) or {}
-            media_id = media_obj.get("id")
+                messages = value.get("messages", []) or []
+                if not messages:
+                    continue
 
-            if media_id and token:
-                meta_resp = wa_cloud_api_get_media_meta(token=token, media_id=media_id)
-                if meta_resp.get("ok"):
-                    meta = meta_resp.get("data") or {}
-                    download_url = meta.get("url")
-                    mime = meta.get("mime_type", "application/octet-stream")
+                phone_number_id = str(value.get("metadata", {}).get("phone_number_id", "")).strip()
+                u = find_user_by_phone_number_id(phone_number_id) if phone_number_id else None
+                if not u and users:
+                    u = users[0]
+                if not u:
+                    continue
 
-                    if download_url:
-                        bin_resp = wa_cloud_api_download_media(token=token, download_url=download_url)
-                        if bin_resp.get("ok"):
-                            abs_media = client_media_abs(u)
-                            ext = guess_extension(mime, ".bin")
-                            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            filename = f"{ts}_{media_id}{ext}"
-                            out_path = os.path.join(abs_media, filename)
+                client_id = get_panel_client_id(u)
+                cfg = get_whatsapp_config_for_user(u)
+                token = cfg.get("wa_token", "")
 
-                            with open(out_path, "wb") as f:
-                                f.write(bin_resp["content"])
+                for msg in messages:
+                    wa_peer = msg.get("from", "")
+                    text_body = msg.get("text", {}).get("body", "")
+                    msg_type = msg.get("type", "text")
+                    wa_msg_id = msg.get("id")
 
-                            media_kind = "document"
-                            if mime.startswith("image/"):
-                                media_kind = "image"
-                            elif mime.startswith("audio/"):
-                                media_kind = "audio"
-                            elif mime.startswith("video/"):
-                                media_kind = "video"
+                    contact_name = ""
+                    contacts = value.get("contacts", []) or []
+                    if contacts:
+                        contact_name = contacts[0].get("profile", {}).get("name", "")
 
-                            media_info = {
-                                "filename": filename,
-                                "kind": media_kind,
-                                "content_type": mime,
-                                "media_id": media_id,
-                            }
+                    raw_to_store = msg
+                    media_info = None
 
-        if media_info:
-            raw_to_store = dict(msg)
-            raw_to_store["media"] = media_info
+                    if msg_type in ("image", "document", "audio", "video", "sticker"):
+                        media_obj = msg.get(msg_type, {}) or {}
+                        media_id = media_obj.get("id")
 
-        con = db_connect(u.get("db_path", ""))
-        ensure_tables(con)
+                        if media_id and token:
+                            meta_resp = wa_cloud_api_get_media_meta(token=token, media_id=media_id)
+                            if meta_resp.get("ok"):
+                                meta = meta_resp.get("data") or {}
+                                download_url = meta.get("url")
+                                mime = meta.get("mime_type", "application/octet-stream")
 
-        with con.cursor() as cur:
-            cur.execute("""
-            INSERT INTO messages
-            (client_id, direction, wa_peer, name, text, msg_type, wa_msg_id, ts_utc, raw_json)
-            VALUES (%s, 'in', %s, %s, %s, %s, %s, %s, %s::jsonb)
-            """, (
-                client_id,
-                wa_peer,
-                contact_name,
-                text,
-                msg_type,
-                wa_msg_id,
-                now_iso(),
-                json.dumps(raw_to_store)
-            ))
-        con.commit()
-        con.close()
+                                if download_url:
+                                    bin_resp = wa_cloud_api_download_media(token=token, download_url=download_url)
+                                    if bin_resp.get("ok"):
+                                        abs_media = client_media_abs(u)
+                                        ext = guess_extension(mime, ".bin")
+                                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                        filename = f"{ts}_{media_id}{ext}"
+                                        out_path = os.path.join(abs_media, filename)
+
+                                        with open(out_path, "wb") as f:
+                                            f.write(bin_resp["content"])
+
+                                        media_kind = "document"
+                                        if mime.startswith("image/"):
+                                            media_kind = "image"
+                                        elif mime.startswith("audio/"):
+                                            media_kind = "audio"
+                                        elif mime.startswith("video/"):
+                                            media_kind = "video"
+
+                                        media_info = {
+                                            "filename": filename,
+                                            "kind": media_kind,
+                                            "content_type": mime,
+                                            "media_id": media_id,
+                                        }
+
+                    if media_info:
+                        raw_to_store = dict(msg)
+                        raw_to_store["media"] = media_info
+
+                    con = db_connect(u.get("db_path", ""))
+                    ensure_tables(con)
+
+                    with con.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO messages
+                            (client_id, direction, wa_peer, name, text, msg_type, wa_msg_id, ts_utc, raw_json)
+                            VALUES (%s, 'in', %s, %s, %s, %s, %s, %s, %s::jsonb)
+                            """,
+                            (
+                                client_id,
+                                wa_peer,
+                                contact_name,
+                                text_body,
+                                msg_type,
+                                wa_msg_id,
+                                now_iso(),
+                                json.dumps(raw_to_store),
+                            ),
+                        )
+                    con.commit()
+                    con.close()
 
     except Exception as e:
         print("Webhook error:", e)
 
     return {"ok": True}
+
 
 
 # ---------------- Webhook Meta / WhatsApp ----------------
