@@ -205,6 +205,215 @@
     if (e.key === "Escape" && elCalModal?.classList.contains("show")) {
       closeCal();
     }
+    if (e.key === "Escape" && elWaModal?.classList.contains("show")) {
+      closeWaConnectModal();
+    }
+  });
+
+  // =========================
+  // WhatsApp Connect / Coexistence
+  // =========================
+  const elOpenWaConnect = document.getElementById("openWaConnectBtn");
+  const elWaModal = document.getElementById("waConnectModal");
+  const elWaClose = document.getElementById("waConnectCloseBtn");
+  const elWaRefresh = document.getElementById("waRefreshBtn");
+  const elWaLaunch = document.getElementById("waLaunchBtn");
+
+  const elWaStatusPill = document.getElementById("waStatusPill");
+  const elWaStatusText = document.getElementById("waStatusText");
+  const elWaModeValue = document.getElementById("waModeValue");
+  const elWaFeatureValue = document.getElementById("waFeatureValue");
+  const elWaWabaValue = document.getElementById("waWabaValue");
+  const elWaPhoneIdValue = document.getElementById("waPhoneIdValue");
+  const elWaDisplayNumberValue = document.getElementById("waDisplayNumberValue");
+  const elWaLastEventValue = document.getElementById("waLastEventValue");
+  const elWaEvents = document.getElementById("waEvents");
+
+  let waStatusPoll = null;
+
+  function truncateMiddle(value, keep = 8) {
+    const s = String(value || "");
+    if (!s) return "—";
+    if (s.length <= keep * 2 + 3) return s;
+    return `${s.slice(0, keep)}…${s.slice(-keep)}`;
+  }
+
+  function setWaValue(el, value, opts = {}) {
+    if (!el) return;
+    const raw = String(value || "").trim();
+    el.textContent = raw ? (opts.short ? truncateMiddle(raw) : raw) : "—";
+    if (raw) el.title = raw;
+    else el.removeAttribute("title");
+  }
+
+  function setWaPill(status, configured) {
+    if (!elWaStatusPill) return;
+    const normalized = String(status || "").toLowerCase();
+
+    elWaStatusPill.classList.remove("is-ok", "is-pending", "is-error");
+
+    if (!configured) {
+      elWaStatusPill.textContent = "Falta configuración";
+      elWaStatusPill.classList.add("is-error");
+      return;
+    }
+
+    if (normalized === "connected") {
+      elWaStatusPill.textContent = "Conectado";
+      elWaStatusPill.classList.add("is-ok");
+      return;
+    }
+
+    if (normalized === "pending" || normalized === "started") {
+      elWaStatusPill.textContent = "Pendiente";
+      elWaStatusPill.classList.add("is-pending");
+      return;
+    }
+
+    elWaStatusPill.textContent = "Sin conexión";
+    elWaStatusPill.classList.add("is-error");
+  }
+
+  function renderWaEvents(events) {
+    if (!elWaEvents) return;
+    const list = Array.isArray(events) ? events : [];
+
+    if (!list.length) {
+      elWaEvents.innerHTML = `<div class="wa-event-item">Todavía no hay eventos registrados.</div>`;
+      return;
+    }
+
+    elWaEvents.innerHTML = list.map((ev) => {
+      const created = formatConversationTime(ev.created_utc || "");
+      const name = esc(ev.event_name || "evento");
+      return `
+        <div class="wa-event-item">
+          <strong>${name}</strong>
+          <span>${esc(created || "—")}</span>
+        </div>
+      `;
+    }).join("");
+  }
+
+  function renderWaStatus(data) {
+    const configured = !!data?.configured;
+    const conn = data?.connection || {};
+    const status = conn.status || (configured ? "pending" : "missing");
+
+    setWaPill(status, configured);
+    setWaValue(elWaModeValue, data?.mode || "hosted");
+    setWaValue(elWaFeatureValue, data?.feature || "coexistence");
+    setWaValue(elWaWabaValue, conn.waba_id, { short: true });
+    setWaValue(elWaPhoneIdValue, conn.phone_number_id, { short: true });
+    setWaValue(elWaDisplayNumberValue, conn.display_phone_number);
+    setWaValue(elWaLastEventValue, conn.last_event || (data?.events?.[0]?.event_name || ""));
+    renderWaEvents(data?.events || []);
+
+    if (!elWaStatusText) return;
+
+    if (!configured) {
+      elWaStatusText.textContent = "Para usar esta función tenés que cargar en Render la URL oficial del Embedded Signup / Hosted Signup de Meta y, si corresponde, el App ID y Config ID.";
+      return;
+    }
+
+    if (status === "connected") {
+      const number = conn.display_phone_number || "el número del cliente";
+      elWaStatusText.textContent = `El panel ya tiene una conexión registrada para ${number}. Si el cliente vuelve a entrar al flujo oficial de Meta, puede revalidar o ajustar la coexistencia.`;
+      return;
+    }
+
+    elWaStatusText.textContent = "Abrí el flujo oficial de Meta. Si la cuenta está configurada para coexistencia, Meta mostrará el QR o el paso de vinculación dentro de ese proceso.";
+  }
+
+  async function fetchWaConnectStatus() {
+    const res = await fetch("/api/wa/connect-status", { credentials: "same-origin" });
+    const data = await res.json().catch(() => ({}));
+    renderWaStatus(data || {});
+    return data || {};
+  }
+
+  async function openWaConnectModal() {
+    if (!elWaModal) return;
+    elWaModal.classList.add("show");
+    elWaModal.setAttribute("aria-hidden", "false");
+    await fetchWaConnectStatus();
+    stopWaStatusPolling();
+    waStatusPoll = setInterval(() => {
+      fetchWaConnectStatus().catch(() => {});
+    }, 8000);
+  }
+
+  function stopWaStatusPolling() {
+    if (waStatusPoll) {
+      clearInterval(waStatusPoll);
+      waStatusPoll = null;
+    }
+  }
+
+  function closeWaConnectModal() {
+    if (!elWaModal) return;
+    elWaModal.classList.remove("show");
+    elWaModal.setAttribute("aria-hidden", "true");
+    stopWaStatusPolling();
+  }
+
+  async function launchWaConnect() {
+    const data = await fetchWaConnectStatus();
+
+    if (!data?.configured || !data?.launch_url) {
+      alert("Falta configurar la URL oficial de Embedded Signup / Hosted Signup en el backend.");
+      return;
+    }
+
+    const popup = window.open(data.launch_url, "_blank", "noopener,noreferrer,width=520,height=780");
+    if (!popup) {
+      window.location.href = data.launch_url;
+    }
+  }
+
+  elOpenWaConnect?.addEventListener("click", openWaConnectModal);
+  elWaClose?.addEventListener("click", closeWaConnectModal);
+  elWaRefresh?.addEventListener("click", () => fetchWaConnectStatus());
+  elWaLaunch?.addEventListener("click", launchWaConnect);
+
+  elWaModal?.addEventListener("click", (e) => {
+    if (e.target === elWaModal) closeWaConnectModal();
+  });
+
+  window.addEventListener("message", async (event) => {
+    try {
+      let payload = event.data;
+      if (!payload) return;
+
+      if (typeof payload === "string") {
+        try {
+          payload = JSON.parse(payload);
+        } catch (_) {
+          return;
+        }
+      }
+
+      const likelyMetaPayload =
+        payload?.type === "WA_EMBEDDED_SIGNUP" ||
+        payload?.waba_id ||
+        payload?.phone_number_id ||
+        payload?.whatsapp_business_account_id ||
+        payload?.event === "FINISH" ||
+        payload?.event === "PARTNER_ADDED";
+
+      if (!likelyMetaPayload) return;
+
+      await fetch("/api/wa/connect-session", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "pending", raw: payload }),
+      });
+
+      await fetchWaConnectStatus();
+    } catch (e) {
+      console.error("WA connect postMessage:", e);
+    }
   });
 
   // =========================
@@ -268,40 +477,40 @@
     return String(str || "").replace(/\n/g, "<br>");
   }
 
-function parseServerDate(ts) {
-  if (!ts) return null;
+  function parseServerDate(ts) {
+    if (!ts) return null;
 
-  if (ts instanceof Date && Number.isFinite(ts.getTime())) return ts;
+    if (ts instanceof Date && Number.isFinite(ts.getTime())) return ts;
 
-  if (typeof ts === "number") {
-    const n = ts < 1000000000000 ? ts * 1000 : ts;
-    const dNum = new Date(n);
-    if (Number.isFinite(dNum.getTime())) return dNum;
-  }
-
-  if (typeof ts === "string") {
-    const s = ts.trim();
-
-    if (/^\d+$/.test(s)) {
-      const n = Number(s);
-      const normalized = s.length <= 10 ? n * 1000 : n;
-      const dUnix = new Date(normalized);
-      if (Number.isFinite(dUnix.getTime())) return dUnix;
+    if (typeof ts === "number") {
+      const n = ts < 1000000000000 ? ts * 1000 : ts;
+      const dNum = new Date(n);
+      if (Number.isFinite(dNum.getTime())) return dNum;
     }
 
-    const direct = new Date(s);
-    if (Number.isFinite(direct.getTime())) return direct;
+    if (typeof ts === "string") {
+      const s = ts.trim();
 
-    const fixed1 = s.replace(" ", "T");
-    const d1 = new Date(fixed1);
-    if (Number.isFinite(d1.getTime())) return d1;
+      if (/^\d+$/.test(s)) {
+        const n = Number(s);
+        const normalized = s.length <= 10 ? n * 1000 : n;
+        const dUnix = new Date(normalized);
+        if (Number.isFinite(dUnix.getTime())) return dUnix;
+      }
 
-    const d2 = new Date(fixed1 + "Z");
-    if (Number.isFinite(d2.getTime())) return d2;
+      const direct = new Date(s);
+      if (Number.isFinite(direct.getTime())) return direct;
+
+      const fixed1 = s.replace(" ", "T");
+      const d1 = new Date(fixed1);
+      if (Number.isFinite(d1.getTime())) return d1;
+
+      const d2 = new Date(fixed1 + "Z");
+      if (Number.isFinite(d2.getTime())) return d2;
+    }
+
+    return null;
   }
-
-  return null;
-}
 
   function formatMessageHour(ts) {
     const d = parseServerDate(ts);
@@ -366,25 +575,25 @@ function parseServerDate(ts) {
   }
 
   function getMessageTimestamp(m) {
-  return (
-    m.ts_utc ||
-    m.timestamp ||
-    m.created_at ||
-    m.sent_at ||
-    m.ts ||
-    m.date ||
-    m.datetime ||
-    m.raw_ts ||
-    m.raw_json?.ts_utc ||
-    m.raw_json?.timestamp ||
-    m.raw_json?.created_at ||
-    m.raw_json?.sent_at ||
-    m.raw_json?.ts ||
-    m.raw_json?.date ||
-    null
-  );
-}
-  
+    return (
+      m.ts_utc ||
+      m.timestamp ||
+      m.created_at ||
+      m.sent_at ||
+      m.ts ||
+      m.date ||
+      m.datetime ||
+      m.raw_ts ||
+      m.raw_json?.ts_utc ||
+      m.raw_json?.timestamp ||
+      m.raw_json?.created_at ||
+      m.raw_json?.sent_at ||
+      m.raw_json?.ts ||
+      m.raw_json?.date ||
+      null
+    );
+  }
+
   function getMediaUrl(m) {
     const candidates = [
       m.media_url,
