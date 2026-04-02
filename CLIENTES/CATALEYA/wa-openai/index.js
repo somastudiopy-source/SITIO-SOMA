@@ -811,6 +811,7 @@ Ofrecés:
 - Productos e insumos
 - Muebles y equipamiento (espejos, sillones, camillas)
 - Cursos de estética y capacitaciones
+- Si preguntan por cursos, respondé SOLO con lo que exista en la hoja CURSOS. Nunca enumeres ni inventes cursos por tu cuenta. Si no encontrás coincidencias, decilo claramente.
 
 TURNOS:
 - Información de turnos (siempre):
@@ -1025,6 +1026,35 @@ function looksLikeProductPreferenceReply(text) {
 }
 // ✅ Último servicio consultado por usuario (para no repetir pregunta en turnos)
 const lastServiceByUser = new Map();
+// ✅ Contexto de cursos por usuario (para no perder continuidad entre preguntas)
+const lastCourseContextByUser = new Map();
+const COURSE_CONTEXT_TTL_MS = Number(process.env.COURSE_CONTEXT_TTL_MS || 45 * 60 * 1000);
+
+function getLastCourseContext(waId) {
+  const ctx = lastCourseContextByUser.get(waId);
+  if (!ctx) return null;
+  if ((Date.now() - (ctx.ts || 0)) > COURSE_CONTEXT_TTL_MS) {
+    lastCourseContextByUser.delete(waId);
+    return null;
+  }
+  return ctx;
+}
+
+function setLastCourseContext(waId, patch = {}) {
+  if (!waId) return null;
+  const prev = getLastCourseContext(waId) || {};
+  const next = {
+    ...prev,
+    ...patch,
+    ts: Date.now(),
+  };
+  lastCourseContextByUser.set(waId, next);
+  return next;
+}
+
+function clearLastCourseContext(waId) {
+  if (waId) lastCourseContextByUser.delete(waId);
+}
 // ===================== ✅ ANTI-SPAM (evita repetir el mismo texto) =====================
 // Evita que WhatsApp envíe el mismo mensaje predeterminado varias veces por reintentos/doble flujo.
 // Key: `${to}::${text}` -> ts
@@ -3350,10 +3380,10 @@ async function getCoursesCatalog() {
     return catalogCache.courses.rows;
   }
 
-  const values = await readSheetRange(COURSES_SHEET_ID, COURSES_RANGE);
-  if (!values.length) return [];
-
-  const [header, ...data] = values;
+  const grid = await readSheetGridWithLinks(COURSES_SHEET_ID, COURSES_RANGE);
+  const header = Array.isArray(grid?.headers) ? grid.headers : [];
+  const data = Array.isArray(grid?.rows) ? grid.rows : [];
+  if (!header.length) return [];
 
   const idx = {
     nombre: header.findIndex(h => normalize(h) === "nombre"),
@@ -3366,11 +3396,14 @@ async function getCoursesCatalog() {
     precio: header.findIndex(h => normalize(h) === "precio"),
     sena: header.findIndex(h => {
       const v = normalize(h);
-      return v.includes("seña") || v.includes("sena") || v.includes("inscripcion") || v.includes("inscripción");
+      return v.includes("sena") || v.includes("seña") || v.includes("inscripcion") || v.includes("inscripción");
     }),
     cupos: header.findIndex(h => normalize(h).includes("cupos")),
     requisitos: header.findIndex(h => normalize(h).includes("requisitos")),
-    info: header.findIndex(h => normalize(h).includes("informacion detallada")),
+    info: header.findIndex(h => {
+      const v = normalize(h);
+      return v.includes("informacion detallada") || v.includes("descripcion") || v.includes("descripción") || v === "info";
+    }),
     estado: header.findIndex(h => normalize(h) === "estado"),
     link: header.findIndex(h => {
       const v = normalize(h);
@@ -3378,24 +3411,28 @@ async function getCoursesCatalog() {
     }),
   };
 
-  const rows = data
-    .map(r => ({
-      nombre: (r[idx.nombre] || "").trim(),
-      categoria: (r[idx.categoria] || "").trim(),
-      modalidad: (r[idx.modalidad] || "").trim(),
-      duracionTotal: (r[idx.duracionTotal] || "").trim(),
-      fechaInicio: (r[idx.inicio] || "").trim(),
-      fechaFin: (r[idx.fin] || "").trim(),
-      diasHorarios: (r[idx.diasHorarios] || "").trim(),
-      precio: (r[idx.precio] || "").trim(),
-      sena: (r[idx.sena] || "").trim(),
-      cupos: (r[idx.cupos] || "").trim(),
-      requisitos: (r[idx.requisitos] || "").trim(),
-      info: (r[idx.info] || "").trim(),
-      estado: (r[idx.estado] || "").trim(),
-      link: (r[idx.link] || "").trim(),
-    }))
-    .filter(x => x.nombre);
+  const rows = data.map((row) => {
+    const values = Array.isArray(row?.values) ? row.values : [];
+    const links = Array.isArray(row?.links) ? row.links : [];
+    const linkValue = idx.link >= 0 ? ((links[idx.link] || values[idx.link] || "").trim()) : "";
+
+    return {
+      nombre: (values[idx.nombre] || "").trim(),
+      categoria: (values[idx.categoria] || "").trim(),
+      modalidad: (values[idx.modalidad] || "").trim(),
+      duracionTotal: (values[idx.duracionTotal] || "").trim(),
+      fechaInicio: (values[idx.inicio] || "").trim(),
+      fechaFin: (values[idx.fin] || "").trim(),
+      diasHorarios: (values[idx.diasHorarios] || "").trim(),
+      precio: (values[idx.precio] || "").trim(),
+      sena: (values[idx.sena] || "").trim(),
+      cupos: (values[idx.cupos] || "").trim(),
+      requisitos: (values[idx.requisitos] || "").trim(),
+      info: (values[idx.info] || "").trim(),
+      estado: (values[idx.estado] || "").trim(),
+      link: linkValue,
+    };
+  }).filter(x => x.nombre);
 
   catalogCache.courses = { loadedAt: now, rows };
   return rows;
@@ -4070,9 +4107,18 @@ function findCourses(rows, query, mode) {
   if (!q) return [];
 
   const match = (x) => {
-    const nombre = normalize(x.nombre);
-    const categoria = normalize(x.categoria);
-    return nombre.includes(q) || categoria.includes(q);
+    const hay = normalize([
+      x.nombre,
+      x.categoria,
+      x.modalidad,
+      x.duracionTotal,
+      x.fechaInicio,
+      x.fechaFin,
+      x.diasHorarios,
+      x.info,
+      x.estado,
+    ].filter(Boolean).join(' | '));
+    return hay.includes(q);
   };
 
   if (mode === "LIST") return rows.filter(match);
@@ -4083,7 +4129,63 @@ function findCourses(rows, query, mode) {
   const contains = rows.filter(r => normalize(r.nombre).includes(q));
   if (contains.length) return contains;
 
+  const categoryContains = rows.filter(r => normalize(r.categoria).includes(q));
+  if (categoryContains.length) return categoryContains;
+
   return rows.filter(match);
+}
+
+function isExplicitCourseKeyword(text) {
+  const t = normalize(text || '');
+  return /(\bcurso\b|\bcursos\b|\btaller\b|\btalleres\b|\bcapacitacion\b|\bcapacitaciones\b|\bcapacitación\b)/i.test(t);
+}
+
+function looksLikeCourseFollowUp(text) {
+  const t = normalize(text || '');
+  if (!t) return false;
+  return /(algun|alguno|alguna|de barberia|de barbería|de maquillaje|de peinados|de recogidos|de estetica|de estética|de auxiliar|de colorimetria|de colorimetría|mas info|más info|quiero info|info|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|cuando empieza|cuándo empieza|cuando arranca|cuándo arranca|inicio|duracion|duración|horario|dias|días|cupo|cupos|inscripcion|inscripción|requisitos|ese curso|de ese|de ese curso)/i.test(t);
+}
+
+function resolveImplicitCourseFollowupQuery(text, lastCourseContext = null) {
+  const t = normalize(text || '');
+  if (!t || !lastCourseContext) return '';
+
+  if (/^(ese|ese curso|de ese|de ese curso|de ese nomas|de ese no mas|mas info|más info|info|precio|cuanto sale|cuánto sale|cuando empieza|cuándo empieza|duracion|duración|horario|dias|días|cupos?|inscripcion|inscripción|requisitos)$/.test(t)) {
+    return lastCourseContext.selectedName || lastCourseContext.query || '';
+  }
+
+  if (looksLikeCourseFollowUp(text)) {
+    return text;
+  }
+
+  return '';
+}
+
+function detectCourseIntentFromContext(text, { lastCourseContext = null } = {}) {
+  const raw = String(text || '').trim();
+  const t = normalize(raw);
+  if (!t) return { isCourse: false, query: '', mode: 'DETAIL' };
+
+  const explicit = isExplicitCourseKeyword(raw);
+  const genericList = explicit && /(que|qué|cuales|cuáles|tenes|tenés|hay|ofrecen|ofreces|disponibles|mostrar|mostrame|mandame|pasame|lista|opciones|algun|algún|alguna)/i.test(t);
+
+  if (explicit) {
+    return {
+      isCourse: true,
+      query: genericList ? 'cursos' : raw,
+      mode: genericList ? 'LIST' : 'DETAIL',
+    };
+  }
+
+  if (lastCourseContext && looksLikeCourseFollowUp(raw) && !/(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b)/i.test(t)) {
+    return {
+      isCourse: true,
+      query: resolveImplicitCourseFollowupQuery(raw, lastCourseContext) || raw,
+      mode: 'DETAIL',
+    };
+  }
+
+  return { isCourse: false, query: '', mode: 'DETAIL' };
 }
 
 // ===================== RESPUESTAS =====================
@@ -4532,6 +4634,7 @@ Además:
 
 Tené en cuenta el contexto previo:
 - servicio_actual: si existe, mensajes como "quiero el turno", "dale", "quiero ese", "bien" suelen referirse a ese servicio.
+- curso_actual y curso_contexto_activo: si venían hablando de cursos, mensajes como "alguno de barbería", "más info", "de ese", "cuándo empieza", "precio" deben clasificarse como COURSE, no como SERVICE.
 - flujo_actual: si el cliente ya estaba hablando de reservar, priorizá continuidad y no lo mandes a catálogo de nuevo.
 - Si el mensaje es solo 'si', 'dale', 'ok' o similar y venían hablando de un servicio, priorizá la continuidad de ese tema.
 - Si una palabra puede ser producto o servicio y el cliente no lo aclaró, devolvé OTHER.
@@ -4544,6 +4647,9 @@ Respondé SOLO JSON.`
         content: JSON.stringify({
           mensaje: text,
           servicio_actual: context.lastServiceName || "",
+          curso_actual: context.lastCourseName || "",
+          curso_contexto_activo: !!context.hasCourseContext,
+          cursos_recientes: context.courseOptions || [],
           flujo_actual: context.flowStep || "",
           tiene_borrador_turno: !!context.hasDraft,
           historial_reciente: context.historySnippet || "",
@@ -5448,13 +5554,16 @@ updateLastCloseContext(waId, {
 
     // ===================== ✅ REGLAS ESPECIALES (sin inventar servicios) =====================
     let normTxt = normalize(text);
+    const activeCourseContextEarly = getLastCourseContext(waId);
+    const shouldSkipBarberWalkInRule = !!activeCourseContextEarly && (isExplicitCourseKeyword(text) || looksLikeCourseFollowUp(text));
 
     // Corte masculino: solo por orden de llegada (no se toma turno)
-    if (/(\bcorte\b.*\b(mascul|varon|hombre)\b|\bcorte\s+masculino\b|\bbarber\b|\bbarberia\b)/i.test(normTxt) && !detectFemaleContext(text)) {
+    if (/(\bcorte\b.*\b(mascul|varon|hombre)\b|\bcorte\s+masculino\b|\bbarber\b|\bbarberia\b)/i.test(normTxt) && !detectFemaleContext(text) && !shouldSkipBarberWalkInRule) {
       const msgMasc = `✂️ Corte masculino: es SOLO por orden de llegada (no se toma turno).
 
 🕒 Horarios: Lunes a Sábados 10 a 13 hs y 17 a 22 hs.
 💲 Precio final: $10.000.`;
+      clearLastCourseContext(waId);
       pushHistory(waId, "assistant", msgMasc);
       await sendWhatsAppText(phone, msgMasc);
       scheduleInactivityFollowUp(waId, phone);
@@ -6126,12 +6235,27 @@ Si después necesita algo, estoy acá ✨`;
       }
     }
 
-    const intent = await classifyAndExtract(text, {
+    const lastCourseContext = getLastCourseContext(waId);
+
+    let intent = await classifyAndExtract(text, {
       lastServiceName: lastKnownService?.nombre || '',
+      lastCourseName: lastCourseContext?.selectedName || lastCourseContext?.query || '',
+      hasCourseContext: !!lastCourseContext,
+      courseOptions: Array.isArray(lastCourseContext?.lastOptions) ? lastCourseContext.lastOptions.slice(0, 10) : [],
       flowStep: pendingDraft?.flow_step || '',
       hasDraft: !!pendingDraft,
       historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1600),
     });
+
+    const explicitCourseIntent = detectCourseIntentFromContext(text, { lastCourseContext });
+    if (explicitCourseIntent.isCourse) {
+      intent = {
+        ...intent,
+        type: 'COURSE',
+        query: explicitCourseIntent.query || intent.query || '',
+        mode: explicitCourseIntent.mode || intent.mode || 'DETAIL',
+      };
+    }
 
     const lastProductCtx = getLastProductContext(waId);
 
@@ -6449,6 +6573,7 @@ Si después necesita algo, estoy acá ✨`;
       const replyCatalog = formatServicesReply(matches, intent.mode);
 
       if (replyCatalog) {
+        clearLastCourseContext(waId);
         // ✅ Guardamos "último servicio" para continuidad de la charla y toma de turnos
         if (matches.length) {
           const selectedService = matches[0]?.nombre || '';
@@ -6482,6 +6607,7 @@ Servicios disponibles (algunos):
 ${some}
 
 ¿Con cuál desea sacar turno o consultar precio?`;
+      clearLastCourseContext(waId);
       pushHistory(waId, "assistant", msgNo);
       await sendWhatsAppText(phone, msgNo);
       scheduleInactivityFollowUp(waId, phone);
@@ -6490,11 +6616,26 @@ ${some}
 // COURSE
     if (intent.type === "COURSE") {
       const courses = await getCoursesCatalog();
-      const normalizedCourseQuery = normalize(intent.query || '');
-      const isGenericCourseQuery = !normalizedCourseQuery || /^(curso|cursos|taller|talleres)$/.test(normalizedCourseQuery);
-      const matches = isGenericCourseQuery ? courses : findCourses(courses, intent.query, intent.mode);
+      const courseQuery = resolveImplicitCourseFollowupQuery(text, lastCourseContext) || intent.query || '';
+      const normalizedCourseQuery = normalize(courseQuery || '');
+      const isGenericCourseQuery = !normalizedCourseQuery || /^(curso|cursos|taller|talleres|capacitacion|capacitaciones)$/.test(normalizedCourseQuery);
+
+      if (!courses.length) {
+        const msgEmpty = `La hoja CURSOS está vacía o no pude leer cursos disponibles en este momento.`;
+        pushHistory(waId, "assistant", msgEmpty);
+        await sendWhatsAppText(phone, msgEmpty);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+
+      const matches = isGenericCourseQuery ? courses : findCourses(courses, courseQuery, intent.mode);
       const replyCatalog = formatCoursesReply(matches, isGenericCourseQuery ? 'LIST' : intent.mode);
       if (replyCatalog) {
+        setLastCourseContext(waId, {
+          query: courseQuery || 'cursos',
+          selectedName: matches.length === 1 ? (matches[0]?.nombre || '') : '',
+          lastOptions: matches.slice(0, 10).map((c) => c.nombre).filter(Boolean),
+        });
         pushHistory(waId, "assistant", replyCatalog);
         await sendWhatsAppText(phone, replyCatalog);
         await maybeSendCoursePhotos(phone, matches);
@@ -6503,7 +6644,13 @@ ${some}
         return;
       }
 
-      const some = courses.slice(0, 12).map(c => `🎓 ${c.nombre}`).join("\n");
+      const someRows = courses.slice(0, 12);
+      setLastCourseContext(waId, {
+        query: courseQuery || 'cursos',
+        selectedName: '',
+        lastOptions: someRows.map((c) => c.nombre).filter(Boolean),
+      });
+      const some = someRows.map(c => `🎓 ${c.nombre}`).join("\n");
       const msgNo = `No encuentro ese curso en la hoja CURSOS.
 
 Cursos disponibles (algunos):
