@@ -3090,11 +3090,11 @@ async function downloadDriveFileToPath(fileId, outPath) {
 // ===================== ✅ IDs de catálogos =====================
 const STOCK_SHEET_ID = "1ZepzBhDUl7BlevNSjassowotiR0l_iCB-3ExDaYTW5U";
 const SERVICES_SHEET_ID = "19JeiyNLRu31Frt46Md9W7fsI1V42dEncYxPUFNCU0jY";
-const COURSES_SHEET_ID = "1kXoX8GeZfJkEPylLG49xbKmwHVIe39vSBDYxsomfsOo";
+const COURSES_SHEET_ID = SERVICES_SHEET_ID;
 
 const STOCK_TABS = ["Productos", "Equipamiento", "Muebles"];
-const SERVICES_TAB = "Hoja 1";
-const COURSES_TAB = "Hoja 1";
+const SERVICES_TAB = "SERVICIOS";
+const COURSES_TAB = "CURSOS";
 
 // ✅ CLAVE: leemos hasta Z para incluir “Foto del producto” aunque esté en H/I/J
 const STOCK_RANGE = (tab) => `${tab}!A1:Z`;
@@ -3358,22 +3358,42 @@ async function getCoursesCatalog() {
   const idx = {
     nombre: header.findIndex(h => normalize(h) === "nombre"),
     categoria: header.findIndex(h => normalize(h) === "categoria"),
+    modalidad: header.findIndex(h => normalize(h).includes("modalidad")),
     duracionTotal: header.findIndex(h => normalize(h).includes("duracion total")),
     inicio: header.findIndex(h => normalize(h).includes("fecha de inicio")),
     fin: header.findIndex(h => normalize(h).includes("fecha de finalizacion")),
+    diasHorarios: header.findIndex(h => normalize(h).includes("dias y horarios")),
     precio: header.findIndex(h => normalize(h) === "precio"),
+    sena: header.findIndex(h => {
+      const v = normalize(h);
+      return v.includes("seña") || v.includes("sena") || v.includes("inscripcion") || v.includes("inscripción");
+    }),
+    cupos: header.findIndex(h => normalize(h).includes("cupos")),
+    requisitos: header.findIndex(h => normalize(h).includes("requisitos")),
     info: header.findIndex(h => normalize(h).includes("informacion detallada")),
+    estado: header.findIndex(h => normalize(h) === "estado"),
+    link: header.findIndex(h => {
+      const v = normalize(h);
+      return v === "link" || v.includes("link") || v.includes("foto") || v.includes("imagen");
+    }),
   };
 
   const rows = data
     .map(r => ({
       nombre: (r[idx.nombre] || "").trim(),
       categoria: (r[idx.categoria] || "").trim(),
+      modalidad: (r[idx.modalidad] || "").trim(),
       duracionTotal: (r[idx.duracionTotal] || "").trim(),
       fechaInicio: (r[idx.inicio] || "").trim(),
       fechaFin: (r[idx.fin] || "").trim(),
+      diasHorarios: (r[idx.diasHorarios] || "").trim(),
       precio: (r[idx.precio] || "").trim(),
+      sena: (r[idx.sena] || "").trim(),
+      cupos: (r[idx.cupos] || "").trim(),
+      requisitos: (r[idx.requisitos] || "").trim(),
       info: (r[idx.info] || "").trim(),
+      estado: (r[idx.estado] || "").trim(),
+      link: (r[idx.link] || "").trim(),
     }))
     .filter(x => x.nombre);
 
@@ -4270,17 +4290,35 @@ function findServiceByContext(rows, query, lastServiceName) {
 
 function formatCoursesReply(matches, mode) {
   if (!matches.length) return null;
+
   const limited = mode === "LIST" ? matches.slice(0, 10) : matches.slice(0, 3);
 
-  const lines = limited.map(c => {
-    const priceTxt = moneyOrConsult(c.precio);
-    return `• ${c.nombre}: *${priceTxt}*`;
+  const blocks = limited.map(c => {
+    const lines = [
+      `🎓 *${c.nombre}*`,
+      c.categoria ? `• Categoría: ${c.categoria}` : "",
+      c.modalidad ? `• Modalidad: ${c.modalidad}` : "",
+      c.duracionTotal ? `• Duración: ${c.duracionTotal}` : "",
+      c.fechaInicio ? `• Inicio: ${c.fechaInicio}` : "",
+      c.fechaFin ? `• Finalización: ${c.fechaFin}` : "",
+      c.diasHorarios ? `• Días y horarios: ${c.diasHorarios}` : "",
+      c.precio ? `• Precio: *${moneyOrConsult(c.precio)}*` : "",
+      c.sena ? `• Seña / inscripción: ${c.sena}` : "",
+      c.cupos ? `• Cupos: ${c.cupos}` : "",
+      c.requisitos ? `• Requisitos: ${c.requisitos}` : "",
+      c.estado ? `• Estado: ${c.estado}` : "",
+      c.info ? `• Info: ${c.info}` : "",
+    ].filter(Boolean);
+
+    return lines.join("\n");
   });
 
-  const header = mode === "LIST" ? `Cursos:` : `Curso:`;
-  return `${header}\n${lines.join("\n")}\n\nSi quiere, le paso requisitos e inscripción.`.trim();
-}
+  const header = mode === "LIST"
+    ? "🎓 Estos son los cursos disponibles:"
+    : "🎓 Este es el curso que encontré:";
 
+  return `${header}\n\n${blocks.join("\n\n— — —\n\n")}\n\nSi quiere, también le paso la foto del curso 😊`.trim();
+}
 
 async function getRecentDbMessages(waPeer, limit = 12) {
   const peerNorm = normalizePhone(waPeer);
@@ -5118,6 +5156,124 @@ async function maybeSendProductPhoto(phone, product, userText) {
     'No pude enviar la foto en este momento. Revise que la imagen de Drive esté compartida con el service account.'
   );
   return true;
+}
+
+function imageExtFromMime(mimeType) {
+  const mime = String(mimeType || '').toLowerCase();
+  if (mime.includes('png')) return '.png';
+  if (mime.includes('webp')) return '.webp';
+  if (mime.includes('jpeg') || mime.includes('jpg')) return '.jpg';
+  return '.jpg';
+}
+
+function imageMimeFromPathish(value) {
+  const v = String(value || '').toLowerCase();
+  if (/\.png($|\?)/.test(v)) return 'image/png';
+  if (/\.webp($|\?)/.test(v)) return 'image/webp';
+  if (/\.jpe?g($|\?)/.test(v)) return 'image/jpeg';
+  return 'image/jpeg';
+}
+
+async function downloadImageFromSharedLink(link, tmpPrefix = 'img') {
+  const value = String(link || '').trim();
+  if (!value) throw new Error('missing_link');
+
+  const driveFileId = extractDriveFileId(value);
+  if (driveFileId) {
+    let mimeType = 'image/jpeg';
+    try {
+      const drive = await getDriveClient();
+      const meta = await drive.files.get({ fileId: driveFileId, fields: 'mimeType,name' });
+      mimeType = meta?.data?.mimeType || mimeType;
+    } catch {}
+
+    const ext = imageExtFromMime(mimeType);
+    const tmpPath = path.join(getTmpDir(), `${tmpPrefix}-${driveFileId}${ext}`);
+    await downloadDriveFileToPath(driveFileId, tmpPath);
+    return { tmpPath, mimeType };
+  }
+
+  const resp = await axios.get(value, { responseType: 'arraybuffer' });
+  const mimeType = String(resp?.headers?.['content-type'] || imageMimeFromPathish(value)).split(';')[0].trim() || 'image/jpeg';
+  const ext = imageExtFromMime(mimeType);
+  const tmpPath = path.join(getTmpDir(), `${tmpPrefix}-${Date.now()}${ext}`);
+  fs.writeFileSync(tmpPath, Buffer.from(resp.data));
+  return { tmpPath, mimeType };
+}
+
+async function sendCoursePhotoDirect(phone, course) {
+  if (!course) return { ok: false, reason: 'no_course' };
+
+  const imageLink = String(course.link || '').trim();
+  if (!imageLink) {
+    return { ok: false, reason: 'missing_link' };
+  }
+
+  let tmpPath = '';
+  try {
+    const downloaded = await downloadImageFromSharedLink(imageLink, 'course');
+    tmpPath = downloaded.tmpPath;
+    const mimeType = downloaded.mimeType || 'image/jpeg';
+    const mediaId = await uploadMediaToWhatsApp(tmpPath, mimeType);
+
+    try {
+      const savedName = `out-${mediaId}${imageExtFromMime(mimeType)}`;
+      fs.copyFileSync(tmpPath, path.join(MEDIA_DIR, savedName));
+    } catch {}
+
+    const caption = [
+      course.nombre || 'Curso',
+      course.precio ? `Precio: ${moneyOrConsult(course.precio)}` : '',
+      course.fechaInicio ? `Inicio: ${course.fechaInicio}` : '',
+    ].filter(Boolean).join(' | ');
+
+    await sendWhatsAppImageById(phone, mediaId, caption);
+    return { ok: true };
+  } catch (e) {
+    console.error('❌ Error enviando foto del curso:', e?.response?.data || e?.message || e);
+    return { ok: false, reason: 'send_error', error: e };
+  } finally {
+    if (tmpPath) {
+      try { fs.unlinkSync(tmpPath); } catch {}
+    }
+  }
+}
+
+async function maybeSendCoursePhotos(phone, courses) {
+  const unique = Array.isArray(courses) ? courses.filter((c) => c?.nombre) : [];
+  if (!unique.length) return false;
+
+  const limited = unique.slice(0, 8);
+  let sentCount = 0;
+  const missing = [];
+  const failed = [];
+
+  if (limited.length > 1) {
+    await sendWhatsAppText(phone, 'Le paso también las fotos de los cursos 😊');
+  }
+
+  for (const course of limited) {
+    const result = await sendCoursePhotoDirect(phone, course);
+    if (result.ok) {
+      sentCount += 1;
+    } else if (result.reason === 'missing_link') {
+      missing.push(course.nombre || 'Curso');
+    } else {
+      failed.push(course.nombre || 'Curso');
+    }
+  }
+
+  if (missing.length) {
+    await sendWhatsAppText(phone, `No tengo la foto vinculada correctamente en la columna “Link” para: ${missing.join(', ')}.`);
+  }
+
+  if (failed.length && !sentCount) {
+    await sendWhatsAppText(phone, 'No pude enviar las fotos de los cursos en este momento. Revise que el link de imagen esté accesible o compartido correctamente.');
+  } else if (failed.length) {
+    await sendWhatsAppText(phone, `No pude enviar algunas fotos de cursos ahora mismo: ${failed.join(', ')}.`);
+  }
+
+  return sentCount > 0 || missing.length > 0 || failed.length > 0;
 }
 
 app.get("/ping", (req, res) => {
@@ -6334,15 +6490,30 @@ ${some}
 // COURSE
     if (intent.type === "COURSE") {
       const courses = await getCoursesCatalog();
-      const matches = intent.query ? findCourses(courses, intent.query, intent.mode) : [];
-      const replyCatalog = formatCoursesReply(matches, intent.mode);
+      const normalizedCourseQuery = normalize(intent.query || '');
+      const isGenericCourseQuery = !normalizedCourseQuery || /^(curso|cursos|taller|talleres)$/.test(normalizedCourseQuery);
+      const matches = isGenericCourseQuery ? courses : findCourses(courses, intent.query, intent.mode);
+      const replyCatalog = formatCoursesReply(matches, isGenericCourseQuery ? 'LIST' : intent.mode);
       if (replyCatalog) {
         pushHistory(waId, "assistant", replyCatalog);
         await sendWhatsAppText(phone, replyCatalog);
+        await maybeSendCoursePhotos(phone, matches);
         // ✅ INACTIVIDAD
         scheduleInactivityFollowUp(waId, phone);
         return;
       }
+
+      const some = courses.slice(0, 12).map(c => `🎓 ${c.nombre}`).join("\n");
+      const msgNo = `No encuentro ese curso en la hoja CURSOS.
+
+Cursos disponibles (algunos):
+${some}
+
+Si quiere, le paso información de cualquiera de esos 😊`;
+      pushHistory(waId, "assistant", msgNo);
+      await sendWhatsAppText(phone, msgNo);
+      scheduleInactivityFollowUp(waId, phone);
+      return;
     }
 
     // fallback
