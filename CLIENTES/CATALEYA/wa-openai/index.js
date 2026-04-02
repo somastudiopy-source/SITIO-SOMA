@@ -1738,6 +1738,8 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
   merged.hora = normalizeHourHM(merged.hora);
   if (!merged?.servicio || !merged?.fecha || !merged?.hora) return { type: "missing_core" };
 
+  if (isPastAppointmentDateTime(merged.fecha, merged.hora)) return { type: "invalid_past_date" };
+
   const busy = await calendarHasConflict({
     dateYMD: merged.fecha,
     startHM: merged.hora,
@@ -1850,11 +1852,75 @@ function weekdayEsFromYMD(ymd) {
   }
 }
 
-function nextDateForWeekday(targetWeekday) {
+function buildValidYMD(year, month, day) {
+  const yyyy = String(year || '').padStart(4, '0');
+  const mm = String(month || '').padStart(2, '0');
+  const dd = String(day || '').padStart(2, '0');
+  if (!/^\d{4}$/.test(yyyy) || !/^\d{2}$/.test(mm) || !/^\d{2}$/.test(dd)) return '';
+  const dt = new Date(`${yyyy}-${mm}-${dd}T12:00:00-03:00`);
+  if (Number.isNaN(dt.getTime())) return '';
+  const normalized = formatYMDHMInTZ(dt).ymd;
+  return normalized === `${yyyy}-${mm}-${dd}` ? normalized : '';
+}
+
+function extractExplicitDateFromText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+
+  let m = raw.match(/\b(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})\b/);
+  if (m) {
+    return buildValidYMD(m[1], m[2], m[3]);
+  }
+
+  m = raw.match(/\b(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?\b/);
+  if (m) {
+    const day = Number(m[1]);
+    const month = Number(m[2]);
+    let year = m[3] ? Number(m[3]) : Number(todayYMDInTZ().slice(0, 4));
+    if (year < 100) year += 2000;
+    return buildValidYMD(year, month, day);
+  }
+
+  const t = normalize(raw);
+  const monthMapEs = {
+    enero: 1,
+    febrero: 2,
+    marzo: 3,
+    abril: 4,
+    mayo: 5,
+    junio: 6,
+    julio: 7,
+    agosto: 8,
+    septiembre: 9,
+    setiembre: 9,
+    octubre: 10,
+    noviembre: 11,
+    diciembre: 12,
+  };
+
+  m = t.match(/\b(\d{1,2})\s+de\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)(?:\s+de\s+(\d{2,4}))?\b/);
+  if (m) {
+    const day = Number(m[1]);
+    const month = monthMapEs[m[2]];
+    let year = m[3] ? Number(m[3]) : Number(todayYMDInTZ().slice(0, 4));
+    if (year < 100) year += 2000;
+    return buildValidYMD(year, month, day);
+  }
+
+  return '';
+}
+
+function nextDateForWeekday(targetWeekday, options = {}) {
+  const includeToday = !!options.includeToday;
+  const weekOffset = Math.max(0, Number(options.weekOffset || 0) || 0);
+
   const today = new Date(`${todayYMDInTZ()}T12:00:00-03:00`);
   const current = today.getDay();
   let delta = (targetWeekday - current + 7) % 7;
-  if (delta === 0) delta = 7;
+
+  if (!includeToday && delta === 0) delta = 7;
+  delta += weekOffset * 7;
+
   const d = new Date(today.getTime() + delta * 24 * 60 * 60 * 1000);
   return formatYMDHMInTZ(d).ymd;
 }
@@ -1864,15 +1930,12 @@ function extractLikelyDateFromText(text) {
   if (!raw) return '';
   const t = normalize(raw);
 
-  const explicit = toYMD(raw);
+  const explicit = extractExplicitDateFromText(raw);
   if (explicit) return explicit;
 
+  if (/\bpasado manana\b/.test(t)) return addDaysToYMD(todayYMDInTZ(), 2);
   if (/\bhoy\b/.test(t)) return todayYMDInTZ();
-  if (/\bmanana\b/.test(t)) {
-    const d = new Date(`${todayYMDInTZ()}T12:00:00-03:00`);
-    const next = new Date(d.getTime() + 24 * 60 * 60 * 1000);
-    return formatYMDHMInTZ(next).ymd;
-  }
+  if (/\bmanana\b/.test(t)) return addDaysToYMD(todayYMDInTZ(), 1);
 
   const weekdays = {
     domingo: 0,
@@ -1887,8 +1950,22 @@ function extractLikelyDateFromText(text) {
   };
 
   for (const [name, num] of Object.entries(weekdays)) {
+    const rxNextWeek = new RegExp(`\\b(?:el\\s+)?${escapeRegex(name)}\\s+(?:que\\s+viene|de\\s+la\\s+semana\\s+que\\s+viene|de\\s+la\\s+proxima\\s+semana|de\\s+la\\s+próxima\\s+semana|proximo|próximo|siguiente)\\b`, 'i');
+    if (rxNextWeek.test(t)) {
+      return nextDateForWeekday(num, { includeToday: false, weekOffset: 1 });
+    }
+  }
+
+  for (const [name, num] of Object.entries(weekdays)) {
+    const rxThisWeek = new RegExp(`\\b(?:este|esta)\\s+${escapeRegex(name)}\\b`, 'i');
+    if (rxThisWeek.test(t)) {
+      return nextDateForWeekday(num, { includeToday: true });
+    }
+  }
+
+  for (const [name, num] of Object.entries(weekdays)) {
     if (new RegExp(`\\b${escapeRegex(name)}\\b`, 'i').test(t)) {
-      return nextDateForWeekday(num);
+      return nextDateForWeekday(num, { includeToday: true });
     }
   }
 
@@ -2021,9 +2098,12 @@ Reglas:
   try {
     const obj = JSON.parse(completion.choices[0].message.content);
     const horaNormalizada = normalizeHourHM((obj.hora || '').trim());
+    const fechaInterpretadaPorTexto = extractLikelyDateFromText(text);
+    const fechaInterpretadaPorIA = toYMD((obj.fecha || "").trim());
+
     return {
       ok: !!obj.ok,
-      fecha: toYMD((obj.fecha || "").trim()),
+      fecha: fechaInterpretadaPorTexto || fechaInterpretadaPorIA || "",
       hora: horaNormalizada,
       duracion_min: Number(obj.duracion_min || 60) || 60,
       servicio: (obj.servicio || "").trim(),
@@ -2243,6 +2323,20 @@ function getAvailableSlotsForDate({ dateYMD, durationMin, events = [] }) {
   return slots;
 }
 
+function isPastAppointmentDateTime(dateYMD, timeHM) {
+  const safeDate = toYMD(dateYMD);
+  if (!safeDate) return false;
+
+  const nowLocal = formatYMDHMInTZ(new Date());
+  if (safeDate < nowLocal.ymd) return true;
+  if (safeDate > nowLocal.ymd) return false;
+
+  const safeHM = normalizeHourHM(timeHM);
+  if (!safeHM) return false;
+
+  return hmToMinutes(safeHM) <= hmToMinutes(nowLocal.hm);
+}
+
 function formatSlotsByBlock(slots = []) {
   if (!Array.isArray(slots) || !slots.length) return '';
 
@@ -2420,31 +2514,28 @@ function ymdToDM(ymd) {
 function toYMD(dateStr) {
   const s = String(dateStr || "").trim();
   if (!s) return "";
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
 
-  let m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
-  if (m) {
-    const dd = String(m[1]).padStart(2, "0");
-    const mm = String(m[2]).padStart(2, "0");
-    const yyyy = String(m[3]);
-    return `${yyyy}-${mm}-${dd}`;
-  }
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return buildValidYMD(m[1], m[2], m[3]);
+
+  m = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/);
+  if (m) return buildValidYMD(m[1], m[2], m[3]);
+
+  m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (m) return buildValidYMD(m[3], m[2], m[1]);
 
   m = s.match(/^(\d{1,2})[\/\-](\d{1,2})$/);
   if (m) {
-    const dd = String(m[1]).padStart(2, "0");
-    const mm = String(m[2]).padStart(2, "0");
     const yyyy = todayYMDInTZ().slice(0, 4);
-    return `${yyyy}-${mm}-${dd}`;
+    return buildValidYMD(yyyy, m[2], m[1]);
   }
 
   const rel = normalize(s);
   if (rel === "hoy") return todayYMDInTZ();
-  if (rel === "manana" || rel === "mañana") {
-    const now = new Date();
-    const dt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-    return dt.toISOString().slice(0, 10);
-  }
+  if (rel === "manana" || rel === "mañana") return addDaysToYMD(todayYMDInTZ(), 1);
+
+  const explicit = extractExplicitDateFromText(s);
+  if (explicit) return explicit;
 
   const monthMap = {
     jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
@@ -2457,12 +2548,19 @@ function toYMD(dateStr) {
     const mon = monthMap[String(m[1]).slice(0,3).toLowerCase()];
     const dd = String(m[2]).padStart(2, '0');
     const yyyy = String(m[3] || todayYMDInTZ().slice(0, 4));
-    if (mon) return `${yyyy}-${mon}-${dd}`;
+    if (mon) return buildValidYMD(yyyy, mon, dd);
   }
 
-  const jsDate = new Date(s);
-  if (!isNaN(jsDate.getTime())) {
-    return jsDate.toISOString().slice(0, 10);
+  const looksSafeForNativeDate =
+    /T\d{2}:\d{2}/.test(s) ||
+    /\b(?:GMT|UTC)\b/i.test(s) ||
+    /^[A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{4}/.test(s);
+
+  if (looksSafeForNativeDate) {
+    const jsDate = new Date(s);
+    if (!isNaN(jsDate.getTime())) {
+      return formatYMDHMInTZ(jsDate).ymd;
+    }
   }
 
   return "";
@@ -5852,6 +5950,29 @@ Lo estoy validando con los datos del turno. En cuanto quede confirmado, le aviso
         const msgBusy = await buildBusyTurnoMessage({ base });
         pushHistory(waId, "assistant", msgBusy);
         await sendWhatsAppText(phone, msgBusy);
+        scheduleInactivityFollowUp(waId, phone);
+        return true;
+      }
+      if (result.type === "invalid_past_date") {
+        const resetBase = {
+          ...base,
+          fecha: '',
+          hora: '',
+          flow_step: 'awaiting_date',
+          last_intent: 'book_appointment',
+          last_service_name: base.servicio || base.last_service_name || '',
+        };
+        await saveAppointmentDraft(waId, phone, resetBase);
+        updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+        const msgPast = `Esa fecha ya pasó o ese horario ya quedó atrás 😊
+
+${await buildWeeklyAvailabilityMessage({
+          servicio: base?.servicio || base?.last_service_name || '',
+          durationMin: Number(base?.duracion_min || 60) || 60,
+          limitDays: 6,
+        })}`;
+        pushHistory(waId, "assistant", msgPast);
+        await sendWhatsAppText(phone, msgPast);
         scheduleInactivityFollowUp(waId, phone);
         return true;
       }
