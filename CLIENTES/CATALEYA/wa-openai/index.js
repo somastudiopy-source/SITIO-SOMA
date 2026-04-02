@@ -1092,6 +1092,53 @@ const LAST_SERVICE_TTL_MS = 6 * 60 * 60 * 1000; // 6 horas
 // ===================== DEDUPE =====================
 const processedMsgIds = new Set();
 
+// ===================== ENTRADA AGRUPADA (mensajes seguidos) =====================
+const INBOUND_MERGE_MS = Number(process.env.INBOUND_MERGE_MS || 1800);
+const inboundMergeState = new Map();
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function appendInboundMergeChunk(waId, chunk) {
+  const prev = inboundMergeState.get(waId) || { version: 0, items: [] };
+  const next = {
+    version: Number(prev.version || 0) + 1,
+    items: [...(Array.isArray(prev.items) ? prev.items : []), { ...chunk, ts: Date.now() }].slice(-12),
+  };
+  inboundMergeState.set(waId, next);
+  return next.version;
+}
+
+function consumeInboundMergeChunk(waId, version) {
+  const state = inboundMergeState.get(waId);
+  if (!state || state.version !== version) return null;
+  inboundMergeState.delete(waId);
+
+  const items = Array.isArray(state.items) ? state.items : [];
+  const latest = items[items.length - 1] || {};
+  const mergedText = items
+    .map((item) => String(item?.text || '').trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+  const mergedUserIntentText = items
+    .map((item) => String(item?.userIntentText || item?.text || '').trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+  const latestMedia = [...items].reverse().find((item) => !!item?.mediaMeta)?.mediaMeta || null;
+
+  return {
+    ...latest,
+    itemCount: items.length,
+    items,
+    text: mergedText,
+    userIntentText: mergedUserIntentText || mergedText,
+    mediaMeta: latestMedia,
+  };
+}
+
 // ===================== GOOGLE APIS =====================
 let sheetsClient = null;
 let driveClient = null;
@@ -4470,6 +4517,30 @@ ${lines.join("\n")}${footer}`.trim());
   return chunks;
 }
 
+function resolveReliableTurnService({ services = [], text = '', pendingDraft = null, lastKnownService = null, aiService = '' } = {}) {
+  const rows = Array.isArray(services) ? services : [];
+  const currentDraftService = pendingDraft?.servicio || pendingDraft?.last_service_name || '';
+  const currentKnownService = currentDraftService || lastKnownService?.nombre || '';
+
+  const directMatches = text ? findServices(rows, text, 'DETAIL') : [];
+  const directName = directMatches[0]?.nombre || '';
+  if (directName) return directName;
+
+  if (currentKnownService) return currentKnownService;
+
+  const aiResolved = resolveServiceCatalogMatch(rows, aiService || '');
+  if (!aiResolved?.nombre) return '';
+
+  const cleanText = normalize(text || '');
+  const cleanAi = normalize(cleanServiceName(aiResolved.nombre));
+  const aiBase = getServiceBaseFromName(aiResolved.nombre);
+
+  if (cleanAi && cleanText.includes(cleanAi)) return aiResolved.nombre;
+  if (aiBase && cleanText.includes(aiBase)) return aiResolved.nombre;
+
+  return '';
+}
+
 function findServiceByContext(rows, query, lastServiceName) {
   if (query) {
     const matches = findServices(rows, query, "DETAIL");
@@ -5544,8 +5615,8 @@ if (closeTimers.has(waId)) {
     // texto / audio / imagen
     const extracted = await extractTextFromIncomingMessage(msg);
     let text = (extracted.text || "").trim();
-    const mediaMeta = extracted.media || null;
-    const userIntentText = (
+    let mediaMeta = extracted.media || null;
+    let userIntentText = (
       msg.type === "image" ? (msg.image?.caption || "") :
       msg.type === "document" ? (msg.document?.caption || "") :
       text
@@ -5553,7 +5624,7 @@ if (closeTimers.has(waId)) {
 
 
 // ✅ Contexto para seguimiento al cierre (se actualiza durante la conversación)
-const contactInfoFromText = extractContactInfo(text);
+let contactInfoFromText = extractContactInfo(text);
 lastCloseContext.set(waId, {
   waId,
   phone,
@@ -5587,6 +5658,33 @@ lastCloseContext.set(waId, {
       scheduleInactivityFollowUp(waId, phone);
       return;
     }
+
+    const inboundVersion = appendInboundMergeChunk(waId, {
+      phone,
+      phoneRaw,
+      name,
+      text,
+      userIntentText,
+      mediaMeta,
+      msgType: msg.type,
+      msgId: msg.id,
+    });
+
+    await sleep(INBOUND_MERGE_MS);
+
+    const mergedInbound = consumeInboundMergeChunk(waId, inboundVersion);
+    if (!mergedInbound) return;
+
+    text = String(mergedInbound.text || '').trim();
+    userIntentText = String(mergedInbound.userIntentText || userIntentText || text).trim();
+    mediaMeta = mergedInbound.mediaMeta || mediaMeta || null;
+    contactInfoFromText = extractContactInfo(text);
+
+    updateLastCloseContext(waId, {
+      explicitName: contactInfoFromText?.nombre || lastCloseContext.get(waId)?.explicitName || '',
+      lastUserText: text,
+      profileName: name || lastCloseContext.get(waId)?.profileName || '',
+    });
 
     pushHistory(waId, "user", text);
 
@@ -6053,11 +6151,19 @@ Seña recibida ✔`.trim();
     if (pendingDraft && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
       const turno = await extractTurnoFromText({ text, customerName: name, context: pendingDraft });
       const relativeTurno = resolveRelativeTurnoReference(text, { pendingDraft, lastBooked: lastBookedTurno });
+      const servicesForPendingTurn = await getServicesCatalog();
+      const reliablePendingTurnService = resolveReliableTurnService({
+        services: servicesForPendingTurn,
+        text,
+        pendingDraft,
+        lastKnownService,
+        aiService: turno?.servicio || '',
+      });
       let merged = {
         ...pendingDraft,
         fecha: pendingDraft.fecha || relativeTurno?.fecha || "",
         hora: normalizeHourHM(pendingDraft.hora || relativeTurno?.hora || ""),
-        servicio: pendingDraft.servicio || pendingDraft.last_service_name || lastKnownService?.nombre || "",
+        servicio: reliablePendingTurnService || pendingDraft.servicio || pendingDraft.last_service_name || lastKnownService?.nombre || "",
         duracion_min: Number(pendingDraft.duracion_min || lastBookedTurno?.duracion_min || 60) || 60,
         notas: pendingDraft.notas || "",
       };
@@ -6067,7 +6173,7 @@ Seña recibida ✔`.trim();
           ...merged,
           fecha: turno.fecha || merged.fecha || relativeTurno?.fecha || "",
           hora: normalizeHourHM(turno.hora || merged.hora || relativeTurno?.hora || ""),
-          servicio: turno.servicio || merged.servicio || "",
+          servicio: reliablePendingTurnService || turno.servicio || merged.servicio || "",
           duracion_min: Number(turno.duracion_min || merged.duracion_min || 60) || 60,
           notas: turno.notas || merged.notas || "",
         };
@@ -6128,10 +6234,19 @@ Seña recibida ✔`.trim();
       const relativeTurno = resolveRelativeTurnoReference(text, { pendingDraft, lastBooked: lastBookedTurno });
 
       if (turno?.ok || pendingDraft || lastKnownService || (isWarmAffirmativeReply(text) && lastKnownService) || relativeTurno?.fecha || relativeTurno?.hora) {
+        const servicesForTurn = await getServicesCatalog();
+        const reliableTurnService = resolveReliableTurnService({
+          services: servicesForTurn,
+          text,
+          pendingDraft,
+          lastKnownService,
+          aiService: turno?.servicio || '',
+        });
+
         const merged = {
           fecha: toYMD(turno?.fecha || pendingDraft?.fecha || relativeTurno?.fecha || ""),
           hora: normalizeHourHM(turno?.hora || pendingDraft?.hora || relativeTurno?.hora || ""),
-          servicio: turno?.servicio || pendingDraft?.servicio || lastKnownService?.nombre || "",
+          servicio: reliableTurnService || pendingDraft?.servicio || lastKnownService?.nombre || "",
           duracion_min: Number(turno?.duracion_min || pendingDraft?.duracion_min || lastBookedTurno?.duracion_min || 60) || 60,
           notas: turno?.notas || pendingDraft?.notas || "",
           cliente_full: pendingDraft?.cliente_full || "",
@@ -6690,7 +6805,14 @@ Si después necesita algo, estoy acá ✨`;
     // SERVICE
     if (intent.type === "SERVICE") {
       const services = await getServicesCatalog();
-      const matches = intent.query ? findServices(services, intent.query, intent.mode) : [];
+      const reliableServiceQuery = resolveReliableTurnService({
+        services,
+        text,
+        pendingDraft,
+        lastKnownService,
+        aiService: intent.query || '',
+      }) || intent.query;
+      const matches = reliableServiceQuery ? findServices(services, reliableServiceQuery, intent.mode) : [];
       const replyCatalog = formatServicesReply(matches, intent.mode);
 
       if (replyCatalog) {
