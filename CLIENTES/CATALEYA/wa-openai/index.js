@@ -1538,7 +1538,7 @@ TURNOS:
   - Horarios de turnos: Lunes a Sábados de 10 a 12 hs y de 17 a 20 hs.
   - Para CONFIRMAR TURNO, se requiere seña obligatoria de $10.000. Si no lo abona, no se guardará el turno.
   - Alias para transferir: Cataleya178
-  sale a nombre Monica Pachecho. Luego debe enviar foto/captura del comprobante.
+  sale a nombre Monica Pacheco. Luego debe enviar foto/captura del comprobante.
 
   - Si el cliente pide turno para color/tintura/teñirse/retocar: luego de elegir día y horario, responder que queda en confirmar y que se consulta con la estilista.
   - Al registrar un turno, solicitar nombre completo y teléfono de contacto. Si ya pagó seña, marcar como SEÑADO.
@@ -1924,7 +1924,7 @@ const TURNOS_STYLIST_NAME = "Flavia Rueda";
 const TURNOS_HORARIOS_TXT = "Lunes a Sábados de 10 a 12 hs y de 17 a 20 hs";
 const TURNOS_SENA_TXT = "$10.000";
 const TURNOS_ALIAS = "Cataleya178";
-const TURNOS_ALIAS_TITULAR = "Monica Pachecho";
+const TURNOS_ALIAS_TITULAR = "Monica Pacheco";
 const TURNOS_ALLOWED_BLOCKS = [
   { label: "mañana", start: "10:00", end: "12:00" },
   { label: "tarde", start: "17:00", end: "20:00" },
@@ -2285,7 +2285,7 @@ function detectMonto10000(text) {
 
 function detectTitularMonicaPacheco(text) {
   const t = normalize(String(text || ""));
-  return t.includes("monica pacheco") || t.includes("monica pachecho");
+  return t.includes("monica pacheco") || t.includes("monica pacheco");
 }
 
 function isValidComprobanteSimple(text) {
@@ -5684,7 +5684,7 @@ function extractAmbiguousBeautyTerm(text) {
   return terms.find(term => new RegExp(`\\b${escapeRegex(term)}\\b`, 'i').test(t)) || '';
 }
 
-const AMBIGUOUS_BRIDGE_MESSAGE = `¡Hola! Gracias por escribirnos 😊 En este momento no podemos identificar exactamente sobre qué nos consultás. Si nos decís qué producto, servicio, promoción o curso te interesa, te pasamos toda la información.`;
+const AMBIGUOUS_BRIDGE_MESSAGE = `Hola!😊 En este momento no podemos identificar sobre qué nos consultás. Si nos decís qué producto, servicio, promoción o curso te interesa, te pasamos toda la información.`;
 
 function stripGreetingPrefix(text) {
   const raw = String(text || '').trim();
