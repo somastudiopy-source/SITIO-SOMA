@@ -4109,7 +4109,7 @@ function detectRowProductDomain(row) {
 function buildProductFollowupQuestion({ domain = '', familyLabel = '' } = {}) {
   const readableFamily = familyLabel ? (domain === 'furniture' ? (getFurnitureFamilyDef(familyLabel)?.label || familyLabel) : getProductFamilyLabel(familyLabel)) : '';
   if (domain === 'furniture') {
-    return `Si quiere, le ayudo a elegir la mejor opción 😊 ¿Es para uso personal o para un salón/negocio? ¿Qué estilo busca y cuántos puestos necesita?`;
+    return `Si quiere, le paso más opciones o fotos de los muebles que le interesen 😊`;
   }
   return `Si quiere, le ayudo a elegir la mejor opción 😊 ¿Lo necesita para uso personal o para trabajar? ¿Qué tipo de cabello tiene y qué resultado busca${readableFamily ? ` con ${readableFamily}` : ''}?`;
 }
@@ -4942,7 +4942,8 @@ function formatStockReply(matches, mode, opts = {}) {
 
   const inferredDomain = opts.domain || detectProductDomain(opts.familyLabel || matches.map((x) => `${x?.tab || ''} ${x?.nombre || ''} ${x?.categoria || ''}`).join(' | '));
   const header = mode === "LIST" ? `Encontré estas opciones:` : `Está en catálogo:`;
-  const footer = `\n\n${buildProductFollowupQuestion({ domain: inferredDomain, familyLabel: opts.familyLabel || '' })}`;
+  const footerText = buildProductFollowupQuestion({ domain: inferredDomain, familyLabel: opts.familyLabel || '' });
+  const footer = footerText ? `\n\n${footerText}` : '';
   return `${header}\n\n${blocks.join("\n\n— — —\n\n")}${footer}`.trim();
 }
 
@@ -5967,6 +5968,50 @@ function resolveProductsByNames(rows, names = []) {
   return out;
 }
 
+function isWeakAudioTranscriptText(text) {
+  const t = normalize(String(text || '').trim());
+  if (!t) return true;
+  if (t.length <= 2) return true;
+  if (/^(hola|buenas|buen dia|buen día|como estas|cómo estás|que tal|ok|dale|si|sí|aja|ajá|mm|mmm)$/.test(t)) return true;
+  if (/^(hola+[,! ]*)?(eh+|emm+|mmm+|aja+|ajá+)$/.test(t)) return true;
+  return false;
+}
+
+function getFurnitureRows(rows = []) {
+  return (Array.isArray(rows) ? rows : []).filter((row) => detectRowProductDomain(row) === 'furniture');
+}
+
+function recoverFurnitureCandidates(rows, text, lastCtx = null) {
+  const furnitureRows = getFurnitureRows(rows);
+  if (!furnitureRows.length) return [];
+
+  const directFamily =
+    detectFurnitureFamily(text) ||
+    detectFurnitureFamily(lastCtx?.family || '') ||
+    detectFurnitureFamily((lastCtx?.lastOptions || []).join(' ')) ||
+    '';
+
+  if (directFamily) {
+    const related = findStockRelated(furnitureRows, directFamily, { domain: 'furniture', family: directFamily, limit: 50 });
+    if (related.length) return related;
+  }
+
+  if (lastCtx?.lastOptions?.length) {
+    const byNames = resolveProductsByNames(furnitureRows, lastCtx.lastOptions);
+    if (byNames.length) return byNames;
+  }
+
+  const cleanText = normalizeCatalogSearchText(text || '');
+  if (!cleanText) return [];
+
+  const tokenHits = furnitureRows.filter((row) => {
+    const hay = buildStockHaystack(row);
+    return tokenize(cleanText, { expandSynonyms: false }).some((tok) => tok.length >= 4 && containsCatalogPhrase(hay, tok));
+  });
+
+  return tokenHits.slice(0, 20);
+}
+
 async function maybeSendMultipleProductPhotos(phone, products, userText) {
   if (!Array.isArray(products) || !products.length) return false;
   if (!userAsksForPhoto(userText)) return false;
@@ -6282,6 +6327,20 @@ lastCloseContext.set(waId, {
     text = String(mergedInbound.text || '').trim();
     userIntentText = String(mergedInbound.userIntentText || userIntentText || text).trim();
     mediaMeta = mergedInbound.mediaMeta || mediaMeta || null;
+
+    const lastProductCtxForAudio = getLastProductContext(waId);
+    if (mergedInbound.msgType === 'audio' && isWeakAudioTranscriptText(text) && lastProductCtxForAudio?.domain === 'furniture') {
+      const recoveredAudioText = [
+        lastProductCtxForAudio.family || '',
+        Array.isArray(lastProductCtxForAudio.lastOptions) ? lastProductCtxForAudio.lastOptions.join(' ') : '',
+      ].filter(Boolean).join(' ').trim();
+
+      if (recoveredAudioText) {
+        text = recoveredAudioText;
+        userIntentText = recoveredAudioText;
+      }
+    }
+
     contactInfoFromText = extractContactInfo(text);
 
     updateLastCloseContext(waId, {
@@ -7436,11 +7495,15 @@ Si después necesita algo, estoy acá ✨`;
       if (broader.length) {
         const broaderSlice = broader.slice(0, 12);
         setLastProductContext(waId, {
-          family: resolvedFamily || detectProductFamily(resolvedQuery) || '',
+          domain: resolvedDomain || detectProductDomain(resolvedQuery, resolvedFamily) || '',
+          family: resolvedFamily || (resolvedDomain === 'furniture' ? detectFurnitureFamily(resolvedQuery) : detectProductFamily(resolvedQuery)) || '',
           focusTerm: resolvedFocusTerm || '',
           hairType: resolvedHairType || '',
           need: resolvedNeed || '',
           useType: resolvedUseType || '',
+          businessType: resolvedBusinessType || '',
+          style: resolvedStyle || '',
+          seatsNeeded: resolvedSeatsNeeded || '',
           mode: 'list',
           lastOptions: broaderSlice.map((x) => x.nombre),
         });
@@ -7466,15 +7529,51 @@ Si después necesita algo, estoy acá ✨`;
         return;
       }
 
+      if (resolvedDomain === 'furniture') {
+        const recoveredFurniture = recoverFurnitureCandidates(stock, text, lastProductCtx);
+        if (recoveredFurniture.length) {
+          const recoveredSlice = recoveredFurniture.slice(0, 12);
+          setLastProductContext(waId, {
+            domain: 'furniture',
+            family: resolvedFamily || detectFurnitureFamily(text) || detectFurnitureFamily((lastProductCtx?.lastOptions || []).join(' ')) || '',
+            focusTerm: '',
+            hairType: '',
+            need: '',
+            useType: '',
+            businessType: resolvedBusinessType || '',
+            style: resolvedStyle || '',
+            seatsNeeded: resolvedSeatsNeeded || '',
+            mode: 'list',
+            lastOptions: recoveredSlice.map((x) => x.nombre),
+          });
+
+          const parts = formatStockRelatedListAll(recoveredFurniture, {
+            domain: 'furniture',
+            familyLabel: resolvedFamily || detectFurnitureFamily(text) || detectFurnitureFamily((lastProductCtx?.lastOptions || []).join(' ')) || 'equipamiento',
+            chunkSize: 8,
+          });
+          for (const part of parts) {
+            pushHistory(waId, 'assistant', part);
+            await sendWhatsAppText(phone, part);
+          }
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
+      }
+
       setLastProductContext(waId, {
+        domain: resolvedDomain || '',
         family: resolvedFamily || '',
         focusTerm: resolvedFocusTerm || '',
         hairType: resolvedHairType || '',
         need: resolvedNeed || '',
         useType: resolvedUseType || '',
+        businessType: resolvedBusinessType || '',
+        style: resolvedStyle || '',
+        seatsNeeded: resolvedSeatsNeeded || '',
         mode: 'followup',
       });
-      await sendWhatsAppText(phone, `No lo encuentro así en el catálogo. ${resolvedDomain === 'furniture' ? 'Dígame qué mueble busca, si es para uso personal o para un salón/negocio y qué estilo le gustaría 😊' : 'Dígame la marca, para qué lo necesita o qué tipo de cabello tiene y le recomiendo mejor 😊'}`);
+      await sendWhatsAppText(phone, `No lo encuentro así en el catálogo. ${resolvedDomain === 'furniture' ? 'No encontré ese mueble exacto, pero si quiere le paso otras opciones del stock de muebles 😊' : 'Dígame la marca, para qué lo necesita o qué tipo de cabello tiene y le recomiendo mejor 😊'}`);
       scheduleInactivityFollowUp(waId, phone);
       return;
     }
