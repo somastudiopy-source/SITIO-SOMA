@@ -155,6 +155,42 @@ async function ensureAppointmentTables() {
   `);
 }
 
+
+
+async function ensureCommercialFollowupTables() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS commercial_followups (
+      wa_id TEXT PRIMARY KEY,
+      wa_phone TEXT NOT NULL,
+      phone_raw TEXT,
+      profile_name TEXT,
+      explicit_name TEXT,
+      followup_kind TEXT NOT NULL,
+      context_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      last_inbound_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      send_after_at TIMESTAMPTZ NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      sent_at TIMESTAMPTZ,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS commercial_followup_logs (
+      id BIGSERIAL PRIMARY KEY,
+      wa_id TEXT NOT NULL,
+      wa_phone TEXT NOT NULL,
+      followup_kind TEXT NOT NULL,
+      message_text TEXT,
+      status TEXT NOT NULL,
+      error_text TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
 // ✅ Normalización única: 549XXXXXXXX -> 54XXXXXXXX
 function normalizePhone(s) {
   s = String(s || "").trim().replace(/[ \+\-\(\)]/g, "");
@@ -627,6 +663,12 @@ const TEMPLATE_NUEVO_TURNO_PELUQUERA = process.env.TEMPLATE_NUEVO_TURNO_PELUQUER
 const STYLIST_NOTIFY_PHONE_RAW = process.env.STYLIST_NOTIFY_PHONE || "3868 466370";
 const APPOINTMENT_TEMPLATE_SCAN_MS = Number(process.env.APPOINTMENT_TEMPLATE_SCAN_MS || 60000);
 
+const ENABLE_COMMERCIAL_FOLLOWUPS = String(process.env.ENABLE_COMMERCIAL_FOLLOWUPS || "true").toLowerCase() === "true";
+const COMMERCIAL_FOLLOWUP_SCAN_MS = Number(process.env.COMMERCIAL_FOLLOWUP_SCAN_MS || 60000);
+const COMMERCIAL_FOLLOWUP_DELAY_MS = Number(process.env.COMMERCIAL_FOLLOWUP_DELAY_MS || 5 * 60 * 1000);
+const COMMERCIAL_FOLLOWUP_MAX_PER_RUN = Number(process.env.COMMERCIAL_FOLLOWUP_MAX_PER_RUN || 20);
+
+
 
 // ===================== HUBSPOT (CRM seguimiento) =====================
 const HUBSPOT_ACCESS_TOKEN = process.env.HUBSPOT_ACCESS_TOKEN || process.env.HUBSPOT_TOKEN || "";
@@ -661,6 +703,349 @@ const HUBSPOT_OPTION = {
 
 function hasHubSpotEnabled() {
   return !!HUBSPOT_ACCESS_TOKEN;
+}
+
+
+function detectCommercialFollowupKindFromContext(ctx = {}) {
+  const fullText = [
+    ctx?.interest || "",
+    ctx?.lastUserText || "",
+    ctx?.observacion || "",
+    ctx?.producto || "",
+    ctx?.categoria || "",
+  ].join(" | ");
+
+  const t = normalize(fullText);
+
+  if (/\bcurso\b|\bcursos\b|\btaller\b|\bcapacitacion\b|\bcapacitación\b/.test(t)) {
+    return "COURSE";
+  }
+
+  const hasProductSignal =
+    !!detectProductFamily(fullText) ||
+    !!pickPrimaryProducto(fullText) ||
+    /\bshampoo\b|\bchampu\b|\bchampú\b|\bmatizador\b|\bnutricion\b|\bnutrición\b|\bserum\b|\bsérum\b|\bampolla\b|\btratamiento\b|\btintura\b|\bdecolorante\b|\boxidante\b|\bkeratina\b|\bproducto\b|\bstock\b|\binsumo\b/.test(t);
+
+  if (hasProductSignal) return "PRODUCT";
+
+  return "";
+}
+
+async function upsertCommercialFollowupCandidate(waId) {
+  if (!ENABLE_COMMERCIAL_FOLLOWUPS || !waId) return;
+
+  const ctx = lastCloseContext.get(waId) || {};
+  const followupKind = detectCommercialFollowupKindFromContext(ctx);
+  if (!followupKind) return;
+
+  const phone = normalizePhone(ctx.phone || ctx.phoneRaw || "");
+  if (!phone) return;
+
+  const sendAfter = new Date(Date.now() + COMMERCIAL_FOLLOWUP_DELAY_MS);
+
+  await db.query(
+    `
+    INSERT INTO commercial_followups (
+      wa_id, wa_phone, phone_raw, profile_name, explicit_name,
+      followup_kind, context_json, last_inbound_at, send_after_at, status, sent_at, last_error, created_at, updated_at
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),$8,'pending',NULL,NULL,NOW(),NOW())
+    ON CONFLICT (wa_id) DO UPDATE SET
+      wa_phone = EXCLUDED.wa_phone,
+      phone_raw = EXCLUDED.phone_raw,
+      profile_name = EXCLUDED.profile_name,
+      explicit_name = EXCLUDED.explicit_name,
+      followup_kind = EXCLUDED.followup_kind,
+      context_json = EXCLUDED.context_json,
+      last_inbound_at = NOW(),
+      send_after_at = EXCLUDED.send_after_at,
+      status = 'pending',
+      sent_at = NULL,
+      last_error = NULL,
+      updated_at = NOW()
+    `,
+    [
+      waId,
+      phone,
+      String(ctx.phoneRaw || "").trim(),
+      String(ctx.profileName || ctx.name || "").trim(),
+      String(ctx.explicitName || "").trim(),
+      followupKind,
+      ctx || {},
+      sendAfter.toISOString(),
+    ]
+  );
+}
+
+async function logCommercialFollowup({ waId, waPhone, followupKind, messageText, status, errorText = "" }) {
+  await db.query(
+    `
+    INSERT INTO commercial_followup_logs (wa_id, wa_phone, followup_kind, message_text, status, error_text)
+    VALUES ($1,$2,$3,$4,$5,$6)
+    `,
+    [
+      waId,
+      normalizePhone(waPhone || ""),
+      followupKind || "",
+      String(messageText || "").trim() || null,
+      status,
+      String(errorText || "").trim() || null,
+    ]
+  );
+}
+
+function getFriendlyFirstName(ctx = {}, contact = null) {
+  const props = contact?.properties || {};
+  return titleCaseName(
+    props?.[HUBSPOT_PROPERTY.firstname] ||
+    ctx?.explicitName ||
+    ctx?.profileName ||
+    ctx?.name ||
+    ""
+  );
+}
+
+async function getHubSpotContactForFollowup(ctx = {}) {
+  try {
+    await upsertHubSpotContactFromClose(ctx);
+  } catch (e) {
+    console.error("❌ Error sincronizando HubSpot antes del follow-up:", e?.response?.data || e?.message || e);
+  }
+
+  let contact = null;
+  if (ctx?.waId) contact = await findHubSpotContactByWaId(ctx.waId);
+  if (!contact && (ctx?.phoneRaw || ctx?.phone)) {
+    const matches = await findHubSpotContactsByPhone(ctx.phoneRaw || ctx.phone);
+    contact = chooseBestHubSpotMatch(matches, ctx.phoneRaw || ctx.phone);
+  }
+  return contact || null;
+}
+
+async function buildCourseFollowupMessage({ ctx, contact }) {
+  const props = contact?.properties || {};
+  const fullText = [
+    props?.[HUBSPOT_PROPERTY.observacion] || "",
+    props?.[HUBSPOT_PROPERTY.producto] || "",
+    props?.[HUBSPOT_PROPERTY.categoria] || "",
+    ctx?.interest || "",
+    ctx?.lastUserText || "",
+    getConversationSnippetForClose(ctx?.waId || ""),
+  ].join(" | ");
+
+  const courses = await getCoursesCatalog();
+  if (!courses.length) return "";
+
+  let matches = findCourses(courses, fullText, "DETAIL");
+  if (!matches.length) matches = findCourses(courses, "curso", "LIST");
+
+  const selected = matches.slice(0, 2).filter(Boolean);
+  if (!selected.length) return "";
+
+  const firstName = getFriendlyFirstName(ctx, contact);
+  const saludo = firstName ? `Buen día ${firstName} 😊` : `Buen día 😊`;
+
+  const top = selected[0];
+
+  return [
+    saludo,
+    "",
+    `Le escribo porque *${top.nombre}* está avanzando con los cupos.`,
+    "Si quiere asegurarse el lugar, conviene señarlo cuanto antes ✨",
+    top.precio ? `• Precio: *${moneyOrConsult(top.precio)}*` : "",
+    top.sena ? `• Seña / inscripción: ${top.sena}` : "",
+    top.fechaInicio ? `• Inicio: ${top.fechaInicio}` : "",
+    "",
+    "Si quiere, le paso ahora mismo la info para reservar su lugar."
+  ].filter(Boolean).join("\n");
+}
+
+async function buildProductFollowupMessage({ ctx, contact }) {
+  const props = contact?.properties || {};
+  const fullText = [
+    props?.[HUBSPOT_PROPERTY.observacion] || "",
+    props?.[HUBSPOT_PROPERTY.producto] || "",
+    props?.[HUBSPOT_PROPERTY.categoria] || "",
+    ctx?.interest || "",
+    ctx?.lastUserText || "",
+    getConversationSnippetForClose(ctx?.waId || ""),
+  ].join(" | ");
+
+  const stock = await getStockCatalog();
+  if (!stock.length) return "";
+
+  const resolvedFamily = detectProductFamily(fullText) || "";
+  const resolvedFocusTerm = detectProductFocusTerm(fullText) || "";
+  const related = findStockRelated(stock, fullText, {
+    family: resolvedFamily,
+    focusTerm: resolvedFocusTerm,
+    limit: 30,
+  });
+
+  if (!related.length) return "";
+
+  const shortlist = shortlistProductsForRecommendation(related, {
+    query: fullText,
+    family: resolvedFamily,
+    focusTerm: resolvedFocusTerm,
+    need: fullText,
+    limit: 6,
+  });
+
+  const recoAI = await recommendProductsWithAI({
+    text: fullText,
+    familyLabel: resolvedFamily,
+    need: fullText,
+    products: shortlist.slice(0, 6),
+  });
+
+  const pickedNames = new Set(
+    Array.isArray(recoAI?.recommended_names) ? recoAI.recommended_names : []
+  );
+
+  let picked = shortlist.filter((x) => pickedNames.has(x.nombre)).slice(0, 4);
+  if (!picked.length) picked = shortlist.slice(0, 3);
+
+  const body = formatRecommendedProductsReply(recoAI, picked, {
+    familyLabel: resolvedFamily,
+    need: fullText,
+  });
+
+  if (!body) return "";
+
+  const firstName = getFriendlyFirstName(ctx, contact);
+  const saludo = firstName ? `Buen día ${firstName} 😊` : `Buen día 😊`;
+
+  return `${saludo}
+
+Le dejo una recomendación según lo que consultó:
+
+${body}`;
+}
+
+async function processCommercialFollowups() {
+  if (!ENABLE_COMMERCIAL_FOLLOWUPS) return;
+
+  const r = await db.query(
+    `
+    SELECT *
+    FROM commercial_followups
+    WHERE status = 'pending'
+      AND send_after_at <= NOW()
+    ORDER BY send_after_at ASC
+    LIMIT $1
+    `,
+    [COMMERCIAL_FOLLOWUP_MAX_PER_RUN]
+  );
+
+  for (const row of (r.rows || [])) {
+    const waId = String(row.wa_id || "").trim();
+    const waPhone = normalizePhone(row.wa_phone || "");
+    const ctx = row.context_json || {};
+    const followupKind = String(row.followup_kind || "").trim();
+
+    try {
+      if (!waId || !waPhone || !followupKind) continue;
+
+      const claim = await db.query(
+        `
+        UPDATE commercial_followups
+        SET status = 'processing', updated_at = NOW()
+        WHERE wa_id = $1 AND status = 'pending'
+        RETURNING wa_id
+        `,
+        [waId]
+      );
+      if (!claim.rows?.length) continue;
+
+      const draft = await getAppointmentDraft(waId);
+      if (draft) {
+        await db.query(
+          `UPDATE commercial_followups
+           SET status = 'skipped', last_error = $2, updated_at = NOW()
+           WHERE wa_id = $1`,
+          [waId, "draft_abierto"]
+        );
+        await logCommercialFollowup({
+          waId,
+          waPhone,
+          followupKind,
+          messageText: "",
+          status: "skipped",
+          errorText: "draft_abierto",
+        });
+        continue;
+      }
+
+      const contact = await getHubSpotContactForFollowup({
+        ...ctx,
+        waId,
+        phone: waPhone,
+        phoneRaw: row.phone_raw || ctx.phoneRaw || waPhone,
+      });
+
+      let messageText = "";
+      if (followupKind === "COURSE") {
+        messageText = await buildCourseFollowupMessage({ ctx: { ...ctx, waId }, contact });
+      } else if (followupKind === "PRODUCT") {
+        messageText = await buildProductFollowupMessage({ ctx: { ...ctx, waId }, contact });
+      }
+
+      if (!messageText) {
+        await db.query(
+          `UPDATE commercial_followups
+           SET status = 'skipped', last_error = $2, updated_at = NOW()
+           WHERE wa_id = $1`,
+          [waId, "sin_mensaje"]
+        );
+        await logCommercialFollowup({
+          waId,
+          waPhone,
+          followupKind,
+          messageText: "",
+          status: "skipped",
+          errorText: "sin_mensaje",
+        });
+        continue;
+      }
+
+      pushHistory(waId, "assistant", messageText);
+      await sendWhatsAppText(waPhone, messageText);
+
+      await db.query(
+        `UPDATE commercial_followups
+         SET status = 'sent', sent_at = NOW(), last_error = NULL, updated_at = NOW()
+         WHERE wa_id = $1`,
+        [waId]
+      );
+
+      await logCommercialFollowup({
+        waId,
+        waPhone,
+        followupKind,
+        messageText,
+        status: "sent",
+      });
+    } catch (e) {
+      const errTxt = e?.response?.data ? JSON.stringify(e.response.data) : (e?.message || "error");
+      console.error("❌ Error procesando follow-up comercial:", errTxt);
+
+      await db.query(
+        `UPDATE commercial_followups
+         SET status = 'error', last_error = $2, updated_at = NOW()
+         WHERE wa_id = $1`,
+        [waId, String(errTxt).slice(0, 1000)]
+      );
+
+      await logCommercialFollowup({
+        waId,
+        waPhone,
+        followupKind,
+        messageText: "",
+        status: "error",
+        errorText: errTxt,
+      });
+    }
+  }
 }
 
 // ===================== REQUIRED ENV CHECK (evita demos rotas) =====================
@@ -5722,6 +6107,8 @@ updateLastCloseContext(waId, {
   lastUserText: text,
 });
 
+    await upsertCommercialFollowupCandidate(waId);
+
     // Si piden foto sin decir cuál: usar el último producto o las últimas opciones listadas
     if (userAsksForPhoto(userIntentText)) {
       const stockForPhotos = await getStockCatalog();
@@ -6974,12 +7361,24 @@ if (ENABLE_APPOINTMENT_TEMPLATES) {
   console.log("ℹ️ Plantillas de turnos desactivadas temporalmente");
 }
 
+// ===================== FOLLOW-UP COMERCIAL =====================
+if (ENABLE_COMMERCIAL_FOLLOWUPS) {
+  setInterval(() => {
+    processCommercialFollowups().catch((e) => {
+      console.error("❌ Error en el scheduler de follow-up comercial:", e?.response?.data || e?.message || e);
+    });
+  }, COMMERCIAL_FOLLOWUP_SCAN_MS);
+} else {
+  console.log("ℹ️ Follow-up comercial desactivado");
+}
+
 // ===================== START =====================
 const PORT = process.env.PORT || 3000;
 
 (async () => {
   await ensureDb();
   await ensureAppointmentTables();
+  await ensureCommercialFollowupTables();
   console.log(hasHubSpotEnabled()
     ? "✅ HubSpot CRM habilitado para seguimiento al cierre de charla"
     : "⚠️ HubSpot CRM no configurado: falta HUBSPOT_ACCESS_TOKEN / HUBSPOT_TOKEN");
@@ -6989,9 +7388,17 @@ const PORT = process.env.PORT || 3000;
   console.log(ENABLE_APPOINTMENT_TEMPLATES
     ? "ℹ️ Plantillas de turnos activadas"
     : "ℹ️ Plantillas de turnos desactivadas temporalmente");
+  console.log(ENABLE_COMMERCIAL_FOLLOWUPS
+    ? "ℹ️ Follow-up comercial activado"
+    : "ℹ️ Follow-up comercial desactivado");
   if (ENABLE_APPOINTMENT_TEMPLATES) {
     await processAppointmentTemplateNotifications().catch((e) => {
       console.error('❌ Error inicial procesando plantillas de turnos:', e?.response?.data || e?.message || e);
+    });
+  }
+  if (ENABLE_COMMERCIAL_FOLLOWUPS) {
+    await processCommercialFollowups().catch((e) => {
+      console.error('❌ Error inicial procesando follow-up comercial:', e?.response?.data || e?.message || e);
     });
   }
 
