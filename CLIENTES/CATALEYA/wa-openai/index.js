@@ -27,6 +27,21 @@ async function tryParsePdfBuffer(buf) {
 
 
 dotenv.config();
+
+// ===================== GOOGLE CONTACTS (People API) =====================
+const GOOGLE_CONTACTS_CLIENT_ID = process.env.GOOGLE_CONTACTS_CLIENT_ID || "";
+const GOOGLE_CONTACTS_CLIENT_SECRET = process.env.GOOGLE_CONTACTS_CLIENT_SECRET || "";
+const GOOGLE_CONTACTS_REDIRECT_URI = process.env.GOOGLE_CONTACTS_REDIRECT_URI || "https://developers.google.com/oauthplayground";
+const GOOGLE_CONTACTS_REFRESH_TOKEN_1 = process.env.GOOGLE_CONTACTS_REFRESH_TOKEN_1 || "";
+const GOOGLE_CONTACTS_ACCOUNT_EMAIL_1 = String(process.env.GOOGLE_CONTACTS_ACCOUNT_EMAIL_1 || "").trim().toLowerCase();
+const GOOGLE_CONTACTS_REFRESH_TOKEN_2 = process.env.GOOGLE_CONTACTS_REFRESH_TOKEN_2 || "";
+const GOOGLE_CONTACTS_ACCOUNT_EMAIL_2 = String(process.env.GOOGLE_CONTACTS_ACCOUNT_EMAIL_2 || "").trim().toLowerCase();
+const ENABLE_GOOGLE_CONTACTS_SYNC = String(process.env.ENABLE_GOOGLE_CONTACTS_SYNC || "true").toLowerCase() === "true";
+
+const GOOGLE_CONTACTS_TARGETS = [
+  { index: 1, email: GOOGLE_CONTACTS_ACCOUNT_EMAIL_1, refreshToken: GOOGLE_CONTACTS_REFRESH_TOKEN_1 },
+  { index: 2, email: GOOGLE_CONTACTS_ACCOUNT_EMAIL_2, refreshToken: GOOGLE_CONTACTS_REFRESH_TOKEN_2 },
+].filter((x) => x.email && x.refreshToken);
 // ===================== DB (para panel) =====================
 const DB_URL = process.env.DB_URL || process.env.DATABASE_URL || "";
 if (!DB_URL) {
@@ -703,6 +718,323 @@ const HUBSPOT_OPTION = {
 
 function hasHubSpotEnabled() {
   return !!HUBSPOT_ACCESS_TOKEN;
+}
+
+function hasGoogleContactsSyncEnabled() {
+  return ENABLE_GOOGLE_CONTACTS_SYNC && !!GOOGLE_CONTACTS_CLIENT_ID && !!GOOGLE_CONTACTS_CLIENT_SECRET && GOOGLE_CONTACTS_TARGETS.length > 0;
+}
+
+const pendingContactNameRequests = new Map();
+const contactIdentityCache = new Map();
+const CONTACT_IDENTITY_CACHE_MS = Number(process.env.CONTACT_IDENTITY_CACHE_MS || 10 * 60 * 1000);
+
+function getCachedIdentityByWaId(waId) {
+  const row = contactIdentityCache.get(waId);
+  if (!row) return null;
+  if ((Date.now() - Number(row.ts || 0)) > CONTACT_IDENTITY_CACHE_MS) {
+    contactIdentityCache.delete(waId);
+    return null;
+  }
+  return row.value || null;
+}
+
+function setCachedIdentityByWaId(waId, value) {
+  if (!waId) return value || null;
+  contactIdentityCache.set(waId, { ts: Date.now(), value: value || null });
+  return value || null;
+}
+
+function clearCachedIdentityByWaId(waId) {
+  if (waId) contactIdentityCache.delete(waId);
+}
+
+function getPendingContactNameRequest(waId) {
+  return pendingContactNameRequests.get(waId) || null;
+}
+
+function setPendingContactNameRequest(waId, patch = {}) {
+  if (!waId) return null;
+  const prev = getPendingContactNameRequest(waId) || {};
+  const next = { ...prev, ...patch, updatedAt: Date.now() };
+  pendingContactNameRequests.set(waId, next);
+  return next;
+}
+
+function clearPendingContactNameRequest(waId) {
+  if (waId) pendingContactNameRequests.delete(waId);
+}
+
+function extractNameAnswer(text = '') {
+  const explicit = extractExplicitNameFromSnippet(text);
+  if (explicit) return explicit;
+  return cleanNameCandidate(text);
+}
+
+function looksLikeStandaloneNameAnswer(text = '') {
+  const cleaned = extractNameAnswer(text);
+  if (!cleaned) return false;
+  const compact = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!compact) return false;
+  return compact.length <= 60 && !/[?.!,;:]/.test(compact.replace(/[ÁÉÍÓÚÑáéíóúñ' -]/g, ''));
+}
+
+function buildContactAskNameMessage() {
+  return `Buen día 😊 No te tengo agendada todavía con un nombre correcto.
+
+¿Me pasás por favor tu nombre así te registro bien y puedo seguir tu historial?`;
+}
+
+function buildContactNameUpdatedMessage(firstName = '') {
+  const nice = titleCaseName(firstName || '');
+  return nice
+    ? `Gracias ${nice} 😊 Ya te registré correctamente. ¿En qué puedo ayudarte?`
+    : `Gracias 😊 Ya te registré correctamente. ¿En qué puedo ayudarte?`;
+}
+
+function buildGoogleContactsNote(ctx = {}) {
+  const pieces = [];
+  if (ctx?.clientId) pieces.push(`Cliente: ${ctx.clientId}`);
+  if (ctx?.phone) pieces.push(`WhatsApp: +${normalizePhoneDigits(ctx.phone)}`);
+  pieces.push('Origen: WhatsApp bot');
+  return pieces.join(' | ');
+}
+
+async function getGoogleContactsOAuthClient(refreshToken) {
+  const oauth2 = new google.auth.OAuth2(
+    GOOGLE_CONTACTS_CLIENT_ID,
+    GOOGLE_CONTACTS_CLIENT_SECRET,
+    GOOGLE_CONTACTS_REDIRECT_URI
+  );
+  oauth2.setCredentials({ refresh_token: refreshToken });
+  await oauth2.getAccessToken();
+  return oauth2;
+}
+
+async function getGooglePeopleClient(target) {
+  const auth = await getGoogleContactsOAuthClient(target.refreshToken);
+  return google.people({ version: 'v1', auth });
+}
+
+async function warmupGoogleContactSearch(people) {
+  try {
+    await people.people.searchContacts({ query: '', readMask: 'names,phoneNumbers,metadata' });
+  } catch {}
+}
+
+function getGoogleContactDisplayName(person) {
+  const names = Array.isArray(person?.names) ? person.names : [];
+  const primary = names.find((n) => n?.metadata?.primary) || names[0] || {};
+  return titleCaseName(primary.displayName || [primary.givenName, primary.familyName].filter(Boolean).join(' '));
+}
+
+function getGoogleContactEtag(person) {
+  const sources = Array.isArray(person?.metadata?.sources) ? person.metadata.sources : [];
+  const src = sources.find((s) => s?.etag) || {};
+  return src.etag || '';
+}
+
+function buildGoogleNamePayload(fullName) {
+  const parts = splitNameParts(fullName);
+  return [{
+    displayName: parts.fullName || fullName,
+    givenName: parts.firstName || '',
+    familyName: parts.lastName || '',
+  }];
+}
+
+async function searchGoogleContactsByPhone(target, phoneRaw) {
+  if (!target?.refreshToken) return [];
+  const people = await getGooglePeopleClient(target);
+  await warmupGoogleContactSearch(people);
+
+  const candidates = Array.from(new Set([
+    ...buildPhoneCandidates(phoneRaw),
+    normalizePhoneDigits(phoneRaw || ''),
+    normalizeComparablePhone(phoneRaw || ''),
+  ].filter(Boolean)));
+
+  const found = new Map();
+  for (const q of candidates.slice(0, 6)) {
+    try {
+      const resp = await people.people.searchContacts({
+        query: q,
+        readMask: 'names,phoneNumbers,metadata,biographies',
+        pageSize: 10,
+      });
+      const rows = Array.isArray(resp?.data?.results) ? resp.data.results : [];
+      for (const item of rows) {
+        const person = item?.person || {};
+        const phones = Array.isArray(person?.phoneNumbers) ? person.phoneNumbers : [];
+        const exact = phones.some((p) => normalizeComparablePhone(p?.value || '') === normalizeComparablePhone(phoneRaw || ''));
+        if (exact && person?.resourceName && !found.has(person.resourceName)) found.set(person.resourceName, person);
+      }
+    } catch (e) {
+      console.error(`❌ Error buscando Google Contacts en ${target.email}:`, e?.response?.data || e?.message || e);
+    }
+    if (found.size) break;
+  }
+
+  return Array.from(found.values());
+}
+
+async function upsertGoogleContactInTarget(target, { phoneRaw, explicitName = '', profileName = '', note = '' } = {}) {
+  if (!target?.refreshToken || !phoneRaw) return { action: 'skipped' };
+  const people = await getGooglePeopleClient(target);
+  const normalizedPhone = normalizeHubSpotPhone(phoneRaw) || `+${normalizePhoneDigits(phoneRaw)}`;
+  const finalName = cleanNameCandidate(explicitName) || cleanNameCandidate(profileName) || '';
+
+  const existingRows = await searchGoogleContactsByPhone(target, phoneRaw);
+  const existing = existingRows[0] || null;
+
+  if (!existing) {
+    const body = {
+      phoneNumbers: normalizedPhone ? [{ value: normalizedPhone }] : [],
+      biographies: note ? [{ value: note }] : [],
+    };
+    if (finalName) body.names = buildGoogleNamePayload(finalName);
+    const created = await people.people.createContact({ requestBody: body });
+    return { action: 'created', resourceName: created?.data?.resourceName || '', displayName: finalName, account: target.email };
+  }
+
+  const currentName = getGoogleContactDisplayName(existing);
+  const shouldUpdateName = !!finalName && (isLikelyGenericContactName(currentName) || normalize(currentName) !== normalize(finalName));
+  const shouldUpdateNote = !!note;
+  if (!shouldUpdateName && !shouldUpdateNote) {
+    return { action: 'unchanged', resourceName: existing.resourceName, displayName: currentName, account: target.email };
+  }
+
+  const body = {
+    etag: getGoogleContactEtag(existing),
+    phoneNumbers: normalizedPhone ? [{ value: normalizedPhone }] : (existing.phoneNumbers || []),
+  };
+  const fields = ['phoneNumbers'];
+  if (shouldUpdateName) {
+    body.names = buildGoogleNamePayload(finalName);
+    fields.push('names');
+  }
+  if (shouldUpdateNote) {
+    body.biographies = [{ value: note }];
+    fields.push('biographies');
+  }
+
+  await people.people.updateContact({
+    resourceName: existing.resourceName,
+    updatePersonFields: Array.from(new Set(fields)).join(','),
+    requestBody: body,
+  });
+
+  return { action: 'updated', resourceName: existing.resourceName, displayName: finalName || currentName, account: target.email };
+}
+
+async function syncGoogleContactsForPhone({ phoneRaw, explicitName = '', profileName = '', note = '' } = {}) {
+  if (!hasGoogleContactsSyncEnabled() || !phoneRaw) return [];
+  const results = [];
+  for (const target of GOOGLE_CONTACTS_TARGETS) {
+    try {
+      const row = await upsertGoogleContactInTarget(target, { phoneRaw, explicitName, profileName, note });
+      results.push(row);
+    } catch (e) {
+      console.error(`❌ Error sincronizando Google Contacts (${target.email}):`, e?.response?.data || e?.message || e);
+      results.push({ action: 'error', account: target.email, error: e?.message || 'error' });
+    }
+  }
+  return results;
+}
+
+async function resolveKnownContactIdentity({ waId, phoneRaw, profileName = '' } = {}) {
+  const cached = getCachedIdentityByWaId(waId);
+  if (cached) return cached;
+
+  const out = {
+    shouldAskName: false,
+    bestName: cleanNameCandidate(profileName) || '',
+    bestSource: profileName ? 'whatsapp_profile' : '',
+    hubspotContact: null,
+    googleContacts: [],
+  };
+
+  if (hasHubSpotEnabled() && phoneRaw) {
+    const hsMatches = await findHubSpotContactsByPhone(phoneRaw);
+    const hs = chooseBestHubSpotMatch(hsMatches, phoneRaw);
+    if (hs) {
+      out.hubspotContact = hs;
+      const props = hs.properties || {};
+      const full = [props[HUBSPOT_PROPERTY.firstname] || '', props[HUBSPOT_PROPERTY.lastname] || ''].filter(Boolean).join(' ').trim();
+      if (full && !isLikelyGenericContactName(full)) {
+        out.bestName = cleanNameCandidate(full) || out.bestName;
+        out.bestSource = 'hubspot';
+      }
+    }
+  }
+
+  if (hasGoogleContactsSyncEnabled() && phoneRaw) {
+    for (const target of GOOGLE_CONTACTS_TARGETS) {
+      try {
+        const matches = await searchGoogleContactsByPhone(target, phoneRaw);
+        const person = matches[0] || null;
+        if (person) {
+          const displayName = getGoogleContactDisplayName(person);
+          out.googleContacts.push({ account: target.email, resourceName: person.resourceName || '', displayName });
+          if (displayName && !isLikelyGenericContactName(displayName) && !out.bestName) {
+            out.bestName = displayName;
+            out.bestSource = `google:${target.email}`;
+          }
+        }
+      } catch (e) {
+        console.error(`❌ Error resolviendo identidad en Google Contacts (${target.email}):`, e?.response?.data || e?.message || e);
+      }
+    }
+  }
+
+  const cleanedProfile = cleanNameCandidate(profileName);
+  if (!out.bestName && cleanedProfile && !isLikelyGenericContactName(cleanedProfile)) {
+    out.bestName = cleanedProfile;
+    out.bestSource = 'whatsapp_profile';
+  }
+
+  out.shouldAskName = !out.bestName || isLikelyGenericContactName(out.bestName);
+  return setCachedIdentityByWaId(waId, out);
+}
+
+async function syncIdentityEverywhere({ waId, phoneRaw, profileName = '', explicitName = '' } = {}) {
+  const cleanExplicit = cleanNameCandidate(explicitName);
+  if (!phoneRaw || !cleanExplicit) return { ok: false };
+
+  const googleResults = await syncGoogleContactsForPhone({
+    phoneRaw,
+    explicitName: cleanExplicit,
+    profileName,
+    note: buildGoogleContactsNote({ clientId: CLIENT_ID, phone: phoneRaw }),
+  });
+
+  let hubspotResult = null;
+  try {
+    hubspotResult = await upsertHubSpotContactFromClose({
+      waId,
+      phone: normalizePhone(phoneRaw),
+      phoneRaw,
+      profileName,
+      name: profileName,
+      explicitName: cleanExplicit,
+      lastUserText: '',
+      intentType: 'OTHER',
+      interest: null,
+      suppressInactivityPrompt: false,
+    });
+  } catch (e) {
+    console.error('❌ Error sincronizando nombre en HubSpot:', e?.response?.data || e?.message || e);
+  }
+
+  clearCachedIdentityByWaId(waId);
+  setCachedIdentityByWaId(waId, {
+    shouldAskName: false,
+    bestName: cleanExplicit,
+    bestSource: 'chat_explicit',
+    hubspotContact: null,
+    googleContacts: googleResults,
+  });
+
+  return { ok: true, googleResults, hubspotResult };
 }
 
 
@@ -4109,7 +4441,7 @@ function detectRowProductDomain(row) {
 function buildProductFollowupQuestion({ domain = '', familyLabel = '' } = {}) {
   const readableFamily = familyLabel ? (domain === 'furniture' ? (getFurnitureFamilyDef(familyLabel)?.label || familyLabel) : getProductFamilyLabel(familyLabel)) : '';
   if (domain === 'furniture') {
-    return `Si quiere, le paso más opciones o fotos de los muebles que le interesen 😊`;
+    return `Si quiere, le ayudo a elegir la mejor opción 😊 ¿Es para uso personal o para un salón/negocio? ¿Qué estilo busca y cuántos puestos necesita?`;
   }
   return `Si quiere, le ayudo a elegir la mejor opción 😊 ¿Lo necesita para uso personal o para trabajar? ¿Qué tipo de cabello tiene y qué resultado busca${readableFamily ? ` con ${readableFamily}` : ''}?`;
 }
@@ -4942,8 +5274,7 @@ function formatStockReply(matches, mode, opts = {}) {
 
   const inferredDomain = opts.domain || detectProductDomain(opts.familyLabel || matches.map((x) => `${x?.tab || ''} ${x?.nombre || ''} ${x?.categoria || ''}`).join(' | '));
   const header = mode === "LIST" ? `Encontré estas opciones:` : `Está en catálogo:`;
-  const footerText = buildProductFollowupQuestion({ domain: inferredDomain, familyLabel: opts.familyLabel || '' });
-  const footer = footerText ? `\n\n${footerText}` : '';
+  const footer = `\n\n${buildProductFollowupQuestion({ domain: inferredDomain, familyLabel: opts.familyLabel || '' })}`;
   return `${header}\n\n${blocks.join("\n\n— — —\n\n")}${footer}`.trim();
 }
 
@@ -5968,50 +6299,6 @@ function resolveProductsByNames(rows, names = []) {
   return out;
 }
 
-function isWeakAudioTranscriptText(text) {
-  const t = normalize(String(text || '').trim());
-  if (!t) return true;
-  if (t.length <= 2) return true;
-  if (/^(hola|buenas|buen dia|buen día|como estas|cómo estás|que tal|ok|dale|si|sí|aja|ajá|mm|mmm)$/.test(t)) return true;
-  if (/^(hola+[,! ]*)?(eh+|emm+|mmm+|aja+|ajá+)$/.test(t)) return true;
-  return false;
-}
-
-function getFurnitureRows(rows = []) {
-  return (Array.isArray(rows) ? rows : []).filter((row) => detectRowProductDomain(row) === 'furniture');
-}
-
-function recoverFurnitureCandidates(rows, text, lastCtx = null) {
-  const furnitureRows = getFurnitureRows(rows);
-  if (!furnitureRows.length) return [];
-
-  const directFamily =
-    detectFurnitureFamily(text) ||
-    detectFurnitureFamily(lastCtx?.family || '') ||
-    detectFurnitureFamily((lastCtx?.lastOptions || []).join(' ')) ||
-    '';
-
-  if (directFamily) {
-    const related = findStockRelated(furnitureRows, directFamily, { domain: 'furniture', family: directFamily, limit: 50 });
-    if (related.length) return related;
-  }
-
-  if (lastCtx?.lastOptions?.length) {
-    const byNames = resolveProductsByNames(furnitureRows, lastCtx.lastOptions);
-    if (byNames.length) return byNames;
-  }
-
-  const cleanText = normalizeCatalogSearchText(text || '');
-  if (!cleanText) return [];
-
-  const tokenHits = furnitureRows.filter((row) => {
-    const hay = buildStockHaystack(row);
-    return tokenize(cleanText, { expandSynonyms: false }).some((tok) => tok.length >= 4 && containsCatalogPhrase(hay, tok));
-  });
-
-  return tokenHits.slice(0, 20);
-}
-
 async function maybeSendMultipleProductPhotos(phone, products, userText) {
   if (!Array.isArray(products) || !products.length) return false;
   if (!userAsksForPhoto(userText)) return false;
@@ -6327,20 +6614,6 @@ lastCloseContext.set(waId, {
     text = String(mergedInbound.text || '').trim();
     userIntentText = String(mergedInbound.userIntentText || userIntentText || text).trim();
     mediaMeta = mergedInbound.mediaMeta || mediaMeta || null;
-
-    const lastProductCtxForAudio = getLastProductContext(waId);
-    if (mergedInbound.msgType === 'audio' && isWeakAudioTranscriptText(text) && lastProductCtxForAudio?.domain === 'furniture') {
-      const recoveredAudioText = [
-        lastProductCtxForAudio.family || '',
-        Array.isArray(lastProductCtxForAudio.lastOptions) ? lastProductCtxForAudio.lastOptions.join(' ') : '',
-      ].filter(Boolean).join(' ').trim();
-
-      if (recoveredAudioText) {
-        text = recoveredAudioText;
-        userIntentText = recoveredAudioText;
-      }
-    }
-
     contactInfoFromText = extractContactInfo(text);
 
     updateLastCloseContext(waId, {
@@ -6349,7 +6622,47 @@ lastCloseContext.set(waId, {
       profileName: name || lastCloseContext.get(waId)?.profileName || '',
     });
 
+    const pendingNameReq = getPendingContactNameRequest(waId);
+    const explicitNameAnswer = extractNameAnswer(text);
+
+    if (pendingNameReq?.awaiting) {
+      if (!explicitNameAnswer) {
+        const askAgain = `No llegué a tomar bien el nombre 😊
+
+¿Me lo pasa por favor como nombre y apellido?`;
+        pushHistory(waId, "assistant", askAgain);
+        await sendWhatsAppText(phone, askAgain);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+
+      await syncIdentityEverywhere({ waId, phoneRaw, profileName: name, explicitName: explicitNameAnswer });
+      updateLastCloseContext(waId, { explicitName: explicitNameAnswer, profileName: name || explicitNameAnswer });
+      clearPendingContactNameRequest(waId);
+
+      if (looksLikeStandaloneNameAnswer(text)) {
+        const msgNameOk = buildContactNameUpdatedMessage(explicitNameAnswer);
+        pushHistory(waId, "assistant", msgNameOk);
+        await sendWhatsAppText(phone, msgNameOk);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+    } else if (explicitNameAnswer && !isLikelyGenericContactName(explicitNameAnswer)) {
+      await syncIdentityEverywhere({ waId, phoneRaw, profileName: name, explicitName: explicitNameAnswer });
+      updateLastCloseContext(waId, { explicitName: explicitNameAnswer, profileName: name || explicitNameAnswer });
+    }
+
     pushHistory(waId, "user", text);
+
+    const knownIdentity = await resolveKnownContactIdentity({ waId, phoneRaw, profileName: name });
+    if (!pendingNameReq?.awaiting && knownIdentity?.shouldAskName && !explicitNameAnswer) {
+      setPendingContactNameRequest(waId, { awaiting: true, phoneRaw, profileName: name });
+      const askNameMsg = buildContactAskNameMessage();
+      pushHistory(waId, "assistant", askNameMsg);
+      await sendWhatsAppText(phone, askNameMsg);
+      scheduleInactivityFollowUp(waId, phone);
+      return;
+    }
 
     // ✅ Si el cliente frena o cancela la toma de turno en medio del flujo, cortamos ahí mismo.
     const pauseDraftEarly = await getAppointmentDraft(waId);
@@ -7495,15 +7808,11 @@ Si después necesita algo, estoy acá ✨`;
       if (broader.length) {
         const broaderSlice = broader.slice(0, 12);
         setLastProductContext(waId, {
-          domain: resolvedDomain || detectProductDomain(resolvedQuery, resolvedFamily) || '',
-          family: resolvedFamily || (resolvedDomain === 'furniture' ? detectFurnitureFamily(resolvedQuery) : detectProductFamily(resolvedQuery)) || '',
+          family: resolvedFamily || detectProductFamily(resolvedQuery) || '',
           focusTerm: resolvedFocusTerm || '',
           hairType: resolvedHairType || '',
           need: resolvedNeed || '',
           useType: resolvedUseType || '',
-          businessType: resolvedBusinessType || '',
-          style: resolvedStyle || '',
-          seatsNeeded: resolvedSeatsNeeded || '',
           mode: 'list',
           lastOptions: broaderSlice.map((x) => x.nombre),
         });
@@ -7529,51 +7838,15 @@ Si después necesita algo, estoy acá ✨`;
         return;
       }
 
-      if (resolvedDomain === 'furniture') {
-        const recoveredFurniture = recoverFurnitureCandidates(stock, text, lastProductCtx);
-        if (recoveredFurniture.length) {
-          const recoveredSlice = recoveredFurniture.slice(0, 12);
-          setLastProductContext(waId, {
-            domain: 'furniture',
-            family: resolvedFamily || detectFurnitureFamily(text) || detectFurnitureFamily((lastProductCtx?.lastOptions || []).join(' ')) || '',
-            focusTerm: '',
-            hairType: '',
-            need: '',
-            useType: '',
-            businessType: resolvedBusinessType || '',
-            style: resolvedStyle || '',
-            seatsNeeded: resolvedSeatsNeeded || '',
-            mode: 'list',
-            lastOptions: recoveredSlice.map((x) => x.nombre),
-          });
-
-          const parts = formatStockRelatedListAll(recoveredFurniture, {
-            domain: 'furniture',
-            familyLabel: resolvedFamily || detectFurnitureFamily(text) || detectFurnitureFamily((lastProductCtx?.lastOptions || []).join(' ')) || 'equipamiento',
-            chunkSize: 8,
-          });
-          for (const part of parts) {
-            pushHistory(waId, 'assistant', part);
-            await sendWhatsAppText(phone, part);
-          }
-          scheduleInactivityFollowUp(waId, phone);
-          return;
-        }
-      }
-
       setLastProductContext(waId, {
-        domain: resolvedDomain || '',
         family: resolvedFamily || '',
         focusTerm: resolvedFocusTerm || '',
         hairType: resolvedHairType || '',
         need: resolvedNeed || '',
         useType: resolvedUseType || '',
-        businessType: resolvedBusinessType || '',
-        style: resolvedStyle || '',
-        seatsNeeded: resolvedSeatsNeeded || '',
         mode: 'followup',
       });
-      await sendWhatsAppText(phone, `No lo encuentro así en el catálogo. ${resolvedDomain === 'furniture' ? 'No encontré ese mueble exacto, pero si quiere le paso otras opciones del stock de muebles 😊' : 'Dígame la marca, para qué lo necesita o qué tipo de cabello tiene y le recomiendo mejor 😊'}`);
+      await sendWhatsAppText(phone, `No lo encuentro así en el catálogo. ${resolvedDomain === 'furniture' ? 'Dígame qué mueble busca, si es para uso personal o para un salón/negocio y qué estilo le gustaría 😊' : 'Dígame la marca, para qué lo necesita o qué tipo de cabello tiene y le recomiendo mejor 😊'}`);
       scheduleInactivityFollowUp(waId, phone);
       return;
     }
@@ -7779,6 +8052,9 @@ const PORT = process.env.PORT || 3000;
   console.log(ENABLE_COMMERCIAL_FOLLOWUPS
     ? "ℹ️ Follow-up comercial activado"
     : "ℹ️ Follow-up comercial desactivado");
+  console.log(hasGoogleContactsSyncEnabled()
+    ? `ℹ️ Google Contacts sincronizado en ${GOOGLE_CONTACTS_TARGETS.map((x) => x.email).join(' y ')}`
+    : "ℹ️ Google Contacts no configurado para sincronización automática");
   if (ENABLE_APPOINTMENT_TEMPLATES) {
     await processAppointmentTemplateNotifications().catch((e) => {
       console.error('❌ Error inicial procesando plantillas de turnos:', e?.response?.data || e?.message || e);
