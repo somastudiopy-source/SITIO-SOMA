@@ -4691,13 +4691,77 @@ function resolveImplicitCourseFollowupQuery(text, lastCourseContext = null) {
   return '';
 }
 
+const COURSE_SIGNAL_RE = /(curso|cursos|clase|clases|capacitacion|capacitaciones|capacitación|capacitaciones|taller|talleres|masterclass|seminario|seminarios|workshop|formacion|formación|certificacion|certificación)/i;
+const COURSE_GENERIC_LIST_RE = /(hay|tenes|tenés|tienen|ofrecen|ofreces|dictan|dan|brindan|hacen|disponibles|abiertos|abiertas|cupos|inscripciones|inscripcion|inscripción|empiezan|arrancan|se dicta|se dictan|se esta dictando|se está dictando|se estan dando|se están dando|busco|ando buscando|quiero info|quisiera info|me pasas info|me pasás info|mostrame|mostrar|mandame|pasame|lista|opciones|catalogo|catálogo|informacion|información)/i;
+const COURSE_FOLLOWUP_RE = /(mas info|más info|info|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|cuando empieza|cuándo empieza|cuando arranca|cuándo arranca|inicio|duracion|duración|horario|horarios|dias|días|cupo|cupos|inscripcion|inscripción|requisitos|modalidad|presencial|online|virtual|de ese|de ese curso|ese curso|de barberia|de barbería|de maquillaje|de colorimetria|de colorimetría|de peinados|de auxiliar|de estetica|de estética|para aprender)/i;
+const PRODUCT_SIGNAL_RE = /(producto|productos|stock|insumo|insumos|shampoo|acondicionador|mascara|mascarilla|serum|aceite|oleo|tintura|oxidante|decolorante|matizador|ampolla|protector|spray|crema|gel|cera|mueble|muebles|espejo|espejos|camilla|camillas|sillon|sillones|silla|sillas|mesa|mesas|respaldo|puff|equipamiento|maquina|máquina|maquinas|máquinas|plancha|planchas|secador|secadores)/i;
+const PRODUCT_LIST_SIGNAL_RE = /(hay|tenes|tenés|tienen|venden|disponible|disponibles|stock|lista|opciones|catalogo|catálogo|mostrar|mostrame|mandame|pasame|busco|ando buscando|quiero ver|foto|fotos|imagen|imagenes)/i;
+const SERVICE_SIGNAL_RE = /(turno|turnos|servicio|servicios|reservar|reserva|agendar|agenda|cita|me quiero hacer|quiero hacerme|para hacerme|hacerme|me hago|realizan|trabajan con|atienden|precio del servicio|valor del servicio)/i;
+const SERVICE_LIST_SIGNAL_RE = /(que servicios|qué servicios|servicios tienen|lista de servicios|todos los servicios|mostrar servicios|mostrame servicios|mandame servicios|pasame servicios)/i;
+
+function isLikelyGenericCourseListQuery(text) {
+  const t = normalize(text || '');
+  if (!t) return false;
+  if (/^(curso|cursos|clase|clases|capacitacion|capacitaciones|capacitación|taller|talleres|masterclass|seminario|seminarios|workshop)$/.test(t)) return true;
+  if (COURSE_SIGNAL_RE.test(t) && COURSE_GENERIC_LIST_RE.test(t)) return true;
+  if (/(busco|ando buscando|quiero info|quisiera info)/i.test(t) && COURSE_SIGNAL_RE.test(t)) return true;
+  if (/(dictan clases|dan clases|estan dando clases|están dando clases|se dicta|se dictan|se esta dictando|se está dictando|se estan dando|se están dando)/i.test(t)) return true;
+  return false;
+}
+
+function detectFastCatalogIntent(text, context = {}) {
+  const raw = String(text || '').trim();
+  const t = normalize(raw);
+  if (!t) return null;
+
+  const hasCourseSignal = COURSE_SIGNAL_RE.test(t)
+    || /(dictan clases|dan clases|estan dando clases|están dando clases|se dicta|se dictan|se esta dictando|se está dictando|se estan dando|se están dando)/i.test(t);
+  const hasCourseFollowup = !!context.hasCourseContext && (COURSE_FOLLOWUP_RE.test(t) || /^(ese|ese curso|de ese|de ese curso|barberia|barbería|maquillaje|colorimetria|colorimetría|auxiliar|peinados|cupos?|precio|info|horario|horarios|duracion|duración|modalidad|inicio|requisitos)$/.test(t));
+
+  if (hasCourseSignal || hasCourseFollowup) {
+    const generic = isLikelyGenericCourseListQuery(raw);
+    return {
+      type: 'COURSE',
+      query: generic ? 'cursos' : raw,
+      mode: generic ? 'LIST' : 'DETAIL',
+      confidence: generic ? 0.99 : 0.96,
+    };
+  }
+
+  const hasProductSignal = PRODUCT_SIGNAL_RE.test(t);
+  const hasServiceSignal = SERVICE_SIGNAL_RE.test(t);
+
+  if (hasProductSignal && !hasServiceSignal) {
+    return {
+      type: 'PRODUCT',
+      query: raw,
+      mode: PRODUCT_LIST_SIGNAL_RE.test(t) ? 'LIST' : 'DETAIL',
+      confidence: 0.92,
+    };
+  }
+
+  if (hasServiceSignal && !hasProductSignal) {
+    return {
+      type: 'SERVICE',
+      query: raw,
+      mode: SERVICE_LIST_SIGNAL_RE.test(t) ? 'LIST' : 'DETAIL',
+      confidence: 0.9,
+    };
+  }
+
+  return null;
+}
+
 function detectCourseIntentFromContext(text, { lastCourseContext = null } = {}) {
   const raw = String(text || '').trim();
   const t = normalize(raw);
   if (!t) return { isCourse: false, query: '', mode: 'DETAIL' };
 
-  const explicit = isExplicitCourseKeyword(raw);
-  const genericList = explicit && /(que|qué|cuales|cuáles|tenes|tenés|hay|ofrecen|ofreces|disponibles|mostrar|mostrame|mandame|pasame|lista|opciones|algun|algún|alguna)/i.test(t);
+  const explicit = COURSE_SIGNAL_RE.test(t)
+    || isExplicitCourseKeyword(raw)
+    || /(dictan clases|dan clases|estan dando clases|están dando clases|se dicta|se dictan|se esta dictando|se está dictando|se estan dando|se están dando)/i.test(t);
+
+  const genericList = explicit && isLikelyGenericCourseListQuery(raw);
 
   if (explicit) {
     return {
@@ -4707,7 +4771,7 @@ function detectCourseIntentFromContext(text, { lastCourseContext = null } = {}) 
     };
   }
 
-  if (lastCourseContext && looksLikeCourseFollowUp(raw) && !/(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b)/i.test(t)) {
+  if (lastCourseContext && COURSE_FOLLOWUP_RE.test(t) && !/(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b)/i.test(t)) {
     return {
       isCourse: true,
       query: resolveImplicitCourseFollowupQuery(raw, lastCourseContext) || raw,
@@ -5138,12 +5202,12 @@ function extractTurnoPauseIntent(text) {
 
 function isExplicitProductIntent(text) {
   const t = normalize(text || '');
-  return /(producto|stock|insumo|shampoo|acondicionador|mascara|mascarilla|serum|aceite|oleo|tintura|oxidante|decolorante|matizador|ampolla|protector|spray|crema|gel|cera|comprar|venden|tenes|tenés|hay disponible|te queda|les queda)/i.test(t);
+  return /(producto|productos|stock|insumo|insumos|shampoo|acondicionador|mascara|mascarilla|serum|aceite|oleo|tintura|oxidante|decolorante|matizador|ampolla|protector|spray|crema|gel|cera|comprar|venden|tenes|tenés|hay disponible|te queda|les queda|mueble|muebles|espejo|espejos|camilla|camillas|sillon|sillones|silla|sillas|mesa|mesas|respaldo|puff|equipamiento|maquina|máquina|maquinas|máquinas|plancha|planchas|secador|secadores)/i.test(t);
 }
 
 function isExplicitServiceIntent(text) {
   const t = normalize(text || '');
-  return /(turno|otro turno|servicio|reservar|agendar|cita|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|valor|hac(en|en)|realizan|para mi|para mí|despues de|después de|corte femenino|femenino|femenina|mi hija|otra hija|mi tia|mi señora|ella)/i.test(t);
+  return /(turno|otro turno|servicio|servicios|reservar|agendar|cita|hac(en|en)|realizan|trabajan con|me quiero hacer|quiero hacerme|para hacerme|hacerme|me hago|sesion|sesión|aplicacion|aplicación|corte femenino|femenino|femenina|mi hija|otra hija|mi tia|mi señora|ella)/i.test(t);
 }
 
 function extractAmbiguousBeautyTerm(text) {
@@ -5171,6 +5235,7 @@ function inferDraftFlowStep(base) {
 async function classifyAndExtract(text, context = {}) {
   const completion = await openai.chat.completions.create({
     model: PRIMARY_MODEL,
+    temperature: 0,
     messages: [
       {
         role: "system",
@@ -5186,13 +5251,31 @@ Además:
 - query: lo que hay que buscar (nombre o categoría)
 - mode: LIST si pide opciones/lista; DETAIL si pide algo puntual.
 
+Reglas de negocio:
+- PRODUCT incluye productos, insumos, stock, muebles, espejos, camillas, sillones, equipamiento y máquinas.
+- SERVICE incluye servicios del salón y consultas para reservar/agendar turno.
+- COURSE incluye cursos, clases, capacitaciones, talleres, masterclass, workshop, seminarios y preguntas sobre cupos, inscripción, modalidad, horarios, inicio, precio o requisitos de cursos.
+- Si una palabra puede ser producto o servicio y el cliente no lo aclaró, devolvé OTHER.
+- Si el mensaje es genérico y pide opciones, lista, qué tienen o si hay disponible, mode=LIST.
+- Si nombra algo puntual o sigue una conversación ya abierta sobre ese tema, mode=DETAIL.
+
 Tené en cuenta el contexto previo:
 - servicio_actual: si existe, mensajes como "quiero el turno", "dale", "quiero ese", "bien" suelen referirse a ese servicio.
-- curso_actual y curso_contexto_activo: si venían hablando de cursos, mensajes como "alguno de barbería", "más info", "de ese", "cuándo empieza", "precio" deben clasificarse como COURSE, no como SERVICE.
+- curso_actual y curso_contexto_activo: si venían hablando de cursos, mensajes como "alguno de barbería", "más info", "de ese", "cuándo empieza", "precio", "cupos", "modalidad" deben clasificarse como COURSE.
 - flujo_actual: si el cliente ya estaba hablando de reservar, priorizá continuidad y no lo mandes a catálogo de nuevo.
 - Si el mensaje es solo 'si', 'dale', 'ok' o similar y venían hablando de un servicio, priorizá la continuidad de ese tema.
-- Si una palabra puede ser producto o servicio y el cliente no lo aclaró, devolvé OTHER.
-- Frases como “qué tenés de shampoo”, “precio de baños de crema”, “qué stock hay de tinturas” son PRODUCT con mode LIST.
+
+Ejemplos:
+- "hola busco cursos" => COURSE + query "cursos" + LIST
+- "están dictando clases?" => COURSE + query "cursos" + LIST
+- "tienen capacitaciones?" => COURSE + query "cursos" + LIST
+- "alguno de barbería" con contexto de curso => COURSE + DETAIL
+- "hay espejos?" => PRODUCT + LIST
+- "qué stock hay de camillas" => PRODUCT + LIST
+- "precio del espejo led" => PRODUCT + DETAIL
+- "qué servicios hacen" => SERVICE + LIST
+- "quiero turno para corte" => SERVICE + DETAIL
+- "precio del alisado" => OTHER
 
 Respondé SOLO JSON.`
       },
@@ -6880,6 +6963,31 @@ Si después necesita algo, estoy acá ✨`;
       };
     }
 
+    const fastIntent = detectFastCatalogIntent(text, {
+      lastServiceName: lastKnownService?.nombre || '',
+      lastCourseName: lastCourseContext?.selectedName || lastCourseContext?.query || '',
+      hasCourseContext: !!lastCourseContext,
+      hasDraft: !!pendingDraft,
+      flowStep: pendingDraft?.flow_step || '',
+    });
+
+    if (fastIntent) {
+      const shouldOverride = (
+        intent.type === 'OTHER'
+        || (fastIntent.type === 'COURSE' && intent.type !== 'COURSE')
+        || (fastIntent.type === 'PRODUCT' && intent.type === 'SERVICE' && !looksLikeAppointmentIntent(text, { pendingDraft, lastService: lastKnownService }))
+      );
+
+      if (shouldOverride) {
+        intent = {
+          ...intent,
+          type: fastIntent.type,
+          query: fastIntent.query || intent.query || '',
+          mode: fastIntent.mode || intent.mode || 'DETAIL',
+        };
+      }
+    }
+
     const lastProductCtx = getLastProductContext(waId);
 
     const productAI = (intent.type === 'PRODUCT' || intent.type === 'OTHER' || isExplicitProductIntent(text) || !!lastProductCtx)
@@ -7248,7 +7356,7 @@ ${some}
       const courses = await getCoursesCatalog();
       const courseQuery = resolveImplicitCourseFollowupQuery(text, lastCourseContext) || intent.query || '';
       const normalizedCourseQuery = normalize(courseQuery || '');
-      const isGenericCourseQuery = !normalizedCourseQuery || /^(curso|cursos|taller|talleres|capacitacion|capacitaciones)$/.test(normalizedCourseQuery);
+      const isGenericCourseQuery = !normalizedCourseQuery || isLikelyGenericCourseListQuery(courseQuery || '') || /^(curso|cursos|clase|clases|taller|talleres|capacitacion|capacitaciones|capacitación|masterclass|seminario|seminarios|workshop)$/.test(normalizedCourseQuery);
 
       if (!courses.length) {
         const msgEmpty = `La hoja CURSOS está vacía o no pude leer cursos disponibles en este momento.`;
@@ -7281,7 +7389,7 @@ ${some}
         lastOptions: someRows.map((c) => c.nombre).filter(Boolean),
       });
       const some = someRows.map(c => `🎓 ${c.nombre}`).join("\n");
-      const msgNo = `No encuentro ese curso en la hoja CURSOS.
+      const msgNo = `No encontré una coincidencia exacta en la hoja CURSOS.
 
 Cursos disponibles (algunos):
 ${some}
