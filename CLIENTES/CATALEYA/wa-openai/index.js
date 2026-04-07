@@ -44,21 +44,40 @@ const GOOGLE_CONTACTS_TARGETS = [
 ].filter((x) => x.email && x.refreshToken);
 // ===================== DB (para panel) =====================
 const DB_URL = process.env.DB_URL || process.env.DATABASE_URL || "";
-if (!DB_URL) {
-  throw new Error("Falta variable DB_URL o DATABASE_URL para conectar a PostgreSQL");
+const ENABLE_POSTGRES = String(process.env.ENABLE_POSTGRES || "false").toLowerCase() === "true";
+const POSTGRES_READY = !!(ENABLE_POSTGRES && DB_URL);
+
+let db = null;
+if (POSTGRES_READY) {
+  db = new Pool({
+    connectionString: DB_URL,
+    ssl: DB_URL.includes("render.com") || DB_URL.includes("railway")
+      ? { rejectUnauthorized: false }
+      : false,
+  });
+} else {
+  console.log("ℹ️ PostgreSQL desactivado temporalmente: se usa memoria local no persistente");
 }
 
-const db = new Pool({
-  connectionString: DB_URL,
-  ssl: DB_URL.includes("render.com") || DB_URL.includes("railway")
-    ? { rejectUnauthorized: false }
-    : false,
-});
+const memoryDb = {
+  messages: [],
+  appointmentDrafts: new Map(),
+  appointments: [],
+  appointmentNotifications: [],
+  commercialFollowups: new Map(),
+  commercialFollowupLogs: [],
+};
+let memoryAppointmentSeq = 1;
+
+function cloneJson(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
 
 const MEDIA_DIR = process.env.MEDIA_DIR || path.join(__dirname, "media");
 try { fs.mkdirSync(MEDIA_DIR, { recursive: true }); } catch {}
 
 async function ensureDb() {
+  if (!POSTGRES_READY) return;
   await db.query(`
     CREATE TABLE IF NOT EXISTS messages (
       id BIGSERIAL PRIMARY KEY,
@@ -93,6 +112,7 @@ async function ensureDb() {
 }
 
 async function ensureAppointmentTables() {
+  if (!POSTGRES_READY) return;
   await db.query(`
     CREATE TABLE IF NOT EXISTS appointment_drafts (
       wa_id TEXT PRIMARY KEY,
@@ -173,6 +193,7 @@ async function ensureAppointmentTables() {
 
 
 async function ensureCommercialFollowupTables() {
+  if (!POSTGRES_READY) return;
   await db.query(`
     CREATE TABLE IF NOT EXISTS commercial_followups (
       wa_id TEXT PRIMARY KEY,
@@ -600,6 +621,13 @@ async function buildHubSpotContactProperties(ctx, existingContact, { isClient = 
 
 async function hasAnyAppointmentForHubSpotContact({ waId, phoneRaw }) {
   const phoneNorm = normalizePhone(phoneRaw || '');
+  if (!POSTGRES_READY) {
+    return memoryDb.appointments.some((row) =>
+      String(row.wa_id || '') === String(waId || '') ||
+      normalizePhone(row.wa_phone || '') === phoneNorm ||
+      normalizePhone(row.contact_phone || '') === phoneNorm
+    );
+  }
   const r = await db.query(
     `SELECT 1
        FROM appointments
@@ -648,6 +676,21 @@ async function upsertHubSpotContactFromClose(ctx) {
 
 async function dbInsertMessage({ direction, wa_peer, name, text, msg_type, wa_msg_id, raw }) {
   const peerNorm = normalizePhone(wa_peer);
+  if (!POSTGRES_READY) {
+    memoryDb.messages.push({
+      client_id: CLIENT_ID,
+      direction,
+      wa_peer: peerNorm,
+      name: name || null,
+      text: text || null,
+      msg_type: msg_type || null,
+      wa_msg_id: wa_msg_id || null,
+      raw_json: cloneJson(raw || {}),
+      ts_utc: new Date().toISOString(),
+    });
+    if (memoryDb.messages.length > 500) memoryDb.messages = memoryDb.messages.slice(-500);
+    return;
+  }
   await db.query(
     `INSERT INTO messages(client_id, direction, wa_peer, name, text, msg_type, wa_msg_id, raw_json)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
@@ -679,6 +722,7 @@ const STYLIST_NOTIFY_PHONE_RAW = process.env.STYLIST_NOTIFY_PHONE || "3868 46637
 const APPOINTMENT_TEMPLATE_SCAN_MS = Number(process.env.APPOINTMENT_TEMPLATE_SCAN_MS || 60000);
 
 const ENABLE_COMMERCIAL_FOLLOWUPS = String(process.env.ENABLE_COMMERCIAL_FOLLOWUPS || "true").toLowerCase() === "true";
+const COMMERCIAL_FOLLOWUPS_ACTIVE = POSTGRES_READY && ENABLE_COMMERCIAL_FOLLOWUPS;
 const COMMERCIAL_FOLLOWUP_SCAN_MS = Number(process.env.COMMERCIAL_FOLLOWUP_SCAN_MS || 60000);
 const COMMERCIAL_FOLLOWUP_DELAY_MS = Number(process.env.COMMERCIAL_FOLLOWUP_DELAY_MS || 5 * 60 * 1000);
 const COMMERCIAL_FOLLOWUP_MAX_PER_RUN = Number(process.env.COMMERCIAL_FOLLOWUP_MAX_PER_RUN || 20);
@@ -690,6 +734,7 @@ const HUBSPOT_ACCESS_TOKEN = process.env.HUBSPOT_ACCESS_TOKEN || process.env.HUB
 const HUBSPOT_BASE_URL = (process.env.HUBSPOT_BASE_URL || "https://api.hubapi.com").replace(/\/$/, "");
 const ENABLE_END_OF_DAY_TRACKING = String(process.env.ENABLE_END_OF_DAY_TRACKING || "false").toLowerCase() === "true";
 const ENABLE_APPOINTMENT_TEMPLATES = String(process.env.ENABLE_APPOINTMENT_TEMPLATES || "true").toLowerCase() === "true";
+const APPOINTMENT_TEMPLATES_ACTIVE = POSTGRES_READY && ENABLE_APPOINTMENT_TEMPLATES;
 
 const HUBSPOT_PROPERTY = {
   firstname: "firstname",
@@ -1064,7 +1109,7 @@ function detectCommercialFollowupKindFromContext(ctx = {}) {
 }
 
 async function upsertCommercialFollowupCandidate(waId) {
-  if (!ENABLE_COMMERCIAL_FOLLOWUPS || !waId) return;
+  if (!COMMERCIAL_FOLLOWUPS_ACTIVE || !waId) return;
 
   const ctx = lastCloseContext.get(waId) || {};
   const followupKind = detectCommercialFollowupKindFromContext(ctx);
@@ -1110,6 +1155,7 @@ async function upsertCommercialFollowupCandidate(waId) {
 }
 
 async function logCommercialFollowup({ waId, waPhone, followupKind, messageText, status, errorText = "" }) {
+  if (!POSTGRES_READY) return;
   await db.query(
     `
     INSERT INTO commercial_followup_logs (wa_id, wa_phone, followup_kind, message_text, status, error_text)
@@ -1257,7 +1303,7 @@ ${body}`;
 }
 
 async function processCommercialFollowups() {
-  if (!ENABLE_COMMERCIAL_FOLLOWUPS) return;
+  if (!COMMERCIAL_FOLLOWUPS_ACTIVE) return;
 
   const r = await db.query(
     `
@@ -2196,12 +2242,41 @@ function mapDraftRowToTurno(row) {
 }
 
 async function getAppointmentDraft(waId) {
+  if (!POSTGRES_READY) {
+    const row = memoryDb.appointmentDrafts.get(String(waId || '')) || null;
+    return row ? cloneJson(row) : null;
+  }
   const r = await db.query(`SELECT * FROM appointment_drafts WHERE wa_id = $1 LIMIT 1`, [waId]);
   return mapDraftRowToTurno(r.rows[0]);
 }
 
 async function saveAppointmentDraft(waId, waPhone, draft) {
   const d = draft || {};
+  if (!POSTGRES_READY) {
+    const memoryDraft = {
+      fecha: toYMD(d.fecha) || '',
+      hora: d.hora || '',
+      servicio: d.servicio || '',
+      duracion_min: Number(d.duracion_min || 60) || 60,
+      notas: d.notas || '',
+      cliente_full: d.cliente_full || '',
+      telefono_contacto: normalizePhone(d.telefono_contacto || waPhone || '') || '',
+      payment_status: d.payment_status || 'not_paid',
+      payment_amount: d.payment_amount == null ? null : Number(d.payment_amount),
+      payment_sender: d.payment_sender || '',
+      payment_receiver: d.payment_receiver || '',
+      payment_proof_text: d.payment_proof_text || '',
+      payment_proof_media_id: d.payment_proof_media_id || '',
+      payment_proof_filename: d.payment_proof_filename || '',
+      awaiting_contact: !!d.awaiting_contact,
+      flow_step: d.flow_step || '',
+      last_intent: d.last_intent || '',
+      last_service_name: d.last_service_name || d.servicio || '',
+      wa_phone: normalizePhone(waPhone || d.telefono_contacto || '') || '',
+    };
+    memoryDb.appointmentDrafts.set(String(waId || ''), memoryDraft);
+    return;
+  }
   await db.query(
     `INSERT INTO appointment_drafts (
       wa_id, wa_phone, client_name, contact_phone, service_name, service_notes,
@@ -2261,6 +2336,10 @@ async function saveAppointmentDraft(waId, waPhone, draft) {
 }
 
 async function deleteAppointmentDraft(waId) {
+  if (!POSTGRES_READY) {
+    memoryDb.appointmentDrafts.delete(String(waId || ''));
+    return;
+  }
   await db.query(`DELETE FROM appointment_drafts WHERE wa_id = $1`, [waId]);
 }
 
@@ -2370,6 +2449,39 @@ async function tryApplyPaymentToDraft(base, { text, mediaMeta } = {}) {
 }
 
 async function createAppointmentRecord({ waId, waPhone, merged, status, calendarEventId }) {
+  if (!POSTGRES_READY) {
+    const row = {
+      id: memoryAppointmentSeq++,
+      wa_id: String(waId || ''),
+      wa_phone: normalizePhone(waPhone || merged.telefono_contacto || ''),
+      client_name: merged.cliente_full || null,
+      contact_phone: normalizePhone(merged.telefono_contacto || '') || null,
+      service_name: merged.servicio || null,
+      service_notes: merged.notas || null,
+      appointment_date: toYMD(merged.fecha) || null,
+      appointment_time: merged.hora || null,
+      duration_min: Number(merged.duracion_min || 60) || 60,
+      status: status || 'booked',
+      payment_status: merged.payment_status || 'paid_verified',
+      payment_amount: merged.payment_amount == null ? null : Number(merged.payment_amount),
+      payment_sender: merged.payment_sender || null,
+      payment_receiver: merged.payment_receiver || null,
+      payment_proof_text: merged.payment_proof_text || null,
+      payment_proof_media_id: merged.payment_proof_media_id || null,
+      payment_proof_filename: merged.payment_proof_filename || null,
+      calendar_event_id: calendarEventId || null,
+      is_color_service: isColorOrTinturaService(merged.servicio || merged.notas || ''),
+      stylist_notified_at: null,
+      reminder_client_24h_at: null,
+      reminder_client_2h_at: null,
+      reminder_stylist_24h_at: null,
+      reminder_stylist_2h_at: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    memoryDb.appointments.push(row);
+    return { id: row.id };
+  }
   const r = await db.query(
     `INSERT INTO appointments (
       wa_id, wa_phone, client_name, contact_phone, service_name, service_notes,
@@ -2417,6 +2529,10 @@ function getAppointmentStartDate(appt) {
 }
 
 async function getAppointmentRowById(appointmentId) {
+  if (!POSTGRES_READY) {
+    const row = memoryDb.appointments.find((item) => Number(item.id) === Number(appointmentId));
+    return row ? buildAppointmentData(row) : null;
+  }
   const r = await db.query(
     `SELECT id, wa_id, wa_phone, client_name, contact_phone, service_name,
             appointment_date::text AS appointment_date,
@@ -2436,6 +2552,7 @@ async function getAppointmentRowById(appointmentId) {
 }
 
 async function processAppointmentTemplateNotifications() {
+  if (!APPOINTMENT_TEMPLATES_ACTIVE) return;
   const stylistRecipient = normalizeWhatsAppRecipient(STYLIST_NOTIFY_PHONE_RAW);
   if (!stylistRecipient) return;
 
@@ -5510,6 +5627,16 @@ function formatCoursesReply(matches, mode) {
 
 async function getRecentDbMessages(waPeer, limit = 12) {
   const peerNorm = normalizePhone(waPeer);
+  if (!POSTGRES_READY) {
+    return memoryDb.messages
+      .filter((row) => row.client_id === CLIENT_ID && row.wa_peer === peerNorm && String(row.text || '').trim())
+      .slice(-limit)
+      .map((row) => ({
+        role: row.direction === 'out' ? 'assistant' : 'user',
+        content: String(row.text || '').trim(),
+      }))
+      .filter((x) => x.content);
+  }
   const r = await db.query(
     `SELECT direction, text
        FROM messages
@@ -5546,6 +5673,21 @@ function getLastKnownService(waId, draft) {
 
 async function getLastBookedAppointmentForUser({ waId, waPhone }) {
   const phoneNorm = normalizePhone(waPhone || "");
+  if (!POSTGRES_READY) {
+    const rows = memoryDb.appointments.filter((row) =>
+      String(row.wa_id || '') === String(waId || '') || normalizePhone(row.wa_phone || '') === phoneNorm
+    );
+    const row = rows[rows.length - 1];
+    if (!row) return null;
+    return {
+      client_name: row.client_name || "",
+      service_name: row.service_name || "",
+      fecha: row.appointment_date ? String(row.appointment_date).slice(0, 10) : "",
+      hora: row.appointment_time ? String(row.appointment_time).slice(0, 5) : "",
+      duracion_min: Number(row.duration_min || 60) || 60,
+      created_at: row.created_at || null,
+    };
+  }
   const r = await db.query(
     `SELECT client_name, service_name, appointment_date, appointment_time, duration_min, created_at
        FROM appointments
@@ -5982,6 +6124,18 @@ function buildAppointmentTemplateVarsForClient(appt) {
 }
 
 async function insertAppointmentNotificationLog({ appointmentId, notificationType, recipientPhone, templateName, waMessageId, payload }) {
+  if (!POSTGRES_READY) {
+    memoryDb.appointmentNotifications.push({
+      appointment_id: appointmentId,
+      notification_type: notificationType,
+      recipient_phone: normalizePhone(recipientPhone || ''),
+      template_name: templateName || null,
+      wa_message_id: waMessageId || null,
+      payload: cloneJson(payload || {}),
+      sent_at: new Date().toISOString(),
+    });
+    return;
+  }
   await db.query(
     `INSERT INTO appointment_notifications (appointment_id, notification_type, recipient_phone, template_name, wa_message_id, payload)
      VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -6005,6 +6159,14 @@ async function markAppointmentNotificationField(appointmentId, fieldName) {
     'reminder_stylist_2h_at',
   ]);
   if (!allowed.has(fieldName)) throw new Error(`Campo de notificación no permitido: ${fieldName}`);
+  if (!POSTGRES_READY) {
+    const row = memoryDb.appointments.find((item) => Number(item.id) === Number(appointmentId));
+    if (row) {
+      row[fieldName] = new Date().toISOString();
+      row.updated_at = new Date().toISOString();
+    }
+    return;
+  }
   await db.query(`UPDATE appointments SET ${fieldName} = NOW(), updated_at = NOW() WHERE id = $1`, [appointmentId]);
 }
 
@@ -8072,7 +8234,7 @@ if (ENABLE_END_OF_DAY_TRACKING) {
 }
 
 // ===================== PLANTILLAS DE TURNOS =====================
-if (ENABLE_APPOINTMENT_TEMPLATES) {
+if (APPOINTMENT_TEMPLATES_ACTIVE) {
   setInterval(() => {
     processAppointmentTemplateNotifications().catch((e) => {
       console.error('❌ Error en el scheduler de plantillas de turnos:', e?.response?.data || e?.message || e);
@@ -8083,7 +8245,7 @@ if (ENABLE_APPOINTMENT_TEMPLATES) {
 }
 
 // ===================== FOLLOW-UP COMERCIAL =====================
-if (ENABLE_COMMERCIAL_FOLLOWUPS) {
+if (COMMERCIAL_FOLLOWUPS_ACTIVE) {
   setInterval(() => {
     processCommercialFollowups().catch((e) => {
       console.error("❌ Error en el scheduler de follow-up comercial:", e?.response?.data || e?.message || e);
@@ -8100,27 +8262,30 @@ const PORT = process.env.PORT || 3000;
   await ensureDb();
   await ensureAppointmentTables();
   await ensureCommercialFollowupTables();
+  console.log(POSTGRES_READY
+    ? "✅ PostgreSQL habilitado"
+    : "ℹ️ PostgreSQL desactivado temporalmente (modo memoria, sin persistencia)");
   console.log(hasHubSpotEnabled()
     ? "✅ HubSpot CRM habilitado para seguimiento al cierre de charla"
     : "⚠️ HubSpot CRM no configurado: falta HUBSPOT_ACCESS_TOKEN / HUBSPOT_TOKEN");
   console.log(ENABLE_END_OF_DAY_TRACKING
     ? "ℹ️ Seguimiento de medianoche activado"
     : "ℹ️ Seguimiento de medianoche desactivado (se usa cierre por inactividad)");
-  console.log(ENABLE_APPOINTMENT_TEMPLATES
+  console.log(APPOINTMENT_TEMPLATES_ACTIVE
     ? "ℹ️ Plantillas de turnos activadas"
-    : "ℹ️ Plantillas de turnos desactivadas temporalmente");
-  console.log(ENABLE_COMMERCIAL_FOLLOWUPS
+    : (POSTGRES_READY ? "ℹ️ Plantillas de turnos desactivadas temporalmente" : "ℹ️ Plantillas de turnos desactivadas porque PostgreSQL está apagado"));
+  console.log(COMMERCIAL_FOLLOWUPS_ACTIVE
     ? "ℹ️ Follow-up comercial activado"
-    : "ℹ️ Follow-up comercial desactivado");
+    : (POSTGRES_READY ? "ℹ️ Follow-up comercial desactivado" : "ℹ️ Follow-up comercial desactivado porque PostgreSQL está apagado"));
   console.log(hasGoogleContactsSyncEnabled()
     ? `ℹ️ Google Contacts sincronizado en ${GOOGLE_CONTACTS_TARGETS.map((x) => x.email).join(' y ')}`
     : "ℹ️ Google Contacts no configurado para sincronización automática");
-  if (ENABLE_APPOINTMENT_TEMPLATES) {
+  if (APPOINTMENT_TEMPLATES_ACTIVE) {
     await processAppointmentTemplateNotifications().catch((e) => {
       console.error('❌ Error inicial procesando plantillas de turnos:', e?.response?.data || e?.message || e);
     });
   }
-  if (ENABLE_COMMERCIAL_FOLLOWUPS) {
+  if (COMMERCIAL_FOLLOWUPS_ACTIVE) {
     await processCommercialFollowups().catch((e) => {
       console.error('❌ Error inicial procesando follow-up comercial:', e?.response?.data || e?.message || e);
     });
