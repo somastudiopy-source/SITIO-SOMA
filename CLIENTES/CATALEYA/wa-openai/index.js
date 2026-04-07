@@ -1746,6 +1746,67 @@ function clearProductMemory(waId) {
   if (waId) lastProductByUser.delete(waId);
 }
 
+const PRODUCT_PHOTO_BATCH_MAX = Number(process.env.PRODUCT_PHOTO_BATCH_MAX || 5);
+
+function normalizeProductRowKey(product) {
+  return normalizeCatalogSearchText(`${product?.nombre || ''} ${product?.marca || ''}`);
+}
+
+function getUniqueProductRows(products = []) {
+  const out = [];
+  const seen = new Set();
+  for (const product of (Array.isArray(products) ? products : [])) {
+    const key = normalizeProductRowKey(product);
+    if (!product?.nombre || !key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(product);
+  }
+  return out;
+}
+
+function buildProductBatchLabel({ domain = '', familyLabel = '' } = {}) {
+  if (!familyLabel) return '';
+  if (domain === 'furniture') {
+    return getFurnitureFamilyDef(familyLabel)?.label || familyLabel;
+  }
+  return getProductFamilyLabel(familyLabel) || familyLabel;
+}
+
+function buildProductPhotoBatchIntro({ domain = '', familyLabel = '', startIndex = 0 } = {}) {
+  const label = buildProductBatchLabel({ domain, familyLabel });
+  if (startIndex > 0) {
+    return label
+      ? `Le paso más opciones de *${label}* con foto y precio 😊`
+      : `Le paso más opciones con foto y precio 😊`;
+  }
+  return label
+    ? `Le paso algunas opciones de *${label}* con foto y precio 😊`
+    : `Le paso algunas opciones con foto y precio 😊`;
+}
+
+function buildMoreProductOptionsMessage({ domain = '', familyLabel = '', remaining = 0 } = {}) {
+  const label = buildProductBatchLabel({ domain, familyLabel });
+  const base = label
+    ? `Si le interesa, le mando más opciones de *${label}*.`
+    : `Si le interesa, le mando más opciones.`;
+  if (remaining > 0) return `${base} Todavía me quedan ${remaining} más 😊`;
+  return `${base} 😊`;
+}
+
+function buildNoMoreProductOptionsMessage({ domain = '', familyLabel = '' } = {}) {
+  const label = buildProductBatchLabel({ domain, familyLabel });
+  return label
+    ? `Ya le pasé todas las opciones que tengo de *${label}* 😊`
+    : `Ya le pasé todas las opciones que tengo 😊`;
+}
+
+function isAskForMoreProductOptionsReply(text = '') {
+  const t = normalize(text || '');
+  if (!t) return false;
+  if (/^(si|sí|sii|siii|dale|ok|oka|bueno|genial|perfecto|de una|claro)$/i.test(t)) return true;
+  return /(manda(me)? mas|mánda(me)? más|envia(me)? mas|envía(me)? más|pasame mas|pasáme más|mandame mas|mandáme más|mas opciones|más opciones|seguime|segui|seguí|quiero mas|quiero más|quiero ver mas|quiero ver más|mostrame mas|mostrame más|pasame otras|pasáme otras|las otras|el resto|otras opciones|otras mas|otras más)/i.test(t);
+}
+
 function getLastAssistantMessage(waId) {
   const conv = ensureConv(waId);
   return [...(conv.messages || [])].reverse().find((m) => m.role === "assistant") || null;
@@ -6514,20 +6575,123 @@ function resolveProductsByNames(rows, names = []) {
   return out;
 }
 
+async function sendProductPhotoBatch({ waId = '', phone = '', products = [], domain = '', familyLabel = '', reset = false } = {}) {
+  const unique = getUniqueProductRows(products);
+  if (!unique.length || !phone) return false;
+
+  const currentCtx = waId ? (getLastProductContext(waId) || {}) : {};
+  const startIndex = reset ? 0 : Math.max(0, Number(currentCtx.photoOffset || 0) || 0);
+
+  if (startIndex >= unique.length) {
+    const msgDone = buildNoMoreProductOptionsMessage({ domain: domain || currentCtx.domain || '', familyLabel: familyLabel || currentCtx.family || '' });
+    if (waId && msgDone) pushHistory(waId, 'assistant', msgDone);
+    await sendWhatsAppText(phone, msgDone);
+    return true;
+  }
+
+  const batch = unique.slice(startIndex, startIndex + PRODUCT_PHOTO_BATCH_MAX);
+  if (!batch.length) return false;
+
+  const introMsg = buildProductPhotoBatchIntro({ domain: domain || currentCtx.domain || '', familyLabel: familyLabel || currentCtx.family || '', startIndex });
+  if (introMsg) {
+    if (waId) pushHistory(waId, 'assistant', introMsg);
+    await sendWhatsAppText(phone, introMsg);
+  }
+
+  let sentCount = 0;
+  const missing = [];
+  const failed = [];
+
+  for (const product of batch) {
+    const result = await sendProductPhotoDirect(phone, product);
+    if (result.ok) {
+      sentCount += 1;
+    } else if (result.reason === 'missing_link') {
+      missing.push(product.nombre || 'Producto');
+    } else {
+      failed.push(product.nombre || 'Producto');
+    }
+  }
+
+  if (missing.length) {
+    const msgMissing = `No tengo la foto vinculada correctamente de: ${missing.join(', ')}.`;
+    if (waId) pushHistory(waId, 'assistant', msgMissing);
+    await sendWhatsAppText(phone, msgMissing);
+  }
+
+  if (failed.length && !sentCount) {
+    const msgFail = 'No pude enviar las fotos en este momento. Revise que las imágenes de Drive estén compartidas con el service account.';
+    if (waId) pushHistory(waId, 'assistant', msgFail);
+    await sendWhatsAppText(phone, msgFail);
+  } else if (failed.length) {
+    const msgPartial = `No pude enviar algunas fotos ahora mismo: ${failed.join(', ')}.`;
+    if (waId) pushHistory(waId, 'assistant', msgPartial);
+    await sendWhatsAppText(phone, msgPartial);
+  }
+
+  const nextOffset = startIndex + batch.length;
+  const hasMore = nextOffset < unique.length;
+
+  if (waId) {
+    setLastProductContext(waId, {
+      domain: domain || currentCtx.domain || '',
+      family: familyLabel || currentCtx.family || '',
+      allOptions: unique.map((x) => x.nombre).filter(Boolean),
+      lastOptions: batch.map((x) => x.nombre).filter(Boolean),
+      photoOffset: nextOffset,
+      awaitingMoreOptions: hasMore,
+    });
+  }
+
+  if (hasMore) {
+    const msgMore = buildMoreProductOptionsMessage({ domain: domain || currentCtx.domain || '', familyLabel: familyLabel || currentCtx.family || '', remaining: unique.length - nextOffset });
+    if (waId) pushHistory(waId, 'assistant', msgMore);
+    await sendWhatsAppText(phone, msgMore);
+  } else {
+    const msgEnd = buildProductFollowupQuestion({ domain: domain || currentCtx.domain || '', familyLabel: familyLabel || currentCtx.family || '' });
+    if (waId && msgEnd) pushHistory(waId, 'assistant', msgEnd);
+    if (msgEnd) await sendWhatsAppText(phone, msgEnd);
+  }
+
+  return sentCount > 0 || missing.length > 0 || failed.length > 0;
+}
+
+async function sendSingleProductCard({ waId = '', phone = '', product = null, domain = '', familyLabel = '' } = {}) {
+  if (!product || !phone) return false;
+
+  const result = await sendProductPhotoDirect(phone, product);
+  if (result.ok) {
+    if (waId) {
+      setLastProductContext(waId, {
+        domain: domain || detectRowProductDomain(product) || '',
+        family: familyLabel || '',
+        allOptions: [product.nombre].filter(Boolean),
+        lastOptions: [product.nombre].filter(Boolean),
+        photoOffset: 1,
+        awaitingMoreOptions: false,
+      });
+      const msgFollow = buildProductFollowupQuestion({ domain: domain || detectRowProductDomain(product) || '', familyLabel: familyLabel || '' });
+      if (msgFollow) {
+        pushHistory(waId, 'assistant', msgFollow);
+        await sendWhatsAppText(phone, msgFollow);
+      }
+    }
+    return true;
+  }
+
+  if (result.reason === 'missing_link') return false;
+
+  const msgError = 'No pude enviar la foto en este momento. Revise que la imagen de Drive esté compartida con el service account.';
+  if (waId) pushHistory(waId, 'assistant', msgError);
+  await sendWhatsAppText(phone, msgError);
+  return true;
+}
+
 async function maybeSendMultipleProductPhotos(phone, products, userText) {
   if (!Array.isArray(products) || !products.length) return false;
   if (!userAsksForPhoto(userText)) return false;
 
-  const unique = [];
-  const seen = new Set();
-  for (const product of products) {
-    const key = normalizeCatalogSearchText(`${product?.nombre || ''} ${product?.marca || ''}`);
-    if (!product?.nombre || seen.has(key)) continue;
-    seen.add(key);
-    unique.push(product);
-  }
-
-  const limited = unique.slice(0, 8);
+  const limited = getUniqueProductRows(products).slice(0, 8);
   if (!limited.length) return false;
 
   if (limited.length > 1) {
@@ -6944,6 +7108,27 @@ updateLastCloseContext(waId, {
           scheduleInactivityFollowUp(waId, phone);
           return;
         }
+      }
+    }
+
+    const lastCtxForMoreOptions = getLastProductContext(waId);
+    if (lastCtxForMoreOptions?.awaitingMoreOptions && isAskForMoreProductOptionsReply(userIntentText)) {
+      const stockForMore = await getStockCatalog();
+      const allOptionNames = Array.isArray(lastCtxForMoreOptions.allOptions) && lastCtxForMoreOptions.allOptions.length
+        ? lastCtxForMoreOptions.allOptions
+        : (lastCtxForMoreOptions.lastOptions || []);
+      const optionProducts = resolveProductsByNames(stockForMore, allOptionNames);
+      const sentMore = await sendProductPhotoBatch({
+        waId,
+        phone,
+        products: optionProducts,
+        domain: lastCtxForMoreOptions.domain || '',
+        familyLabel: lastCtxForMoreOptions.family || '',
+        reset: false,
+      });
+      if (sentMore) {
+        scheduleInactivityFollowUp(waId, phone);
+        return;
       }
     }
 
@@ -7552,7 +7737,22 @@ Si después necesita algo, estoy acá ✨`;
       const stock = await getStockCatalog();
       const matches = findStock(stock, lastKnownService.nombre, 'LIST');
       if (matches.length) {
-        const replyCatalog = formatStockReply(matches, 'LIST', { domain: detectProductDomain(text), familyLabel: detectFurnitureFamily(text) || detectProductFamily(text) });
+        const familyFromService = detectFurnitureFamily(lastKnownService.nombre) || detectProductFamily(lastKnownService.nombre) || '';
+        const domainFromService = detectProductDomain(lastKnownService.nombre, familyFromService) || detectRowProductDomain(matches[0]) || '';
+        const sentBatch = await sendProductPhotoBatch({
+          waId,
+          phone,
+          products: matches,
+          domain: domainFromService,
+          familyLabel: familyFromService,
+          reset: true,
+        });
+        if (sentBatch) {
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
+
+        const replyCatalog = formatStockReply(matches, 'LIST', { domain: domainFromService, familyLabel: familyFromService });
         pushHistory(waId, 'assistant', replyCatalog);
         await sendWhatsAppText(phone, replyCatalog);
         scheduleInactivityFollowUp(waId, phone);
@@ -7808,9 +8008,6 @@ Si después necesita algo, estoy acá ✨`;
 
       if (wantsAll) {
         const stockBase = resolvedDomain === 'furniture' ? stock.filter((x) => detectRowProductDomain(x) === 'furniture') : stock.filter((x) => detectRowProductDomain(x) !== 'furniture');
-        const parts = resolvedDomain === 'furniture'
-          ? formatStockRelatedListAll(stockBase, { domain: resolvedDomain, familyLabel: resolvedFamily || 'equipamiento', chunkSize: 8 })
-          : formatStockListAll(stockBase, 12);
         setLastProductContext(waId, {
           domain: resolvedDomain || '',
           family: resolvedFamily || '',
@@ -7822,7 +8019,28 @@ Si después necesita algo, estoy acá ✨`;
           style: resolvedStyle || '',
           seatsNeeded: resolvedSeatsNeeded || '',
           mode: 'list_all',
+          allOptions: stockBase.map((x) => x.nombre).filter(Boolean),
+          lastOptions: stockBase.slice(0, PRODUCT_PHOTO_BATCH_MAX).map((x) => x.nombre).filter(Boolean),
+          photoOffset: 0,
+          awaitingMoreOptions: stockBase.length > PRODUCT_PHOTO_BATCH_MAX,
         });
+
+        const sentBatch = await sendProductPhotoBatch({
+          waId,
+          phone,
+          products: stockBase,
+          domain: resolvedDomain || '',
+          familyLabel: resolvedFamily || (resolvedDomain === 'furniture' ? 'equipamiento' : ''),
+          reset: true,
+        });
+        if (sentBatch) {
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
+
+        const parts = resolvedDomain === 'furniture'
+          ? formatStockRelatedListAll(stockBase, { domain: resolvedDomain, familyLabel: resolvedFamily || 'equipamiento', chunkSize: 8 })
+          : formatStockListAll(stockBase, 12);
         for (const part of parts) {
           pushHistory(waId, 'assistant', part);
           await sendWhatsAppText(phone, part);
@@ -7934,9 +8152,11 @@ Si después necesita algo, estoy acá ✨`;
       if (productMode === 'LIST') {
         if (related.length) {
           const relatedSlice = related.slice(0, 12);
+          const finalDomain = resolvedDomain || detectProductDomain(resolvedQuery, resolvedFamily) || detectRowProductDomain(relatedSlice[0]) || '';
+          const finalFamily = resolvedFamily || (finalDomain === 'furniture' ? detectFurnitureFamily(resolvedQuery) : detectProductFamily(resolvedQuery)) || '';
           setLastProductContext(waId, {
-            domain: resolvedDomain || detectProductDomain(resolvedQuery, resolvedFamily) || '',
-            family: resolvedFamily || (resolvedDomain === 'furniture' ? detectFurnitureFamily(resolvedQuery) : detectProductFamily(resolvedQuery)) || '',
+            domain: finalDomain,
+            family: finalFamily,
             focusTerm: resolvedFocusTerm || '',
             hairType: resolvedHairType || '',
             need: resolvedNeed || '',
@@ -7945,20 +8165,28 @@ Si después necesita algo, estoy acá ✨`;
             style: resolvedStyle || '',
             seatsNeeded: resolvedSeatsNeeded || '',
             mode: 'list',
-            lastOptions: relatedSlice.map((x) => x.nombre),
+            allOptions: related.map((x) => x.nombre).filter(Boolean),
+            lastOptions: relatedSlice.slice(0, PRODUCT_PHOTO_BATCH_MAX).map((x) => x.nombre),
+            photoOffset: 0,
+            awaitingMoreOptions: related.length > PRODUCT_PHOTO_BATCH_MAX,
           });
 
-          if (userAsksForAllPhotos(text)) {
-            const sentAll = await maybeSendMultipleProductPhotos(phone, relatedSlice, text);
-            if (sentAll) {
-              scheduleInactivityFollowUp(waId, phone);
-              return;
-            }
+          const sentBatch = await sendProductPhotoBatch({
+            waId,
+            phone,
+            products: related,
+            domain: finalDomain,
+            familyLabel: finalFamily,
+            reset: true,
+          });
+          if (sentBatch) {
+            scheduleInactivityFollowUp(waId, phone);
+            return;
           }
 
           const parts = formatStockRelatedListAll(related, {
-            domain: resolvedDomain,
-            familyLabel: resolvedFamily || (resolvedDomain === 'furniture' ? detectFurnitureFamily(resolvedQuery) : detectProductFamily(resolvedQuery)),
+            domain: finalDomain,
+            familyLabel: finalFamily,
             chunkSize: 8,
           });
           for (const part of parts) {
@@ -7971,11 +8199,16 @@ Si después necesita algo, estoy acá ✨`;
       }
 
       if (matches.length) {
+        const finalDomain = resolvedDomain || detectProductDomain(resolvedQuery, resolvedFamily) || detectRowProductDomain(matches[0]) || '';
+        const finalFamily = resolvedFamily || ((finalDomain || detectRowProductDomain(matches[0])) === 'furniture'
+          ? (detectFurnitureFamily(resolvedQuery) || detectFurnitureFamily(matches[0].nombre))
+          : (detectProductFamily(resolvedQuery) || detectProductFamily(matches[0].nombre))) || '';
+
         if (matches.length === 1) {
           lastProductByUser.set(waId, matches[0]);
           setLastProductContext(waId, {
-            domain: resolvedDomain || detectRowProductDomain(matches[0]) || '',
-            family: resolvedFamily || ((resolvedDomain || detectRowProductDomain(matches[0])) === 'furniture' ? detectFurnitureFamily(matches[0].nombre) : detectProductFamily(matches[0].nombre)) || '',
+            domain: finalDomain,
+            family: finalFamily,
             focusTerm: resolvedFocusTerm || detectProductFocusTerm(matches[0].nombre) || '',
             hairType: resolvedHairType || '',
             need: resolvedNeed || '',
@@ -7984,12 +8217,27 @@ Si después necesita algo, estoy acá ✨`;
             style: resolvedStyle || '',
             seatsNeeded: resolvedSeatsNeeded || '',
             mode: 'detail',
+            allOptions: [matches[0].nombre],
             lastOptions: [matches[0].nombre],
+            photoOffset: 0,
+            awaitingMoreOptions: false,
           });
+
+          const sentSingle = await sendSingleProductCard({
+            waId,
+            phone,
+            product: matches[0],
+            domain: finalDomain,
+            familyLabel: finalFamily,
+          });
+          if (sentSingle) {
+            scheduleInactivityFollowUp(waId, phone);
+            return;
+          }
         } else {
           setLastProductContext(waId, {
-            domain: resolvedDomain || detectProductDomain(resolvedQuery, resolvedFamily) || '',
-            family: resolvedFamily || (resolvedDomain === 'furniture' ? detectFurnitureFamily(resolvedQuery) : detectProductFamily(resolvedQuery)) || '',
+            domain: finalDomain,
+            family: finalFamily,
             focusTerm: resolvedFocusTerm || '',
             hairType: resolvedHairType || '',
             need: resolvedNeed || '',
@@ -7998,8 +8246,24 @@ Si después necesita algo, estoy acá ✨`;
             style: resolvedStyle || '',
             seatsNeeded: resolvedSeatsNeeded || '',
             mode: 'list',
-            lastOptions: matches.slice(0, 8).map((x) => x.nombre),
+            allOptions: matches.map((x) => x.nombre).filter(Boolean),
+            lastOptions: matches.slice(0, PRODUCT_PHOTO_BATCH_MAX).map((x) => x.nombre),
+            photoOffset: 0,
+            awaitingMoreOptions: matches.length > PRODUCT_PHOTO_BATCH_MAX,
           });
+
+          const sentBatch = await sendProductPhotoBatch({
+            waId,
+            phone,
+            products: matches,
+            domain: finalDomain,
+            familyLabel: finalFamily,
+            reset: true,
+          });
+          if (sentBatch) {
+            scheduleInactivityFollowUp(waId, phone);
+            return;
+          }
         }
 
         if (userAsksForAllPhotos(text) && matches.length > 1) {
@@ -8018,7 +8282,7 @@ Si después necesita algo, estoy acá ✨`;
           }
         }
 
-        const replyCatalog = formatStockReply(matches, matches.length === 1 ? 'DETAIL' : 'LIST', { domain: resolvedDomain, familyLabel: resolvedFamily });
+        const replyCatalog = formatStockReply(matches, matches.length === 1 ? 'DETAIL' : 'LIST', { domain: finalDomain, familyLabel: finalFamily });
         if (replyCatalog) {
           pushHistory(waId, 'assistant', replyCatalog);
           await sendWhatsAppText(phone, replyCatalog);
@@ -8029,15 +8293,37 @@ Si después necesita algo, estoy acá ✨`;
 
       if (broader.length) {
         const broaderSlice = broader.slice(0, 12);
+        const finalDomain = resolvedDomain || detectProductDomain(resolvedQuery, resolvedFamily) || detectRowProductDomain(broaderSlice[0]) || '';
+        const finalFamily = resolvedFamily || (finalDomain === 'furniture' ? detectFurnitureFamily(resolvedQuery) : detectProductFamily(resolvedQuery)) || '';
         setLastProductContext(waId, {
-          family: resolvedFamily || detectProductFamily(resolvedQuery) || '',
+          domain: finalDomain,
+          family: finalFamily,
           focusTerm: resolvedFocusTerm || '',
           hairType: resolvedHairType || '',
           need: resolvedNeed || '',
           useType: resolvedUseType || '',
+          businessType: resolvedBusinessType || '',
+          style: resolvedStyle || '',
+          seatsNeeded: resolvedSeatsNeeded || '',
           mode: 'list',
-          lastOptions: broaderSlice.map((x) => x.nombre),
+          allOptions: broader.map((x) => x.nombre).filter(Boolean),
+          lastOptions: broaderSlice.slice(0, PRODUCT_PHOTO_BATCH_MAX).map((x) => x.nombre),
+          photoOffset: 0,
+          awaitingMoreOptions: broader.length > PRODUCT_PHOTO_BATCH_MAX,
         });
+
+        const sentBatch = await sendProductPhotoBatch({
+          waId,
+          phone,
+          products: broader,
+          domain: finalDomain,
+          familyLabel: finalFamily,
+          reset: true,
+        });
+        if (sentBatch) {
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
 
         if (userAsksForAllPhotos(text)) {
           const sentAll = await maybeSendMultipleProductPhotos(phone, broaderSlice, text);
@@ -8048,8 +8334,8 @@ Si después necesita algo, estoy acá ✨`;
         }
 
         const parts = formatStockRelatedListAll(broader, {
-          domain: resolvedDomain,
-          familyLabel: resolvedFamily || (resolvedDomain === 'furniture' ? detectFurnitureFamily(resolvedQuery) : detectProductFamily(resolvedQuery)),
+          domain: finalDomain,
+          familyLabel: finalFamily,
           chunkSize: 8,
         });
         for (const part of parts) {
