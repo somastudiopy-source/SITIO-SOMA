@@ -4668,16 +4668,16 @@ function detectRowProductDomain(row) {
 function buildProductFollowupQuestion({ domain = '', familyLabel = '', useType = '' } = {}) {
   const readableFamily = familyLabel ? (domain === 'furniture' ? (getFurnitureFamilyDef(familyLabel)?.label || familyLabel) : getProductFamilyLabel(familyLabel)) : '';
   if (domain === 'furniture') {
-    return `Si quiere, le ayudo a elegir la mejor opción 😊 ¿Es para uso personal o para un salón/negocio? ¿Qué estilo busca y cuántos puestos necesita?`;
+    return `✨ Si quiere, le ayudo a elegir. ¿Es para uso personal o para salón?`;
   }
 
   const treatmentKnowledge = detectHairTreatmentKnowledge({ family: familyLabel, text: readableFamily });
   const treatmentQuestion = buildTreatmentQuestion(treatmentKnowledge, useType);
   if (treatmentQuestion) {
-    return `Si quiere, le ayudo a elegir la mejor opción 😊 ${treatmentQuestion}`;
+    return `✨ Si quiere, le ayudo a elegir. ${treatmentQuestion}`;
   }
 
-  return `Si quiere, le ayudo a elegir la mejor opción 😊 ¿Lo necesita para uso personal o para trabajar? ¿Qué tipo de cabello tiene y qué resultado busca${readableFamily ? ` con ${readableFamily}` : ''}?`;
+  return `✨ Si quiere, le ayudo a elegir. ¿Es para uso personal o para trabajar?`;
 }
 
 function looksLikeFurniturePreferenceReply(text) {
@@ -5161,21 +5161,23 @@ Hay dos dominios:
 Tu trabajo:
 - Elegir hasta 4 opciones que mejor encajen.
 - No inventar productos ni cambiar nombres.
-- Si faltan datos, igual podés proponer 2 a 4 opciones razonables y una sola pregunta de seguimiento.
-- Si domain=furniture, priorizá uso personal o negocio, estilo, funcionalidad y cantidad de puestos.
-- Si domain=hair, pensá como una profesional: entendé el paso técnico, el objetivo del trabajo y sugerí una combinación lógica entre producto base y complementos reales.
-- Si uso=profesional, hablá en lógica de trabajo, terminación y rendimiento.
+- Respondé breve, cálido y vendedor.
+- No des explicaciones largas ni técnicas.
+- Si domain=furniture, priorizá uso personal o negocio, estilo y funcionalidad.
+- Si domain=hair, pensá como una profesional, pero explicalo en pocas palabras.
+- Si uso=profesional, hablá en lógica de trabajo y terminación.
 - Si uso=personal, hablá en lógica de cuidado y mantenimiento.
-- Si hay "resumen_tratamiento", usalo para orientar la selección.
+- Si hay "resumen_tratamiento", usalo solo para orientar la selección.
 - No agregues productos fuera de las opciones enviadas.
+- Usá un tono lindo y simple, con como mucho un emoji suave como ✨.
 
 Respondé SOLO JSON con:
-- intro: string
+- intro: string (máximo 1 oración corta)
 - recommended_names: string[] (hasta 4 nombres exactos)
-- follow_up: string
-- rationale: string (breve, 1 oración)
-- step_summary: string (breve, opcional, máximo 1 oración)
-- sales_angle: string (breve, opcional)`,
+- follow_up: string (máximo 1 oración corta)
+- rationale: string (muy breve, opcional, máximo 10 palabras)
+- step_summary: string (muy breve, opcional, máximo 10 palabras)
+- sales_angle: string (muy breve, opcional, máximo 10 palabras)`,
         },
         {
           role: 'user',
@@ -5227,28 +5229,29 @@ function formatRecommendedProductsReply(aiPayload, rows, { domain = '', familyLa
   const intro = aiPayload?.intro
     ? aiPayload.intro
     : readableFamily
-      ? `Según lo que me dice, estas opciones de *${readableFamily}* le pueden servir:`
-      : `Según lo que me dice, estas opciones le pueden servir:`;
+      ? `✨ Estas opciones de *${readableFamily}* le pueden servir:`
+      : `✨ Estas opciones le pueden servir:`;
+
+  const supportLine = [
+    aiPayload?.sales_angle,
+    aiPayload?.rationale,
+    domain === 'hair' ? aiPayload?.step_summary : '',
+  ].map((x) => String(x || '').trim()).find(Boolean) || '';
 
   const bodyParts = [intro];
-
-  if (aiPayload?.rationale) bodyParts.push(aiPayload.rationale);
-
-  const treatmentSummary = aiPayload?.step_summary || buildTreatmentStepsSummary(treatmentKnowledge, useType);
-  if (domain === 'hair' && treatmentSummary) bodyParts.push(treatmentSummary);
-
-  if (aiPayload?.sales_angle) bodyParts.push(aiPayload.sales_angle);
+  if (supportLine) bodyParts.push(supportLine);
 
   const lines = items.map((p) => {
     const precio = moneyOrConsult(p.precio);
-    const desc = compactProductDescription(p.descripcion || '', 170);
+    const desc = compactProductDescription(p.descripcion || '', 95);
     return `${getCatalogItemEmoji(p.nombre, { kind: 'product' })} *${p.nombre}*\n• Precio: *${precio}*${desc ? `\n• ${desc}` : ''}`;
   });
 
   const followUp = aiPayload?.follow_up || buildProductFollowupQuestion({ domain, familyLabel, useType });
 
-  return `${bodyParts.filter(Boolean).join('\n')}\n\n${lines.join('\n\n— — —\n\n')}\n\n${followUp}`.trim();
+  return `${bodyParts.filter(Boolean).join('\n')}\n\n${lines.join('\n\n')}\n\n${followUp}`.trim();
 }
+
 function detectFemaleContext(text) {
   const t = normalize(text || '');
   return /(\bella\b|\bmi hija\b|\botra hija\b|\bhija\b|\bmi tia\b|\btia\b|\bmi señora\b|\bmi senora\b|\bseñora\b|\bsenora\b|\bmujer\b|\bfemenin[oa]\b|\bdama\b)/i.test(t);
