@@ -44,40 +44,21 @@ const GOOGLE_CONTACTS_TARGETS = [
 ].filter((x) => x.email && x.refreshToken);
 // ===================== DB (para panel) =====================
 const DB_URL = process.env.DB_URL || process.env.DATABASE_URL || "";
-const ENABLE_POSTGRES = String(process.env.ENABLE_POSTGRES || "false").toLowerCase() === "true";
-const POSTGRES_READY = !!(ENABLE_POSTGRES && DB_URL);
-
-let db = null;
-if (POSTGRES_READY) {
-  db = new Pool({
-    connectionString: DB_URL,
-    ssl: DB_URL.includes("render.com") || DB_URL.includes("railway")
-      ? { rejectUnauthorized: false }
-      : false,
-  });
-} else {
-  console.log("ℹ️ PostgreSQL desactivado temporalmente: se usa memoria local no persistente");
+if (!DB_URL) {
+  throw new Error("Falta variable DB_URL o DATABASE_URL para conectar a PostgreSQL");
 }
 
-const memoryDb = {
-  messages: [],
-  appointmentDrafts: new Map(),
-  appointments: [],
-  appointmentNotifications: [],
-  commercialFollowups: new Map(),
-  commercialFollowupLogs: [],
-};
-let memoryAppointmentSeq = 1;
-
-function cloneJson(value) {
-  return value == null ? value : JSON.parse(JSON.stringify(value));
-}
+const db = new Pool({
+  connectionString: DB_URL,
+  ssl: DB_URL.includes("render.com") || DB_URL.includes("railway")
+    ? { rejectUnauthorized: false }
+    : false,
+});
 
 const MEDIA_DIR = process.env.MEDIA_DIR || path.join(__dirname, "media");
 try { fs.mkdirSync(MEDIA_DIR, { recursive: true }); } catch {}
 
 async function ensureDb() {
-  if (!POSTGRES_READY) return;
   await db.query(`
     CREATE TABLE IF NOT EXISTS messages (
       id BIGSERIAL PRIMARY KEY,
@@ -112,7 +93,6 @@ async function ensureDb() {
 }
 
 async function ensureAppointmentTables() {
-  if (!POSTGRES_READY) return;
   await db.query(`
     CREATE TABLE IF NOT EXISTS appointment_drafts (
       wa_id TEXT PRIMARY KEY,
@@ -193,7 +173,6 @@ async function ensureAppointmentTables() {
 
 
 async function ensureCommercialFollowupTables() {
-  if (!POSTGRES_READY) return;
   await db.query(`
     CREATE TABLE IF NOT EXISTS commercial_followups (
       wa_id TEXT PRIMARY KEY,
@@ -621,13 +600,6 @@ async function buildHubSpotContactProperties(ctx, existingContact, { isClient = 
 
 async function hasAnyAppointmentForHubSpotContact({ waId, phoneRaw }) {
   const phoneNorm = normalizePhone(phoneRaw || '');
-  if (!POSTGRES_READY) {
-    return memoryDb.appointments.some((row) =>
-      String(row.wa_id || '') === String(waId || '') ||
-      normalizePhone(row.wa_phone || '') === phoneNorm ||
-      normalizePhone(row.contact_phone || '') === phoneNorm
-    );
-  }
   const r = await db.query(
     `SELECT 1
        FROM appointments
@@ -676,21 +648,6 @@ async function upsertHubSpotContactFromClose(ctx) {
 
 async function dbInsertMessage({ direction, wa_peer, name, text, msg_type, wa_msg_id, raw }) {
   const peerNorm = normalizePhone(wa_peer);
-  if (!POSTGRES_READY) {
-    memoryDb.messages.push({
-      client_id: CLIENT_ID,
-      direction,
-      wa_peer: peerNorm,
-      name: name || null,
-      text: text || null,
-      msg_type: msg_type || null,
-      wa_msg_id: wa_msg_id || null,
-      raw_json: cloneJson(raw || {}),
-      ts_utc: new Date().toISOString(),
-    });
-    if (memoryDb.messages.length > 500) memoryDb.messages = memoryDb.messages.slice(-500);
-    return;
-  }
   await db.query(
     `INSERT INTO messages(client_id, direction, wa_peer, name, text, msg_type, wa_msg_id, raw_json)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
@@ -722,7 +679,6 @@ const STYLIST_NOTIFY_PHONE_RAW = process.env.STYLIST_NOTIFY_PHONE || "3868 46637
 const APPOINTMENT_TEMPLATE_SCAN_MS = Number(process.env.APPOINTMENT_TEMPLATE_SCAN_MS || 60000);
 
 const ENABLE_COMMERCIAL_FOLLOWUPS = String(process.env.ENABLE_COMMERCIAL_FOLLOWUPS || "true").toLowerCase() === "true";
-const COMMERCIAL_FOLLOWUPS_ACTIVE = POSTGRES_READY && ENABLE_COMMERCIAL_FOLLOWUPS;
 const COMMERCIAL_FOLLOWUP_SCAN_MS = Number(process.env.COMMERCIAL_FOLLOWUP_SCAN_MS || 60000);
 const COMMERCIAL_FOLLOWUP_DELAY_MS = Number(process.env.COMMERCIAL_FOLLOWUP_DELAY_MS || 5 * 60 * 1000);
 const COMMERCIAL_FOLLOWUP_MAX_PER_RUN = Number(process.env.COMMERCIAL_FOLLOWUP_MAX_PER_RUN || 20);
@@ -734,7 +690,6 @@ const HUBSPOT_ACCESS_TOKEN = process.env.HUBSPOT_ACCESS_TOKEN || process.env.HUB
 const HUBSPOT_BASE_URL = (process.env.HUBSPOT_BASE_URL || "https://api.hubapi.com").replace(/\/$/, "");
 const ENABLE_END_OF_DAY_TRACKING = String(process.env.ENABLE_END_OF_DAY_TRACKING || "false").toLowerCase() === "true";
 const ENABLE_APPOINTMENT_TEMPLATES = String(process.env.ENABLE_APPOINTMENT_TEMPLATES || "true").toLowerCase() === "true";
-const APPOINTMENT_TEMPLATES_ACTIVE = POSTGRES_READY && ENABLE_APPOINTMENT_TEMPLATES;
 
 const HUBSPOT_PROPERTY = {
   firstname: "firstname",
@@ -1109,7 +1064,7 @@ function detectCommercialFollowupKindFromContext(ctx = {}) {
 }
 
 async function upsertCommercialFollowupCandidate(waId) {
-  if (!COMMERCIAL_FOLLOWUPS_ACTIVE || !waId) return;
+  if (!ENABLE_COMMERCIAL_FOLLOWUPS || !waId) return;
 
   const ctx = lastCloseContext.get(waId) || {};
   const followupKind = detectCommercialFollowupKindFromContext(ctx);
@@ -1155,7 +1110,6 @@ async function upsertCommercialFollowupCandidate(waId) {
 }
 
 async function logCommercialFollowup({ waId, waPhone, followupKind, messageText, status, errorText = "" }) {
-  if (!POSTGRES_READY) return;
   await db.query(
     `
     INSERT INTO commercial_followup_logs (wa_id, wa_phone, followup_kind, message_text, status, error_text)
@@ -1269,10 +1223,17 @@ async function buildProductFollowupMessage({ ctx, contact }) {
     limit: 6,
   });
 
+  const treatmentKnowledge = resolvedDomain === 'hair'
+    ? detectHairTreatmentKnowledge({ text: fullText, family: resolvedFamily, need: fullText })
+    : null;
+
   const recoAI = await recommendProductsWithAI({
     text: fullText,
+    domain: resolvedDomain,
     familyLabel: resolvedFamily,
     need: fullText,
+    useType: normalizeUseType(fullText),
+    treatmentKnowledge,
     products: shortlist.slice(0, 6),
   });
 
@@ -1288,6 +1249,8 @@ async function buildProductFollowupMessage({ ctx, contact }) {
     domain: resolvedDomain,
     familyLabel: resolvedFamily,
     need: fullText,
+    useType: normalizeUseType(fullText),
+    treatmentKnowledge,
   });
 
   if (!body) return "";
@@ -1303,7 +1266,7 @@ ${body}`;
 }
 
 async function processCommercialFollowups() {
-  if (!COMMERCIAL_FOLLOWUPS_ACTIVE) return;
+  if (!ENABLE_COMMERCIAL_FOLLOWUPS) return;
 
   const r = await db.query(
     `
@@ -1596,6 +1559,8 @@ TURNOS:
 - Horario del salón comercial: Lunes a Viernes de 17 a 22 hs.
 
 Si preguntan por precios, stock u opciones, usá los catálogos cuando sea posible.
+Para productos capilares, razoná como una profesional del rubro: entendé el paso del tratamiento, el objetivo (hidratación, reparación, color, alisado, barbería, finalización) y sugerí complementos reales SOLO si existen en catálogo.
+Si detectás uso personal, recomendá en tono de cuidado y mantenimiento. Si detectás uso profesional, recomendá en tono de trabajo, rendimiento, terminación y venta complementaria para el salón.
 Cuando respondas con productos/servicios/cursos, NO reescribas los nombres: copiá el "Nombre" tal cual figura en el Excel.
 `.trim();
 
@@ -2242,41 +2207,12 @@ function mapDraftRowToTurno(row) {
 }
 
 async function getAppointmentDraft(waId) {
-  if (!POSTGRES_READY) {
-    const row = memoryDb.appointmentDrafts.get(String(waId || '')) || null;
-    return row ? cloneJson(row) : null;
-  }
   const r = await db.query(`SELECT * FROM appointment_drafts WHERE wa_id = $1 LIMIT 1`, [waId]);
   return mapDraftRowToTurno(r.rows[0]);
 }
 
 async function saveAppointmentDraft(waId, waPhone, draft) {
   const d = draft || {};
-  if (!POSTGRES_READY) {
-    const memoryDraft = {
-      fecha: toYMD(d.fecha) || '',
-      hora: d.hora || '',
-      servicio: d.servicio || '',
-      duracion_min: Number(d.duracion_min || 60) || 60,
-      notas: d.notas || '',
-      cliente_full: d.cliente_full || '',
-      telefono_contacto: normalizePhone(d.telefono_contacto || waPhone || '') || '',
-      payment_status: d.payment_status || 'not_paid',
-      payment_amount: d.payment_amount == null ? null : Number(d.payment_amount),
-      payment_sender: d.payment_sender || '',
-      payment_receiver: d.payment_receiver || '',
-      payment_proof_text: d.payment_proof_text || '',
-      payment_proof_media_id: d.payment_proof_media_id || '',
-      payment_proof_filename: d.payment_proof_filename || '',
-      awaiting_contact: !!d.awaiting_contact,
-      flow_step: d.flow_step || '',
-      last_intent: d.last_intent || '',
-      last_service_name: d.last_service_name || d.servicio || '',
-      wa_phone: normalizePhone(waPhone || d.telefono_contacto || '') || '',
-    };
-    memoryDb.appointmentDrafts.set(String(waId || ''), memoryDraft);
-    return;
-  }
   await db.query(
     `INSERT INTO appointment_drafts (
       wa_id, wa_phone, client_name, contact_phone, service_name, service_notes,
@@ -2336,10 +2272,6 @@ async function saveAppointmentDraft(waId, waPhone, draft) {
 }
 
 async function deleteAppointmentDraft(waId) {
-  if (!POSTGRES_READY) {
-    memoryDb.appointmentDrafts.delete(String(waId || ''));
-    return;
-  }
   await db.query(`DELETE FROM appointment_drafts WHERE wa_id = $1`, [waId]);
 }
 
@@ -2449,39 +2381,6 @@ async function tryApplyPaymentToDraft(base, { text, mediaMeta } = {}) {
 }
 
 async function createAppointmentRecord({ waId, waPhone, merged, status, calendarEventId }) {
-  if (!POSTGRES_READY) {
-    const row = {
-      id: memoryAppointmentSeq++,
-      wa_id: String(waId || ''),
-      wa_phone: normalizePhone(waPhone || merged.telefono_contacto || ''),
-      client_name: merged.cliente_full || null,
-      contact_phone: normalizePhone(merged.telefono_contacto || '') || null,
-      service_name: merged.servicio || null,
-      service_notes: merged.notas || null,
-      appointment_date: toYMD(merged.fecha) || null,
-      appointment_time: merged.hora || null,
-      duration_min: Number(merged.duracion_min || 60) || 60,
-      status: status || 'booked',
-      payment_status: merged.payment_status || 'paid_verified',
-      payment_amount: merged.payment_amount == null ? null : Number(merged.payment_amount),
-      payment_sender: merged.payment_sender || null,
-      payment_receiver: merged.payment_receiver || null,
-      payment_proof_text: merged.payment_proof_text || null,
-      payment_proof_media_id: merged.payment_proof_media_id || null,
-      payment_proof_filename: merged.payment_proof_filename || null,
-      calendar_event_id: calendarEventId || null,
-      is_color_service: isColorOrTinturaService(merged.servicio || merged.notas || ''),
-      stylist_notified_at: null,
-      reminder_client_24h_at: null,
-      reminder_client_2h_at: null,
-      reminder_stylist_24h_at: null,
-      reminder_stylist_2h_at: null,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-    memoryDb.appointments.push(row);
-    return { id: row.id };
-  }
   const r = await db.query(
     `INSERT INTO appointments (
       wa_id, wa_phone, client_name, contact_phone, service_name, service_notes,
@@ -2529,10 +2428,6 @@ function getAppointmentStartDate(appt) {
 }
 
 async function getAppointmentRowById(appointmentId) {
-  if (!POSTGRES_READY) {
-    const row = memoryDb.appointments.find((item) => Number(item.id) === Number(appointmentId));
-    return row ? buildAppointmentData(row) : null;
-  }
   const r = await db.query(
     `SELECT id, wa_id, wa_phone, client_name, contact_phone, service_name,
             appointment_date::text AS appointment_date,
@@ -2552,7 +2447,6 @@ async function getAppointmentRowById(appointmentId) {
 }
 
 async function processAppointmentTemplateNotifications() {
-  if (!APPOINTMENT_TEMPLATES_ACTIVE) return;
   const stylistRecipient = normalizeWhatsAppRecipient(STYLIST_NOTIFY_PHONE_RAW);
   if (!stylistRecipient) return;
 
@@ -4455,6 +4349,222 @@ const FURNITURE_FAMILY_DEFS = [
   { id: 'equipamiento', label: 'equipamiento', aliases: ['equipamiento', 'mobiliario', 'mueble', 'muebles'] },
 ];
 
+const HAIR_TREATMENT_KNOWLEDGE = [
+  {
+    id: 'hidratacion_reparacion',
+    label: 'hidratación y nutrición capilar',
+    triggerFamilies: ['bano_de_crema', 'tratamiento', 'shampoo', 'acondicionador', 'serum', 'aceite', 'protector'],
+    triggerKeywords: ['baño de crema', 'bano de crema', 'nutricion', 'nutrición', 'hidratacion', 'hidratación', 'reparacion', 'reparación', 'cabello seco', 'pelo seco', 'frizz', 'brillo', 'suavidad'],
+    primaryFamilies: ['bano_de_crema', 'tratamiento', 'shampoo', 'acondicionador'],
+    complementFamiliesPersonal: ['serum', 'aceite', 'protector'],
+    complementFamiliesProfessional: ['serum', 'aceite', 'protector', 'tratamiento', 'shampoo'],
+    stepsPersonal: [
+      'lavado según la necesidad del cabello',
+      'aplicación del baño de crema o tratamiento',
+      'enjuague y orden del lavado',
+      'finalización con sérum, aceite o protector'
+    ],
+    stepsProfessional: [
+      'diagnóstico del cabello y lavado técnico',
+      'aplicación del tratamiento o baño de crema',
+      'tiempo de pose y enjuague',
+      'terminación con sérum, aceite o protector para sellar'
+    ],
+    followup: '¿Lo necesita para uso personal o para trabajar? ¿Busca hidratación, reparación, bajar frizz o más brillo final?'
+  },
+  {
+    id: 'coloracion_mantenimiento',
+    label: 'coloración y mantenimiento del color',
+    triggerFamilies: ['tintura', 'oxidante', 'decolorante', 'matizador', 'shampoo', 'tratamiento', 'serum'],
+    triggerKeywords: ['tintura', 'coloracion', 'coloración', 'decolorante', 'oxidante', 'matizador', 'rubio', 'canas', 'mechas', 'balayage', 'tono', 'reflejos'],
+    primaryFamilies: ['tintura', 'oxidante', 'decolorante', 'matizador'],
+    complementFamiliesPersonal: ['shampoo', 'tratamiento', 'serum'],
+    complementFamiliesProfessional: ['oxidante', 'matizador', 'tratamiento', 'serum', 'shampoo'],
+    stepsPersonal: [
+      'servicio o coloración según el objetivo',
+      'lavado de mantenimiento del color',
+      'tratamiento post color',
+      'finalización con sérum o cuidado de brillo'
+    ],
+    stepsProfessional: [
+      'diagnóstico del tono y técnica a realizar',
+      'mezcla con oxidante / decoloración / coloración',
+      'matización o corrección si hace falta',
+      'tratamiento post color y finalización'
+    ],
+    followup: '¿Es para uso personal o profesional? ¿Busca cubrir canas, mantener rubios, matizar o trabajar coloración completa?'
+  },
+  {
+    id: 'alisado_reconstruccion',
+    label: 'alisado, keratina y reconstrucción',
+    triggerFamilies: ['alisado', 'keratina', 'botox', 'shampoo', 'tratamiento', 'serum', 'protector'],
+    triggerKeywords: ['alisado', 'keratina', 'keratin', 'botox capilar', 'reconstruccion', 'reconstrucción', 'sellado', 'lacio', 'anti frizz', 'frizz', 'plastificado'],
+    primaryFamilies: ['alisado', 'keratina', 'botox', 'tratamiento'],
+    complementFamiliesPersonal: ['shampoo', 'serum', 'protector'],
+    complementFamiliesProfessional: ['shampoo', 'tratamiento', 'serum', 'protector'],
+    stepsPersonal: [
+      'lavado y preparación del cabello',
+      'aplicación del producto de alisado o reconstrucción',
+      'sellado y planchado si corresponde',
+      'mantenimiento con shampoo y finalizador'
+    ],
+    stepsProfessional: [
+      'diagnóstico y lavado técnico de arrastre',
+      'aplicación del activo de alisado o keratina',
+      'secado, sellado y planchado según técnica',
+      'mantenimiento recomendado para prolongar el resultado'
+    ],
+    followup: '¿Lo necesita para uso personal o para trabajar? ¿Busca bajar frizz, alisar, reconstruir o dejar mantenimiento post alisado?'
+  },
+  {
+    id: 'barberia_styling',
+    label: 'barbería y terminación masculina',
+    triggerFamilies: ['cera', 'gel', 'aceite', 'shampoo'],
+    triggerKeywords: ['barberia', 'barbería', 'barba', 'corte masculino', 'peinado masculino', 'styling', 'fijacion', 'fijación'],
+    primaryFamilies: ['cera', 'gel', 'aceite', 'shampoo'],
+    complementFamiliesPersonal: ['aceite', 'shampoo'],
+    complementFamiliesProfessional: ['cera', 'gel', 'aceite', 'shampoo'],
+    stepsPersonal: [
+      'lavado o preparación',
+      'corte o peinado',
+      'terminación con cera o gel',
+      'cuidado de barba o finalización con aceite'
+    ],
+    stepsProfessional: [
+      'preparación del cabello o barba',
+      'corte, barba o styling',
+      'terminación con cera o gel según fijación',
+      'cuidado final con aceite o producto de mantenimiento'
+    ],
+    followup: '¿Es para uso personal o para barbería? ¿Busca fijación, brillo, textura o terminación para barba?'
+  },
+];
+
+function getHairTreatmentKnowledgeById(id) {
+  const key = normalizeCatalogSearchText(id || '');
+  if (!key) return null;
+  return HAIR_TREATMENT_KNOWLEDGE.find((item) => normalizeCatalogSearchText(item.id) === key) || null;
+}
+
+function getFamilyAliasesSafe(family) {
+  const aliases = getProductFamilyAliases(family);
+  if (aliases.length) return aliases;
+  const label = getProductFamilyLabel(family);
+  return label ? [label] : [];
+}
+
+function rowMatchesHairFamily(row, family) {
+  const aliases = getFamilyAliasesSafe(family);
+  if (!aliases.length) return false;
+  const hay = buildStockHaystack(row);
+  return aliases.some((alias) => containsCatalogPhrase(hay, alias));
+}
+
+function detectHairTreatmentKnowledge({ text = '', family = '', need = '' } = {}) {
+  const bag = normalizeCatalogSearchText([text, family, need].filter(Boolean).join(' | '));
+  if (!bag) return null;
+
+  let best = null;
+  for (const item of HAIR_TREATMENT_KNOWLEDGE) {
+    let score = 0;
+    const familyKey = normalizeCatalogSearchText(family);
+    if (familyKey && item.triggerFamilies.some((x) => normalizeCatalogSearchText(x) === familyKey)) {
+      score += 7;
+    }
+    for (const triggerFamily of item.triggerFamilies) {
+      const aliases = getFamilyAliasesSafe(triggerFamily);
+      for (const alias of aliases) {
+        if (containsCatalogPhrase(bag, alias)) score += normalizeCatalogSearchText(alias).split(' ').length >= 2 ? 3 : 2;
+      }
+    }
+    for (const kw of (item.triggerKeywords || [])) {
+      if (containsCatalogPhrase(bag, kw)) score += normalizeCatalogSearchText(kw).split(' ').length >= 2 ? 2 : 1;
+    }
+    if (!score) continue;
+    if (!best || score > best.score) best = { item, score };
+  }
+
+  return best?.item || null;
+}
+
+function getTreatmentComplementFamilies(knowledge, useType = '') {
+  const info = knowledge || null;
+  if (!info) return [];
+  return normalizeUseType(useType) === 'profesional'
+    ? (info.complementFamiliesProfessional || [])
+    : (info.complementFamiliesPersonal || []);
+}
+
+function buildTreatmentStepsSummary(knowledge, useType = '') {
+  const info = knowledge || null;
+  if (!info) return '';
+  const steps = normalizeUseType(useType) === 'profesional'
+    ? (info.stepsProfessional || info.stepsPersonal || [])
+    : (info.stepsPersonal || info.stepsProfessional || []);
+  const short = steps.slice(0, 4).map((step, idx) => `${idx + 1}) ${step}`);
+  return short.length ? `Normalmente este trabajo se completa así: ${short.join(' · ')}` : '';
+}
+
+function buildTreatmentQuestion(knowledge, useType = '') {
+  const info = knowledge || null;
+  if (!info) return '';
+  const use = normalizeUseType(useType);
+  if (use === 'profesional') {
+    return `¿Lo necesita para trabajar en el salón? Así le recomiendo una combinación más completa y rendidora.`;
+  }
+  return info.followup || '';
+}
+
+function buildTreatmentRecommendationPool(stockRows, { knowledge = null, family = '', query = '', useType = '', need = '', hairType = '' } = {}) {
+  const info = knowledge || null;
+  const rows = Array.isArray(stockRows) ? stockRows.filter((row) => detectRowProductDomain(row) === 'hair') : [];
+  if (!info || !rows.length) return [];
+
+  const primaryFamilies = Array.from(new Set([family, ...(info.primaryFamilies || [])].filter(Boolean)));
+  const complementFamilies = Array.from(new Set(getTreatmentComplementFamilies(info, useType).filter(Boolean)));
+  const relevantFamilies = Array.from(new Set([...primaryFamilies, ...complementFamilies]));
+
+  const scored = rows.map((row) => {
+    let score = scoreProductCandidate(row, {
+      query,
+      family,
+      domain: 'hair',
+      hairType,
+      need,
+      useType,
+    });
+
+    if (primaryFamilies.some((fam) => rowMatchesHairFamily(row, fam))) score += 3.4;
+    if (complementFamilies.some((fam) => rowMatchesHairFamily(row, fam))) score += 1.6;
+
+    const bag = buildStockHaystack(row);
+    if (normalizeUseType(useType) === 'profesional' && /(profesional|salon|salón|barber)/i.test(bag)) score += 1.1;
+    if (normalizeUseType(useType) === 'personal' && /(personal|hogar|casa)/i.test(bag)) score += 0.6;
+
+    return { row, score };
+  }).filter((item) => item.score > 0.2);
+
+  scored.sort((a, b) => b.score - a.score);
+
+  const out = [];
+  const seen = new Set();
+  for (const item of scored) {
+    const key = normalizeCatalogSearchText(`${item.row?.nombre || ''} ${item.row?.marca || ''}`);
+    if (!key || seen.has(key)) continue;
+
+    if (relevantFamilies.length) {
+      const matchesRelevant = relevantFamilies.some((fam) => rowMatchesHairFamily(item.row, fam));
+      if (!matchesRelevant && item.score < 1.4) continue;
+    }
+
+    seen.add(key);
+    out.push(item.row);
+    if (out.length >= 20) break;
+  }
+
+  return out;
+}
+
 const PRODUCT_TYPE_KEYWORDS = PRODUCT_FAMILY_DEFS.flatMap((x) => x.aliases).concat(FURNITURE_FAMILY_DEFS.flatMap((x) => x.aliases));
 const PRODUCT_LIST_HINTS_RE = /(catalogo|catálogo|lista|todo|toda|todos|todas|opciones|mostrame|mandame|enviame|pasame|que tenes|qué tenes|que tienen|qué tienen|que hay|qué hay|stock|venden|venta)/i;
 
@@ -4555,11 +4665,18 @@ function detectRowProductDomain(row) {
   return 'hair';
 }
 
-function buildProductFollowupQuestion({ domain = '', familyLabel = '' } = {}) {
+function buildProductFollowupQuestion({ domain = '', familyLabel = '', useType = '' } = {}) {
   const readableFamily = familyLabel ? (domain === 'furniture' ? (getFurnitureFamilyDef(familyLabel)?.label || familyLabel) : getProductFamilyLabel(familyLabel)) : '';
   if (domain === 'furniture') {
     return `Si quiere, le ayudo a elegir la mejor opción 😊 ¿Es para uso personal o para un salón/negocio? ¿Qué estilo busca y cuántos puestos necesita?`;
   }
+
+  const treatmentKnowledge = detectHairTreatmentKnowledge({ family: familyLabel, text: readableFamily });
+  const treatmentQuestion = buildTreatmentQuestion(treatmentKnowledge, useType);
+  if (treatmentQuestion) {
+    return `Si quiere, le ayudo a elegir la mejor opción 😊 ${treatmentQuestion}`;
+  }
+
   return `Si quiere, le ayudo a elegir la mejor opción 😊 ¿Lo necesita para uso personal o para trabajar? ¿Qué tipo de cabello tiene y qué resultado busca${readableFamily ? ` con ${readableFamily}` : ''}?`;
 }
 
@@ -4799,6 +4916,8 @@ Devolvé SOLO JSON con estas claves:
 - business_type: string
 - style: string
 - seats_needed: string
+- treatment_context: string
+- work_type: string
 
 Reglas:
 - Si pregunta por muebles o equipamiento, domain=furniture.
@@ -4808,6 +4927,7 @@ Reglas:
 - Si pide foto o precio de un producto puntual, specific_name debe contener ese producto.
 - Si trae detalles para elegir, wants_recommendation=true.
 - En hair, los detalles suelen ser tipo de cabello o resultado buscado.
+- En hair, si consulta por una etapa técnica (por ejemplo baño de crema, nutrición, matizador, tintura, keratina, barbería, cera, gel), tratá de detectar el contexto del trabajo en treatment_context.
 - En furniture, los detalles suelen ser si es para uso personal o negocio, estilo, cantidad de puestos, espacio o prioridad de diseño/funcionalidad.
 - Si existe familia_actual y el cliente responde solo con datos de preferencia, seguí la continuidad y marcá is_product_query=true.
 - Si parece servicio/turno y no producto, is_product_query=false.
@@ -4847,6 +4967,8 @@ Reglas:
       business_type: String(obj.business_type || '').trim(),
       style: String(obj.style || '').trim(),
       seats_needed: String(obj.seats_needed || '').trim(),
+      treatment_context: String(obj.treatment_context || '').trim(),
+      work_type: String(obj.work_type || '').trim(),
     };
   } catch {
     return null;
@@ -4863,8 +4985,8 @@ function compactProductDescription(desc, maxLen = 260) {
 function normalizeUseType(value) {
   const t = normalize(value || '');
   if (!t) return '';
-  if (/profes|trabaj/.test(t)) return 'profesional';
-  if (/personal|casa|hogar/.test(t)) return 'personal';
+  if (/(profes|trabaj|peluquer|salon|salón|barber|negocio|local|para clientas|para clientes|para el salon|para el salón)/.test(t)) return 'profesional';
+  if (/(personal|casa|hogar|para mi|para mí|uso propio)/.test(t)) return 'personal';
   return '';
 }
 
@@ -4907,7 +5029,18 @@ function deriveProductTags(row) {
   return tags;
 }
 
-function buildProductAICandidate(row) {
+function buildProductAICandidate(row, opts = {}) {
+  const treatmentKnowledge = opts?.treatmentKnowledge || null;
+  const productFamilies = PRODUCT_FAMILY_DEFS
+    .filter((fam) => rowMatchesHairFamily(row, fam.id))
+    .map((fam) => fam.label);
+
+  let technicalRole = '';
+  if (treatmentKnowledge) {
+    if ((treatmentKnowledge.primaryFamilies || []).some((fam) => rowMatchesHairFamily(row, fam))) technicalRole = 'base';
+    else if (getTreatmentComplementFamilies(treatmentKnowledge, opts?.useType || '').some((fam) => rowMatchesHairFamily(row, fam))) technicalRole = 'complemento';
+  }
+
   return {
     nombre: row.nombre,
     categoria: row.categoria || '',
@@ -4916,6 +5049,8 @@ function buildProductAICandidate(row) {
     descripcion: compactProductDescription(row.descripcion || ''),
     dominio: detectRowProductDomain(row),
     tags: deriveProductTags(row),
+    familias: productFamilies,
+    rol_tecnico: technicalRole,
   };
 }
 
@@ -5003,9 +5138,13 @@ function shortlistProductsForRecommendation(rows, criteria = {}) {
   return out.length ? out : scopedItems.slice(0, criteria.limit || 10);
 }
 
-async function recommendProductsWithAI({ text, domain = '', familyLabel = '', hairType = '', need = '', useType = '', businessType = '', style = '', seatsNeeded = '', products = [] } = {}) {
-  const candidates = Array.isArray(products) ? products.filter((p) => p?.nombre).slice(0, 10).map(buildProductAICandidate) : [];
+async function recommendProductsWithAI({ text, domain = '', familyLabel = '', hairType = '', need = '', useType = '', businessType = '', style = '', seatsNeeded = '', treatmentKnowledge = null, products = [] } = {}) {
+  const candidates = Array.isArray(products)
+    ? products.filter((p) => p?.nombre).slice(0, 10).map((row) => buildProductAICandidate(row, { treatmentKnowledge, useType }))
+    : [];
   if (!candidates.length) return null;
+
+  const treatmentSummary = treatmentKnowledge ? buildTreatmentStepsSummary(treatmentKnowledge, useType) : '';
 
   try {
     const completion = await openai.chat.completions.create({
@@ -5016,7 +5155,7 @@ async function recommendProductsWithAI({ text, domain = '', familyLabel = '', ha
           content:
 `Sos un asistente comercial de salón que recomienda SOLO entre las opciones enviadas.
 Hay dos dominios:
-- hair: productos/insumos para cabello
+- hair: productos/insumos para cabello o barbería
 - furniture: muebles y equipamiento
 
 Tu trabajo:
@@ -5024,13 +5163,19 @@ Tu trabajo:
 - No inventar productos ni cambiar nombres.
 - Si faltan datos, igual podés proponer 2 a 4 opciones razonables y una sola pregunta de seguimiento.
 - Si domain=furniture, priorizá uso personal o negocio, estilo, funcionalidad y cantidad de puestos.
-- Si domain=hair, priorizá tipo de cabello, necesidad y uso personal/profesional.
+- Si domain=hair, pensá como una profesional: entendé el paso técnico, el objetivo del trabajo y sugerí una combinación lógica entre producto base y complementos reales.
+- Si uso=profesional, hablá en lógica de trabajo, terminación y rendimiento.
+- Si uso=personal, hablá en lógica de cuidado y mantenimiento.
+- Si hay "resumen_tratamiento", usalo para orientar la selección.
+- No agregues productos fuera de las opciones enviadas.
 
 Respondé SOLO JSON con:
 - intro: string
 - recommended_names: string[] (hasta 4 nombres exactos)
 - follow_up: string
-- rationale: string (breve, 1 oración)`,
+- rationale: string (breve, 1 oración)
+- step_summary: string (breve, opcional, máximo 1 oración)
+- sales_angle: string (breve, opcional)`,
         },
         {
           role: 'user',
@@ -5044,6 +5189,13 @@ Respondé SOLO JSON con:
             tipo_negocio: businessType || '',
             estilo: style || '',
             puestos: seatsNeeded || '',
+            tratamiento: treatmentKnowledge ? {
+              id: treatmentKnowledge.id,
+              label: treatmentKnowledge.label,
+              resumen_tratamiento: treatmentSummary,
+              familias_base: treatmentKnowledge.primaryFamilies || [],
+              familias_complementarias: getTreatmentComplementFamilies(treatmentKnowledge, useType),
+            } : null,
             opciones: candidates,
           }),
         },
@@ -5057,13 +5209,15 @@ Respondé SOLO JSON con:
       recommended_names: Array.isArray(obj.recommended_names) ? obj.recommended_names.map((x) => String(x || '').trim()).filter(Boolean) : [],
       follow_up: String(obj.follow_up || '').trim(),
       rationale: String(obj.rationale || '').trim(),
+      step_summary: String(obj.step_summary || '').trim(),
+      sales_angle: String(obj.sales_angle || '').trim(),
     };
   } catch {
     return null;
   }
 }
 
-function formatRecommendedProductsReply(aiPayload, rows, { domain = '', familyLabel = '', hairType = '', need = '', useType = '', businessType = '', style = '', seatsNeeded = '' } = {}) {
+function formatRecommendedProductsReply(aiPayload, rows, { domain = '', familyLabel = '', hairType = '', need = '', useType = '', businessType = '', style = '', seatsNeeded = '', treatmentKnowledge = null } = {}) {
   const items = Array.isArray(rows) ? rows.filter((r) => r?.nombre).slice(0, 4) : [];
   if (!items.length) return null;
 
@@ -5076,18 +5230,25 @@ function formatRecommendedProductsReply(aiPayload, rows, { domain = '', familyLa
       ? `Según lo que me dice, estas opciones de *${readableFamily}* le pueden servir:`
       : `Según lo que me dice, estas opciones le pueden servir:`;
 
-  const rationale = aiPayload?.rationale ? `\n${aiPayload.rationale}` : '';
+  const bodyParts = [intro];
+
+  if (aiPayload?.rationale) bodyParts.push(aiPayload.rationale);
+
+  const treatmentSummary = aiPayload?.step_summary || buildTreatmentStepsSummary(treatmentKnowledge, useType);
+  if (domain === 'hair' && treatmentSummary) bodyParts.push(treatmentSummary);
+
+  if (aiPayload?.sales_angle) bodyParts.push(aiPayload.sales_angle);
+
   const lines = items.map((p) => {
     const precio = moneyOrConsult(p.precio);
     const desc = compactProductDescription(p.descripcion || '', 170);
     return `${getCatalogItemEmoji(p.nombre, { kind: 'product' })} *${p.nombre}*\n• Precio: *${precio}*${desc ? `\n• ${desc}` : ''}`;
   });
 
-  const followUp = aiPayload?.follow_up || buildProductFollowupQuestion({ domain, familyLabel });
+  const followUp = aiPayload?.follow_up || buildProductFollowupQuestion({ domain, familyLabel, useType });
 
-  return `${intro}${rationale}\n\n${lines.join("\n\n— — —\n\n")}\n\n${followUp}`.trim();
+  return `${bodyParts.filter(Boolean).join('\n')}\n\n${lines.join('\n\n— — —\n\n')}\n\n${followUp}`.trim();
 }
-
 function detectFemaleContext(text) {
   const t = normalize(text || '');
   return /(\bella\b|\bmi hija\b|\botra hija\b|\bhija\b|\bmi tia\b|\btia\b|\bmi señora\b|\bmi senora\b|\bseñora\b|\bsenora\b|\bmujer\b|\bfemenin[oa]\b|\bdama\b)/i.test(t);
@@ -5627,16 +5788,6 @@ function formatCoursesReply(matches, mode) {
 
 async function getRecentDbMessages(waPeer, limit = 12) {
   const peerNorm = normalizePhone(waPeer);
-  if (!POSTGRES_READY) {
-    return memoryDb.messages
-      .filter((row) => row.client_id === CLIENT_ID && row.wa_peer === peerNorm && String(row.text || '').trim())
-      .slice(-limit)
-      .map((row) => ({
-        role: row.direction === 'out' ? 'assistant' : 'user',
-        content: String(row.text || '').trim(),
-      }))
-      .filter((x) => x.content);
-  }
   const r = await db.query(
     `SELECT direction, text
        FROM messages
@@ -5673,21 +5824,6 @@ function getLastKnownService(waId, draft) {
 
 async function getLastBookedAppointmentForUser({ waId, waPhone }) {
   const phoneNorm = normalizePhone(waPhone || "");
-  if (!POSTGRES_READY) {
-    const rows = memoryDb.appointments.filter((row) =>
-      String(row.wa_id || '') === String(waId || '') || normalizePhone(row.wa_phone || '') === phoneNorm
-    );
-    const row = rows[rows.length - 1];
-    if (!row) return null;
-    return {
-      client_name: row.client_name || "",
-      service_name: row.service_name || "",
-      fecha: row.appointment_date ? String(row.appointment_date).slice(0, 10) : "",
-      hora: row.appointment_time ? String(row.appointment_time).slice(0, 5) : "",
-      duracion_min: Number(row.duration_min || 60) || 60,
-      created_at: row.created_at || null,
-    };
-  }
   const r = await db.query(
     `SELECT client_name, service_name, appointment_date, appointment_time, duration_min, created_at
        FROM appointments
@@ -6124,18 +6260,6 @@ function buildAppointmentTemplateVarsForClient(appt) {
 }
 
 async function insertAppointmentNotificationLog({ appointmentId, notificationType, recipientPhone, templateName, waMessageId, payload }) {
-  if (!POSTGRES_READY) {
-    memoryDb.appointmentNotifications.push({
-      appointment_id: appointmentId,
-      notification_type: notificationType,
-      recipient_phone: normalizePhone(recipientPhone || ''),
-      template_name: templateName || null,
-      wa_message_id: waMessageId || null,
-      payload: cloneJson(payload || {}),
-      sent_at: new Date().toISOString(),
-    });
-    return;
-  }
   await db.query(
     `INSERT INTO appointment_notifications (appointment_id, notification_type, recipient_phone, template_name, wa_message_id, payload)
      VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -6159,14 +6283,6 @@ async function markAppointmentNotificationField(appointmentId, fieldName) {
     'reminder_stylist_2h_at',
   ]);
   if (!allowed.has(fieldName)) throw new Error(`Campo de notificación no permitido: ${fieldName}`);
-  if (!POSTGRES_READY) {
-    const row = memoryDb.appointments.find((item) => Number(item.id) === Number(appointmentId));
-    if (row) {
-      row[fieldName] = new Date().toISOString();
-      row.updated_at = new Date().toISOString();
-    }
-    return;
-  }
   await db.query(`UPDATE appointments SET ${fieldName} = NOW(), updated_at = NOW() WHERE id = $1`, [appointmentId]);
 }
 
@@ -7788,11 +7904,23 @@ Si después necesita algo, estoy acá ✨`;
       const resolvedFamily = aiFamily || (resolvedDomain === 'furniture' ? detectFurnitureFamily(resolvedQuery) || detectFurnitureFamily(text) : detectProductFamily(resolvedQuery) || detectProductFamily(text)) || lastProductCtx?.family || '';
       const resolvedFocusTerm = detectProductFocusTerm(aiSearchText || intent.query || text) || lastProductCtx?.focusTerm || '';
       const resolvedHairType = productAI?.hair_type || lastProductCtx?.hairType || '';
-      const resolvedNeed = productAI?.need || lastProductCtx?.need || '';
-      const resolvedUseType = normalizeUseType(productAI?.use_type || lastProductCtx?.useType || '');
+      const resolvedNeed = productAI?.need || productAI?.treatment_context || lastProductCtx?.need || '';
+      const resolvedUseType = normalizeUseType(productAI?.use_type || productAI?.work_type || lastProductCtx?.useType || '');
       const resolvedBusinessType = productAI?.business_type || lastProductCtx?.businessType || '';
       const resolvedStyle = productAI?.style || lastProductCtx?.style || '';
       const resolvedSeatsNeeded = productAI?.seats_needed || lastProductCtx?.seatsNeeded || '';
+      const treatmentKnowledge = resolvedDomain === 'hair'
+        ? (getHairTreatmentKnowledgeById(lastProductCtx?.treatmentId || '') || detectHairTreatmentKnowledge({
+            text: `${text} ${resolvedQuery} ${productAI?.treatment_context || ''}`,
+            family: resolvedFamily,
+            need: `${resolvedNeed} ${resolvedHairType}`.trim(),
+          }))
+        : null;
+      const shouldAutoRecommendTreatment = !!(
+        treatmentKnowledge &&
+        resolvedDomain === 'hair' &&
+        !productAI?.wants_photo
+      );
       const productMode = (
         intent.mode === 'LIST' ||
         !!productAI?.wants_all_related ||
@@ -7849,11 +7977,24 @@ Si después necesita algo, estoy acá ✨`;
         resolvedBusinessType ||
         resolvedStyle ||
         resolvedSeatsNeeded ||
+        shouldAutoRecommendTreatment ||
         (lastProductCtx && ((resolvedDomain === 'furniture' && looksLikeFurniturePreferenceReply(text)) || (resolvedDomain !== 'furniture' && looksLikeProductPreferenceReply(text))))
       );
 
       if (wantsRecommendation) {
+        const treatmentPool = treatmentKnowledge
+          ? buildTreatmentRecommendationPool(stock, {
+              knowledge: treatmentKnowledge,
+              family: resolvedFamily,
+              query: resolvedQuery || text,
+              useType: resolvedUseType,
+              need: resolvedNeed,
+              hairType: resolvedHairType,
+            })
+          : [];
+
         const pool = (matches.length > 1 ? matches : [])
+          .concat(treatmentPool)
           .concat(related)
           .concat(broader)
           .filter((row, idx, arr) =>
@@ -7888,6 +8029,7 @@ Si después necesita algo, estoy acá ✨`;
             businessType: resolvedBusinessType,
             style: resolvedStyle,
             seatsNeeded: resolvedSeatsNeeded,
+            treatmentKnowledge,
             products: shortlist,
           });
 
@@ -7906,6 +8048,7 @@ Si después necesita algo, estoy acá ✨`;
             businessType: resolvedBusinessType,
             style: resolvedStyle,
             seatsNeeded: resolvedSeatsNeeded,
+            treatmentKnowledge,
           });
 
           if (replyReco) {
@@ -7919,6 +8062,7 @@ Si después necesita algo, estoy acá ✨`;
               businessType: resolvedBusinessType || '',
               style: resolvedStyle || '',
               seatsNeeded: resolvedSeatsNeeded || '',
+              treatmentId: treatmentKnowledge?.id || '',
               mode: 'recommendation',
               lastOptions: (picked.length ? picked : shortlist.slice(0, 4)).map((x) => x.nombre),
             });
@@ -7944,6 +8088,7 @@ Si después necesita algo, estoy acá ✨`;
             businessType: resolvedBusinessType || '',
             style: resolvedStyle || '',
             seatsNeeded: resolvedSeatsNeeded || '',
+            treatmentId: treatmentKnowledge?.id || '',
             mode: 'list',
             lastOptions: relatedSlice.map((x) => x.nombre),
           });
@@ -7983,6 +8128,7 @@ Si después necesita algo, estoy acá ✨`;
             businessType: resolvedBusinessType || '',
             style: resolvedStyle || '',
             seatsNeeded: resolvedSeatsNeeded || '',
+            treatmentId: treatmentKnowledge?.id || '',
             mode: 'detail',
             lastOptions: [matches[0].nombre],
           });
@@ -7997,6 +8143,7 @@ Si después necesita algo, estoy acá ✨`;
             businessType: resolvedBusinessType || '',
             style: resolvedStyle || '',
             seatsNeeded: resolvedSeatsNeeded || '',
+            treatmentId: treatmentKnowledge?.id || '',
             mode: 'list',
             lastOptions: matches.slice(0, 8).map((x) => x.nombre),
           });
@@ -8035,6 +8182,7 @@ Si después necesita algo, estoy acá ✨`;
           hairType: resolvedHairType || '',
           need: resolvedNeed || '',
           useType: resolvedUseType || '',
+          treatmentId: treatmentKnowledge?.id || '',
           mode: 'list',
           lastOptions: broaderSlice.map((x) => x.nombre),
         });
@@ -8066,6 +8214,7 @@ Si después necesita algo, estoy acá ✨`;
         hairType: resolvedHairType || '',
         need: resolvedNeed || '',
         useType: resolvedUseType || '',
+        treatmentId: treatmentKnowledge?.id || '',
         mode: 'followup',
       });
       await sendWhatsAppText(phone, `No lo encuentro así en el catálogo. ${resolvedDomain === 'furniture' ? 'Dígame qué mueble busca, si es para uso personal o para un salón/negocio y qué estilo le gustaría 😊' : 'Dígame la marca, para qué lo necesita o qué tipo de cabello tiene y le recomiendo mejor 😊'}`);
@@ -8234,7 +8383,7 @@ if (ENABLE_END_OF_DAY_TRACKING) {
 }
 
 // ===================== PLANTILLAS DE TURNOS =====================
-if (APPOINTMENT_TEMPLATES_ACTIVE) {
+if (ENABLE_APPOINTMENT_TEMPLATES) {
   setInterval(() => {
     processAppointmentTemplateNotifications().catch((e) => {
       console.error('❌ Error en el scheduler de plantillas de turnos:', e?.response?.data || e?.message || e);
@@ -8245,7 +8394,7 @@ if (APPOINTMENT_TEMPLATES_ACTIVE) {
 }
 
 // ===================== FOLLOW-UP COMERCIAL =====================
-if (COMMERCIAL_FOLLOWUPS_ACTIVE) {
+if (ENABLE_COMMERCIAL_FOLLOWUPS) {
   setInterval(() => {
     processCommercialFollowups().catch((e) => {
       console.error("❌ Error en el scheduler de follow-up comercial:", e?.response?.data || e?.message || e);
@@ -8262,30 +8411,27 @@ const PORT = process.env.PORT || 3000;
   await ensureDb();
   await ensureAppointmentTables();
   await ensureCommercialFollowupTables();
-  console.log(POSTGRES_READY
-    ? "✅ PostgreSQL habilitado"
-    : "ℹ️ PostgreSQL desactivado temporalmente (modo memoria, sin persistencia)");
   console.log(hasHubSpotEnabled()
     ? "✅ HubSpot CRM habilitado para seguimiento al cierre de charla"
     : "⚠️ HubSpot CRM no configurado: falta HUBSPOT_ACCESS_TOKEN / HUBSPOT_TOKEN");
   console.log(ENABLE_END_OF_DAY_TRACKING
     ? "ℹ️ Seguimiento de medianoche activado"
     : "ℹ️ Seguimiento de medianoche desactivado (se usa cierre por inactividad)");
-  console.log(APPOINTMENT_TEMPLATES_ACTIVE
+  console.log(ENABLE_APPOINTMENT_TEMPLATES
     ? "ℹ️ Plantillas de turnos activadas"
-    : (POSTGRES_READY ? "ℹ️ Plantillas de turnos desactivadas temporalmente" : "ℹ️ Plantillas de turnos desactivadas porque PostgreSQL está apagado"));
-  console.log(COMMERCIAL_FOLLOWUPS_ACTIVE
+    : "ℹ️ Plantillas de turnos desactivadas temporalmente");
+  console.log(ENABLE_COMMERCIAL_FOLLOWUPS
     ? "ℹ️ Follow-up comercial activado"
-    : (POSTGRES_READY ? "ℹ️ Follow-up comercial desactivado" : "ℹ️ Follow-up comercial desactivado porque PostgreSQL está apagado"));
+    : "ℹ️ Follow-up comercial desactivado");
   console.log(hasGoogleContactsSyncEnabled()
     ? `ℹ️ Google Contacts sincronizado en ${GOOGLE_CONTACTS_TARGETS.map((x) => x.email).join(' y ')}`
     : "ℹ️ Google Contacts no configurado para sincronización automática");
-  if (APPOINTMENT_TEMPLATES_ACTIVE) {
+  if (ENABLE_APPOINTMENT_TEMPLATES) {
     await processAppointmentTemplateNotifications().catch((e) => {
       console.error('❌ Error inicial procesando plantillas de turnos:', e?.response?.data || e?.message || e);
     });
   }
-  if (COMMERCIAL_FOLLOWUPS_ACTIVE) {
+  if (ENABLE_COMMERCIAL_FOLLOWUPS) {
     await processCommercialFollowups().catch((e) => {
       console.error('❌ Error inicial procesando follow-up comercial:', e?.response?.data || e?.message || e);
     });
