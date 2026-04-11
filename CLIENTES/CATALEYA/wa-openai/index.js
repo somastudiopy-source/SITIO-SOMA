@@ -1885,6 +1885,139 @@ function setLastCourseContext(waId, patch = {}) {
 function clearLastCourseContext(waId) {
   if (waId) lastCourseContextByUser.delete(waId);
 }
+
+const pendingAmbiguousBeautyByUser = new Map();
+const lastResolvedBeautyByUser = new Map();
+const BEAUTY_CONTEXT_TTL_MS = Number(process.env.BEAUTY_CONTEXT_TTL_MS || 45 * 60 * 1000);
+
+function getPendingAmbiguousBeauty(waId) {
+  const row = pendingAmbiguousBeautyByUser.get(waId);
+  if (!row) return null;
+  if ((Date.now() - Number(row.ts || 0)) > BEAUTY_CONTEXT_TTL_MS) {
+    pendingAmbiguousBeautyByUser.delete(waId);
+    return null;
+  }
+  return row;
+}
+
+function setPendingAmbiguousBeauty(waId, patch = {}) {
+  if (!waId) return null;
+  const prev = getPendingAmbiguousBeauty(waId) || {};
+  const next = { ...prev, ...patch, ts: Date.now() };
+  pendingAmbiguousBeautyByUser.set(waId, next);
+  return next;
+}
+
+function clearPendingAmbiguousBeauty(waId) {
+  if (waId) pendingAmbiguousBeautyByUser.delete(waId);
+}
+
+function getLastResolvedBeauty(waId) {
+  const row = lastResolvedBeautyByUser.get(waId);
+  if (!row) return null;
+  if ((Date.now() - Number(row.ts || 0)) > BEAUTY_CONTEXT_TTL_MS) {
+    lastResolvedBeautyByUser.delete(waId);
+    return null;
+  }
+  return row;
+}
+
+function setLastResolvedBeauty(waId, patch = {}) {
+  if (!waId) return null;
+  const prev = getLastResolvedBeauty(waId) || {};
+  const next = { ...prev, ...patch, ts: Date.now() };
+  lastResolvedBeautyByUser.set(waId, next);
+  return next;
+}
+
+function clearLastResolvedBeauty(waId) {
+  if (waId) lastResolvedBeautyByUser.delete(waId);
+}
+
+function buildBeautyCanonicalLabel(term = '') {
+  const clean = normalize(String(term || '').trim());
+  if (!clean) return '';
+  if (clean == 'nutricion') return 'Nutrición';
+  return clean.charAt(0).toUpperCase() + clean.slice(1);
+}
+
+function looksLikeBeautyContextFollowup(text = '') {
+  const t = normalize(text || '');
+  if (!t) return false;
+  if (textAsksForServicePrice(text) || textAsksForServiceDuration(text)) return true;
+  return /^(servicio|producto|el servicio|un servicio|el producto|un producto|para hacerme|para hacermelo|para hacermela|para comprar|para usar|para vender|para trabajar|quiero comprar|y el precio|y cuanto dura|y cuánto dura|y turno|turno|quiero turno|quiero sacar turno|quiero reservar|reservar|agendar|sacar turno)$/i.test(t);
+}
+
+function shouldRunBeautyResolver(text, { pendingTerm = '', lastResolved = null } = {}) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  if (extractAmbiguousBeautyTerm(raw)) return true;
+  if (pendingTerm) return true;
+  if (lastResolved?.term && looksLikeBeautyContextFollowup(raw)) return true;
+  return false;
+}
+
+async function resolveAmbiguousBeautyIntentWithAI(text, context = {}) {
+  const raw = String(text || '').trim();
+  if (!raw) {
+    return { kind: 'UNKNOWN', canonicalQuery: '', goal: 'UNKNOWN' };
+  }
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Analizá consultas ambiguas de peluquería/belleza y devolvé SOLO JSON.
+Campos:
+- kind: SERVICE | PRODUCT | UNKNOWN
+- canonical_query: nombre base corto y limpio del tema (ej: Keratina, Botox, Nutrición, Alisado)
+- goal: PRICE | DURATION | BOOK_APPOINTMENT | DETAIL | LIST | UNKNOWN
+
+Reglas:
+- SERVICE si la persona habla del servicio del salón, su precio, su duración, o quiere turno.
+- PRODUCT si la persona habla de comprar, stock, insumos o producto.
+- UNKNOWN si todavía no se puede saber.
+- Si el mensaje es solo “servicio” o “producto”, usá pending_term.
+- Si pregunta “cuánto dura”, “cuánto demora”, “precio”, “turno”, “quiero reservar”, usá pending_term o last_resolved_term.
+- canonical_query debe ser solo el tema base, sin palabras extra.
+- Si no hay suficiente base para canonical_query, devolvé cadena vacía.
+
+Ejemplos:
+- pending_term=Keratina y mensaje=servicio => SERVICE + Keratina + DETAIL
+- pending_term=Botox y mensaje=producto => PRODUCT + Botox + DETAIL
+- mensaje=cuánto cuesta el servicio de botox => SERVICE + Botox + PRICE
+- mensaje=cuánto dura la keratina => SERVICE + Keratina + DURATION
+- last_resolved_term=Nutrición, last_resolved_kind=SERVICE y mensaje=y turno => SERVICE + Nutrición + BOOK_APPOINTMENT`
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje: raw,
+            pending_term: context.pendingTerm || '',
+            last_resolved_term: context.lastResolvedTerm || '',
+            last_resolved_kind: context.lastResolvedKind || '',
+            last_service_name: context.lastServiceName || '',
+            historial_reciente: context.historySnippet || '',
+          })
+        }
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const parsed = JSON.parse(completion.choices[0].message.content || '{}');
+    return {
+      kind: String(parsed.kind || 'UNKNOWN').trim().toUpperCase(),
+      canonicalQuery: buildBeautyCanonicalLabel(parsed.canonical_query || ''),
+      goal: String(parsed.goal || 'UNKNOWN').trim().toUpperCase(),
+    };
+  } catch {
+    return { kind: 'UNKNOWN', canonicalQuery: '', goal: 'UNKNOWN' };
+  }
+}
 // ===================== ✅ ANTI-SPAM (evita repetir el mismo texto) =====================
 // Evita que WhatsApp envíe el mismo mensaje predeterminado varias veces por reintentos/doble flujo.
 // Key: `${to}::${text}` -> ts
@@ -7353,6 +7486,7 @@ Cuando quiera retomarlo, me escribe y le paso nuevamente los horarios disponible
     // ✅ Si el término es ambiguo (ej: alisado), preguntamos si busca servicio o producto.
     const ambiguousBeautyTerm = extractAmbiguousBeautyTerm(text);
     if (ambiguousBeautyTerm && !pendingDraft && !looksLikeAppointmentIntent(text, { pendingDraft, lastService: lastKnownService }) && !isExplicitProductIntent(text) && !isExplicitServiceIntent(text)) {
+      setPendingAmbiguousBeauty(waId, { term: buildBeautyCanonicalLabel(ambiguousBeautyTerm) || ambiguousBeautyTerm });
       const msgAclara = `✨ ${ambiguousBeautyTerm.charAt(0).toUpperCase() + ambiguousBeautyTerm.slice(1)} puede referirse a dos cosas.
 
 ¿Está buscando:
@@ -7364,6 +7498,95 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
       await sendWhatsAppText(phone, msgAclara);
       scheduleInactivityFollowUp(waId, phone);
       return;
+    }
+
+    let beautyIntentOverride = null;
+    const pendingAmbiguousBeauty = getPendingAmbiguousBeauty(waId);
+    const lastResolvedBeauty = getLastResolvedBeauty(waId);
+
+    if (shouldRunBeautyResolver(text, {
+      pendingTerm: pendingAmbiguousBeauty?.term || '',
+      lastResolved: lastResolvedBeauty,
+    })) {
+      const beautyResolution = await resolveAmbiguousBeautyIntentWithAI(text, {
+        pendingTerm: pendingAmbiguousBeauty?.term || '',
+        lastResolvedTerm: lastResolvedBeauty?.term || '',
+        lastResolvedKind: lastResolvedBeauty?.kind || '',
+        lastServiceName: lastKnownService?.nombre || '',
+        historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1600),
+      });
+
+      const canonicalBeautyQuery = buildBeautyCanonicalLabel(
+        beautyResolution.canonicalQuery ||
+        pendingAmbiguousBeauty?.term ||
+        extractAmbiguousBeautyTerm(text) ||
+        lastResolvedBeauty?.term ||
+        ''
+      );
+
+      if (beautyResolution.kind === 'SERVICE' && canonicalBeautyQuery) {
+        const services = await getServicesCatalog();
+        const resolvedService = resolveServiceCatalogMatch(services, canonicalBeautyQuery);
+        const resolvedServiceName = resolvedService?.nombre || canonicalBeautyQuery;
+
+        lastServiceByUser.set(waId, { nombre: resolvedServiceName, ts: Date.now() });
+        clearPendingAmbiguousBeauty(waId);
+        setLastResolvedBeauty(waId, { term: resolvedServiceName, kind: 'SERVICE' });
+
+        if (beautyResolution.goal === 'BOOK_APPOINTMENT') {
+          const baseTurno = await applyCatalogServiceDataToTurno({
+            servicio: resolvedServiceName,
+            fecha: '',
+            hora: '',
+            duracion_min: 60,
+            notas: '',
+            cliente_full: '',
+            telefono_contacto: '',
+            payment_status: 'not_paid',
+            payment_amount: null,
+            payment_sender: '',
+            payment_receiver: '',
+            payment_proof_text: '',
+            payment_proof_media_id: '',
+            payment_proof_filename: '',
+            awaiting_contact: false,
+            flow_step: 'awaiting_date',
+            last_intent: 'book_appointment',
+            last_service_name: resolvedServiceName,
+          });
+          await saveAppointmentDraft(waId, phone, baseTurno);
+          await askForMissingTurnoData(baseTurno);
+          return;
+        }
+
+        if (resolvedService) {
+          if (beautyResolution.goal === 'DURATION') {
+            const replyDuration = formatServicesReply([resolvedService], 'DETAIL', { showDuration: true, showDescription: true });
+            if (replyDuration) {
+              pushHistory(waId, 'assistant', replyDuration);
+              await sendWhatsAppText(phone, replyDuration);
+              scheduleInactivityFollowUp(waId, phone);
+              return;
+            }
+          }
+
+          if (beautyResolution.goal === 'PRICE' || beautyResolution.goal === 'DETAIL' || /^servicio$/i.test(normalize(text))) {
+            const replyService = formatServicesReply([resolvedService], 'DETAIL');
+            if (replyService) {
+              pushHistory(waId, 'assistant', replyService);
+              await sendWhatsAppText(phone, replyService);
+              scheduleInactivityFollowUp(waId, phone);
+              return;
+            }
+          }
+        }
+
+        beautyIntentOverride = { type: 'SERVICE', query: resolvedServiceName, mode: 'DETAIL' };
+      } else if (beautyResolution.kind === 'PRODUCT' && canonicalBeautyQuery) {
+        clearPendingAmbiguousBeauty(waId);
+        setLastResolvedBeauty(waId, { term: canonicalBeautyQuery, kind: 'PRODUCT' });
+        beautyIntentOverride = { type: 'PRODUCT', query: canonicalBeautyQuery, mode: beautyResolution.goal === 'LIST' ? 'LIST' : 'DETAIL' };
+      }
     }
 
     async function askForMissingTurnoData(base) {
@@ -7864,7 +8087,7 @@ Si después necesita algo, estoy acá ✨`;
       return;
     }
 
-    if (!pendingDraft && lastKnownService?.nombre && /^producto$/i.test(normalize(text))) {
+    if (!pendingDraft && !beautyIntentOverride && lastKnownService?.nombre && /^producto$/i.test(normalize(text))) {
       const stock = await getStockCatalog();
       const matches = findStock(stock, lastKnownService.nombre, 'LIST');
       if (matches.length) {
@@ -7876,7 +8099,7 @@ Si después necesita algo, estoy acá ✨`;
       }
     }
 
-    if (!pendingDraft && lastKnownService?.nombre && /^servicio$/i.test(normalize(text))) {
+    if (!pendingDraft && !beautyIntentOverride && lastKnownService?.nombre && /^servicio$/i.test(normalize(text))) {
       const services = await getServicesCatalog();
       const matches = findServices(services, lastKnownService.nombre, 'DETAIL');
       const replyCatalog = formatServicesReply(matches, 'DETAIL');
@@ -7998,6 +8221,16 @@ Si después necesita algo, estoy acá ✨`;
       hasDraft: !!pendingDraft,
       historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1600),
     });
+
+
+    if (beautyIntentOverride) {
+      intent = {
+        ...intent,
+        type: beautyIntentOverride.type || intent.type,
+        query: beautyIntentOverride.query || intent.query || '',
+        mode: beautyIntentOverride.mode || intent.mode || 'DETAIL',
+      };
+    }
 
     const explicitCourseIntent = detectCourseIntentFromContext(text, { lastCourseContext });
     if (explicitCourseIntent.isCourse) {
