@@ -6049,6 +6049,77 @@ function extractTurnoPauseIntent(text) {
   return { matched: true, remainder };
 }
 
+async function classifyAppointmentDraftControl(text, context = {}) {
+  const raw = String(text || '').trim();
+  if (!raw) return { action: 'UNCLEAR', reason: '', source: 'empty' };
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Analizá SOLO el control del flujo de turnos y devolvé JSON estricto.
+
+Campos:
+- action: CONTINUE_APPOINTMENT | PAUSE_APPOINTMENT | SWITCH_TOPIC | UNCLEAR
+- reason: string breve
+
+Reglas:
+- CONTINUE_APPOINTMENT si el cliente sigue con el turno, confirma, aporta datos del turno, responde algo útil para reservar o manda comprobante.
+- PAUSE_APPOINTMENT si posterga, frena, cancela, deja para más adelante, dice que responde otro día o que después confirma.
+- SWITCH_TOPIC si deja el turno y cambia a otro tema claro, por ejemplo producto, cursos, fotos, muebles, horarios del salón, otra consulta distinta.
+- UNCLEAR si no alcanza para decidir.
+
+Importante:
+- "te respondo en otro momento", "después te confirmo", "más tarde te aviso", "por ahora no", "dejémoslo ahí" => PAUSE_APPOINTMENT
+- "quiero comprar un shampoo", "tenés fotos de las camillas", "qué cursos hay", "cancelar" => SWITCH_TOPIC si además cambia a otra consulta, o PAUSE_APPOINTMENT si solo corta el turno.
+- "no gracias" puede ser PAUSE_APPOINTMENT si solo cierra el tema del turno.
+- Si manda fecha, hora, nombre, teléfono o comprobante, casi siempre es CONTINUE_APPOINTMENT.
+
+Respondé SOLO JSON.`
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje: raw,
+            servicio_actual: context.serviceName || '',
+            fecha_actual: context.date || '',
+            hora_actual: context.time || '',
+            flujo_actual: context.flowStep || '',
+            historial_reciente: context.historySnippet || '',
+          })
+        }
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const action = String(obj?.action || 'UNCLEAR').trim().toUpperCase();
+    if (!['CONTINUE_APPOINTMENT', 'PAUSE_APPOINTMENT', 'SWITCH_TOPIC', 'UNCLEAR'].includes(action)) {
+      return { action: 'UNCLEAR', reason: '', source: 'ai_invalid' };
+    }
+    return {
+      action,
+      reason: String(obj?.reason || '').trim(),
+      source: 'ai',
+    };
+  } catch {
+    const fallback = extractTurnoPauseIntent(raw);
+    if (fallback.matched) {
+      return {
+        action: fallback.remainder ? 'SWITCH_TOPIC' : 'PAUSE_APPOINTMENT',
+        reason: 'fallback_regex',
+        remainder: fallback.remainder || '',
+        source: 'regex',
+      };
+    }
+    return { action: 'UNCLEAR', reason: '', source: 'fallback' };
+  }
+}
+
 function isExplicitProductIntent(text) {
   const t = normalize(text || '');
   return /(producto|productos|stock|insumo|insumos|shampoo|acondicionador|mascara|mascarilla|serum|aceite|oleo|tintura|oxidante|decolorante|matizador|ampolla|protector|spray|crema|gel|cera|comprar|venden|tenes|tenés|hay disponible|te queda|les queda|mueble|muebles|espejo|espejos|camilla|camillas|sillon|sillones|silla|sillas|mesa|mesas|respaldo|puff|equipamiento|maquina|máquina|maquinas|máquinas|plancha|planchas|secador|secadores)/i.test(t);
@@ -7109,14 +7180,25 @@ lastCloseContext.set(waId, {
       return;
     }
 
-    // ✅ Si el cliente frena o cancela la toma de turno en medio del flujo, cortamos ahí mismo.
+    // ✅ Si el cliente frena, posterga o cambia de tema en medio del flujo, resolvemos eso antes de seguir.
     const pauseDraftEarly = await getAppointmentDraft(waId);
     if (pauseDraftEarly) {
-      const pauseIntentEarly = extractTurnoPauseIntent(text);
-      if (pauseIntentEarly.matched) {
+      const draftControlEarly = await classifyAppointmentDraftControl(text, {
+        serviceName: pauseDraftEarly?.servicio || pauseDraftEarly?.last_service_name || '',
+        date: pauseDraftEarly?.fecha || '',
+        time: pauseDraftEarly?.hora || '',
+        flowStep: pauseDraftEarly?.flow_step || '',
+        historySnippet: ensureConv(waId).messages.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1200),
+      });
+
+      if (draftControlEarly.action === 'PAUSE_APPOINTMENT' || draftControlEarly.action === 'SWITCH_TOPIC') {
         await deleteAppointmentDraft(waId);
 
-        if (!pauseIntentEarly.remainder) {
+        const pauseIntentEarly = extractTurnoPauseIntent(text);
+        const shouldPauseOnly = draftControlEarly.action === 'PAUSE_APPOINTMENT';
+        const nextTextEarly = pauseIntentEarly.matched ? pauseIntentEarly.remainder : text;
+
+        if (shouldPauseOnly) {
           const msgPauseTurno = `Perfecto 😊
 
 No hay problema. Frené la gestión del turno por ahora.
@@ -7128,7 +7210,7 @@ Cuando quiera retomarlo, me escribe y le paso nuevamente los horarios disponible
           return;
         }
 
-        text = pauseIntentEarly.remainder;
+        text = String(nextTextEarly || '').trim() || String(text || '').trim();
       }
     }
 
@@ -7202,12 +7284,23 @@ updateLastCloseContext(waId, {
     let pendingDraft = await getAppointmentDraft(waId);
 
     if (pendingDraft) {
-      const pauseIntent = extractTurnoPauseIntent(text);
-      if (pauseIntent.matched) {
+      const draftControl = await classifyAppointmentDraftControl(text, {
+        serviceName: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
+        date: pendingDraft?.fecha || '',
+        time: pendingDraft?.hora || '',
+        flowStep: pendingDraft?.flow_step || '',
+        historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1200),
+      });
+
+      if (draftControl.action === 'PAUSE_APPOINTMENT' || draftControl.action === 'SWITCH_TOPIC') {
         await deleteAppointmentDraft(waId);
         pendingDraft = null;
 
-        if (!pauseIntent.remainder) {
+        const pauseIntent = extractTurnoPauseIntent(text);
+        const shouldPauseOnly = draftControl.action === 'PAUSE_APPOINTMENT';
+        const nextText = pauseIntent.matched ? pauseIntent.remainder : text;
+
+        if (shouldPauseOnly) {
           const msgPauseTurno = `Perfecto 😊
 
 No hay problema. Frené la gestión del turno por ahora.
@@ -7219,7 +7312,7 @@ Cuando quiera retomarlo, me escribe y le paso nuevamente los horarios disponible
           return;
         }
 
-        text = pauseIntent.remainder;
+        text = String(nextText || '').trim() || String(text || '').trim();
         normTxt = normalize(text);
       }
     }
