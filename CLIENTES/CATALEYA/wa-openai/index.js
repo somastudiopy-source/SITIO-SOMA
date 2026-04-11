@@ -1951,6 +1951,7 @@ function looksLikeBeautyContextFollowup(text = '') {
 function shouldRunBeautyResolver(text, { pendingTerm = '', lastResolved = null } = {}) {
   const raw = String(text || '').trim();
   if (!raw) return false;
+  if (shouldRunConversationWrapUpAI(raw)) return false;
   if (extractAmbiguousBeautyTerm(raw)) return true;
   if (pendingTerm) return true;
   if (lastResolved?.term && looksLikeBeautyContextFollowup(raw)) return true;
@@ -2017,6 +2018,104 @@ Ejemplos:
   } catch {
     return { kind: 'UNKNOWN', canonicalQuery: '', goal: 'UNKNOWN' };
   }
+}
+
+
+function shouldRunConversationWrapUpAI(text = '', waId = '') {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  const t = normalize(raw);
+  if (!t) return false;
+
+  if (/\b(gracias|muchas gracias|mil gracias|gracias igual|no gracias|por ahora no|despues|después|lo aviso|lo veo|mas tarde|más tarde|otro momento|dejalo ahi|dejalo así|dejala ahi|mejor después|mejor despues|cualquier cosa te aviso|cualquier cosa le aviso)\b/i.test(t)) {
+    return true;
+  }
+
+  if (isPoliteCatalogDecline(raw) || isPoliteClosureAfterTurno(raw)) return true;
+
+  if (t === 'no' && (lastAssistantWasQuestion(waId) || lastAssistantLooksLikeCatalogMessage(waId))) {
+    return true;
+  }
+
+  return false;
+}
+
+async function classifyConversationWrapUpWithAI(text, context = {}) {
+  const raw = String(text || '').trim();
+  if (!raw) return { action: 'CONTINUE', tone: 'neutral' };
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Analizá el último mensaje del cliente dentro de una conversación comercial de WhatsApp y devolvé SOLO JSON.
+Campos:
+- action: CONTINUE | CLOSE_POLITELY
+- tone: neutral | grateful | postpone | decline
+- reason: string breve
+
+Usá el historial y la última pregunta/oferta del bot.
+
+Elegí CLOSE_POLITELY si el cliente:
+- agradece y corta por ahora
+- posterga ("después te aviso", "lo veo y te digo", "en otro momento")
+- rechaza una sugerencia/oferta ("no gracias", "no", "por ahora no")
+- indica que no quiere seguir con ese tema ahora
+
+Elegí CONTINUE si todavía está consultando, respondiendo datos útiles o quiere seguir la charla.
+
+No confundas cierres amables con consultas.
+Ejemplos:
+- "muchas gracias, después lo aviso" => CLOSE_POLITELY
+- "no gracias" después de una sugerencia => CLOSE_POLITELY
+- "no" después de "¿es para uso personal o para trabajar?" => CLOSE_POLITELY
+- "¿y cuánto dura?" => CONTINUE
+- "servicio" => CONTINUE`
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje: raw,
+            last_assistant_message: context.lastAssistantMessage || '',
+            pending_appointment: !!context.pendingAppointment,
+            has_product_context: !!context.hasProductContext,
+            has_beauty_context: !!context.hasBeautyContext,
+            has_course_context: !!context.hasCourseContext,
+            history_snippet: context.historySnippet || '',
+          })
+        }
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const parsed = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const action = String(parsed.action || 'CONTINUE').trim().toUpperCase();
+    return {
+      action: action === 'CLOSE_POLITELY' ? 'CLOSE_POLITELY' : 'CONTINUE',
+      tone: String(parsed.tone || 'neutral').trim().toLowerCase(),
+      reason: String(parsed.reason || '').trim(),
+    };
+  } catch {
+    return { action: 'CONTINUE', tone: 'neutral', reason: '' };
+  }
+}
+
+function buildPoliteConversationCloseMessage(result = {}) {
+  const tone = String(result?.tone || '').toLowerCase();
+
+  if (tone === 'postpone') {
+    return `Perfecto 😊
+
+No hay problema. Cuando quiera retomarlo, me escribe y seguimos por acá ✨`;
+  }
+
+  return `Perfecto, cualquier cosa estoy acá para ayudarte 😊
+
+¡Que tengas un lindo día! ✨`;
 }
 // ===================== ✅ ANTI-SPAM (evita repetir el mismo texto) =====================
 // Evita que WhatsApp envíe el mismo mensaje predeterminado varias veces por reintentos/doble flujo.
@@ -7295,6 +7394,33 @@ lastCloseContext.set(waId, {
     }
 
     pushHistory(waId, "user", text);
+
+    if (!pendingNameReq?.awaiting && shouldRunConversationWrapUpAI(text, waId)) {
+      const wrapUpControl = await classifyConversationWrapUpWithAI(text, {
+        lastAssistantMessage: getLastAssistantMessage(waId)?.content || '',
+        pendingAppointment: !!(await getAppointmentDraft(waId)),
+        hasProductContext: !!getLastProductContext(waId),
+        hasBeautyContext: !!getLastResolvedBeauty(waId) || !!getPendingAmbiguousBeauty(waId) || !!getLastKnownService(waId, null),
+        hasCourseContext: !!getLastCourseContext(waId),
+        historySnippet: ensureConv(waId).messages.slice(-10).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1800),
+      });
+
+      if (wrapUpControl.action === 'CLOSE_POLITELY') {
+        clearProductMemory(waId);
+        clearPendingAmbiguousBeauty(waId);
+        clearLastResolvedBeauty(waId);
+        clearLastCourseContext(waId);
+        lastServiceByUser.delete(waId);
+
+        try { await deleteAppointmentDraft(waId); } catch {}
+
+        const msgWrapUp = buildPoliteConversationCloseMessage(wrapUpControl);
+        pushHistory(waId, "assistant", msgWrapUp);
+        await sendWhatsAppText(phone, msgWrapUp);
+        updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+        return;
+      }
+    }
 
     if (shouldUseAmbiguousBridgeMessage({ waId, text })) {
       pushHistory(waId, "assistant", AMBIGUOUS_BRIDGE_MESSAGE);
