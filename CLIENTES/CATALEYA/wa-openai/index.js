@@ -42,6 +42,59 @@ const GOOGLE_CONTACTS_TARGETS = [
   { index: 1, email: GOOGLE_CONTACTS_ACCOUNT_EMAIL_1, refreshToken: GOOGLE_CONTACTS_REFRESH_TOKEN_1 },
   { index: 2, email: GOOGLE_CONTACTS_ACCOUNT_EMAIL_2, refreshToken: GOOGLE_CONTACTS_REFRESH_TOKEN_2 },
 ].filter((x) => x.email && x.refreshToken);
+
+const googleContactsRuntimeState = new Map();
+
+function getGoogleContactsTargetKey(target = {}) {
+  return String(target?.email || target?.index || '').trim().toLowerCase();
+}
+
+function isGoogleInvalidGrantError(err) {
+  const responseData = err?.response?.data || {};
+  const raw = [
+    err?.message || '',
+    err?.code || '',
+    responseData?.error || '',
+    responseData?.error_description || '',
+  ].join(' | ').toLowerCase();
+
+  return raw.includes('invalid_grant') || raw.includes('expired or revoked');
+}
+
+function markGoogleContactsTargetInvalidGrant(target, err = null) {
+  const key = getGoogleContactsTargetKey(target);
+  if (!key) return;
+
+  googleContactsRuntimeState.set(key, {
+    disabled: true,
+    reason: 'invalid_grant',
+    disabledAt: Date.now(),
+    error: String(err?.response?.data?.error_description || err?.message || 'invalid_grant').slice(0, 500),
+  });
+
+  console.error(`❌ Google Contacts deshabilitado para ${target.email}: refresh token inválido o vencido. Generá un refresh token nuevo y volvé a iniciar el servicio.`);
+}
+
+function isGoogleContactsTargetDisabled(target) {
+  const key = getGoogleContactsTargetKey(target);
+  if (!key) return false;
+  return !!googleContactsRuntimeState.get(key)?.disabled;
+}
+
+function getGoogleContactsRuntimeSummary() {
+  return GOOGLE_CONTACTS_TARGETS.map((target) => {
+    const key = getGoogleContactsTargetKey(target);
+    const state = googleContactsRuntimeState.get(key) || {};
+    return {
+      email: target.email,
+      disabled: !!state.disabled,
+      reason: state.reason || '',
+      disabledAt: state.disabledAt || null,
+      error: state.error || '',
+    };
+  });
+}
+
 // ===================== DB (para panel) =====================
 const DB_URL = process.env.DB_URL || process.env.DATABASE_URL || "";
 if (!DB_URL) {
@@ -721,7 +774,10 @@ function hasHubSpotEnabled() {
 }
 
 function hasGoogleContactsSyncEnabled() {
-  return ENABLE_GOOGLE_CONTACTS_SYNC && !!GOOGLE_CONTACTS_CLIENT_ID && !!GOOGLE_CONTACTS_CLIENT_SECRET && GOOGLE_CONTACTS_TARGETS.length > 0;
+  return ENABLE_GOOGLE_CONTACTS_SYNC
+    && !!GOOGLE_CONTACTS_CLIENT_ID
+    && !!GOOGLE_CONTACTS_CLIENT_SECRET
+    && GOOGLE_CONTACTS_TARGETS.some((target) => !isGoogleContactsTargetDisabled(target));
 }
 
 const pendingContactNameRequests = new Map();
@@ -799,19 +855,39 @@ function buildGoogleContactsNote(ctx = {}) {
   return pieces.join(' | ');
 }
 
-async function getGoogleContactsOAuthClient(refreshToken) {
+async function getGoogleContactsOAuthClient(target) {
+  if (!target?.refreshToken) throw new Error('GOOGLE_CONTACTS_REFRESH_TOKEN faltante');
+  if (isGoogleContactsTargetDisabled(target)) {
+    const err = new Error(`Google Contacts deshabilitado para ${target.email}`);
+    err.googleContactsDisabled = true;
+    throw err;
+  }
+
   const oauth2 = new google.auth.OAuth2(
     GOOGLE_CONTACTS_CLIENT_ID,
     GOOGLE_CONTACTS_CLIENT_SECRET,
     GOOGLE_CONTACTS_REDIRECT_URI
   );
-  oauth2.setCredentials({ refresh_token: refreshToken });
-  await oauth2.getAccessToken();
-  return oauth2;
+  oauth2.setCredentials({ refresh_token: target.refreshToken });
+
+  try {
+    await oauth2.getAccessToken();
+    return oauth2;
+  } catch (e) {
+    if (isGoogleInvalidGrantError(e)) {
+      markGoogleContactsTargetInvalidGrant(target, e);
+      const err = new Error(`invalid_grant Google Contacts (${target.email})`);
+      err.code = 'invalid_grant';
+      err.googleContactsDisabled = true;
+      err.original = e;
+      throw err;
+    }
+    throw e;
+  }
 }
 
 async function getGooglePeopleClient(target) {
-  const auth = await getGoogleContactsOAuthClient(target.refreshToken);
+  const auth = await getGoogleContactsOAuthClient(target);
   return google.people({ version: 'v1', auth });
 }
 
@@ -843,8 +919,16 @@ function buildGoogleNamePayload(fullName) {
 }
 
 async function searchGoogleContactsByPhone(target, phoneRaw) {
-  if (!target?.refreshToken) return [];
-  const people = await getGooglePeopleClient(target);
+  if (!target?.refreshToken || isGoogleContactsTargetDisabled(target)) return [];
+
+  let people = null;
+  try {
+    people = await getGooglePeopleClient(target);
+  } catch (e) {
+    if (e?.googleContactsDisabled || isGoogleInvalidGrantError(e)) return [];
+    throw e;
+  }
+
   await warmupGoogleContactSearch(people);
 
   const candidates = Array.from(new Set([
@@ -879,7 +963,18 @@ async function searchGoogleContactsByPhone(target, phoneRaw) {
 
 async function upsertGoogleContactInTarget(target, { phoneRaw, explicitName = '', profileName = '', note = '' } = {}) {
   if (!target?.refreshToken || !phoneRaw) return { action: 'skipped' };
-  const people = await getGooglePeopleClient(target);
+  if (isGoogleContactsTargetDisabled(target)) return { action: 'skipped_disabled', account: target.email };
+
+  let people = null;
+  try {
+    people = await getGooglePeopleClient(target);
+  } catch (e) {
+    if (e?.googleContactsDisabled || isGoogleInvalidGrantError(e)) {
+      return { action: 'skipped_disabled', account: target.email, error: 'invalid_grant' };
+    }
+    throw e;
+  }
+
   const normalizedPhone = normalizeHubSpotPhone(phoneRaw) || `+${normalizePhoneDigits(phoneRaw)}`;
   const finalName = cleanNameCandidate(explicitName) || cleanNameCandidate(profileName) || '';
 
@@ -1205,9 +1300,13 @@ async function buildProductFollowupMessage({ ctx, contact }) {
   const stock = await getStockCatalog();
   if (!stock.length) return "";
 
-  const resolvedFamily = detectProductFamily(fullText) || "";
+  const resolvedDomain = detectProductDomain(fullText) || 'hair';
+  const resolvedFamily = resolvedDomain === 'furniture'
+    ? (detectFurnitureFamily(fullText) || "")
+    : (detectProductFamily(fullText) || "");
   const resolvedFocusTerm = detectProductFocusTerm(fullText) || "";
   const related = findStockRelated(stock, fullText, {
+    domain: resolvedDomain,
     family: resolvedFamily,
     focusTerm: resolvedFocusTerm,
     limit: 30,
@@ -1215,17 +1314,19 @@ async function buildProductFollowupMessage({ ctx, contact }) {
 
   if (!related.length) return "";
 
+  const treatmentKnowledge = resolvedDomain === 'hair'
+    ? detectHairTreatmentKnowledge({ text: fullText, family: resolvedFamily, need: fullText })
+    : null;
+
   const shortlist = shortlistProductsForRecommendation(related, {
+    domain: resolvedDomain,
     query: fullText,
     family: resolvedFamily,
     focusTerm: resolvedFocusTerm,
     need: fullText,
+    useType: normalizeUseType(fullText),
     limit: 6,
   });
-
-  const treatmentKnowledge = resolvedDomain === 'hair'
-    ? detectHairTreatmentKnowledge({ text: fullText, family: resolvedFamily, need: fullText })
-    : null;
 
   const recoAI = await recommendProductsWithAI({
     text: fullText,
@@ -1244,7 +1345,6 @@ async function buildProductFollowupMessage({ ctx, contact }) {
   let picked = shortlist.filter((x) => pickedNames.has(x.nombre)).slice(0, 4);
   if (!picked.length) picked = shortlist.slice(0, 3);
 
-  const resolvedDomain = detectProductDomain(fullText, resolvedFamily);
   const body = formatRecommendedProductsReply(recoAI, picked, {
     domain: resolvedDomain,
     familyLabel: resolvedFamily,
@@ -6846,6 +6946,10 @@ app.get("/health", (req, res) => {
     tmpDir: getTmpDir(),
     models: { primary: PRIMARY_MODEL, complex: COMPLEX_MODEL, transcribe: TRANSCRIBE_MODEL },
     hubspot: { enabled: hasHubSpotEnabled(), endOfDayTracking: ENABLE_END_OF_DAY_TRACKING },
+    googleContacts: {
+      enabled: hasGoogleContactsSyncEnabled(),
+      targets: getGoogleContactsRuntimeSummary(),
+    },
   });
 });
 
