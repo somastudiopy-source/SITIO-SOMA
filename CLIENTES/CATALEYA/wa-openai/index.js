@@ -1133,6 +1133,36 @@ function getGoogleContactEtag(person) {
   return src.etag || '';
 }
 
+function getGoogleContactBiographyText(person) {
+  const bios = Array.isArray(person?.biographies) ? person.biographies : [];
+  const primary = bios.find((b) => b?.metadata?.primary) || bios[0] || {};
+  return String(primary?.value || '').replace(/\s+/g, ' ').trim();
+}
+
+function googleContactHasPhone(person, phoneRaw) {
+  const target = normalizeComparablePhone(phoneRaw || '');
+  if (!target) return false;
+  const phones = Array.isArray(person?.phoneNumbers) ? person.phoneNumbers : [];
+  return phones.some((p) => normalizeComparablePhone(p?.value || '') === target);
+}
+
+function isGoogleFailedPreconditionEtagError(err) {
+  const responseData = err?.response?.data || {};
+  const nestedError = responseData?.error || {};
+  const message = String(nestedError?.message || responseData?.message || err?.message || '').toLowerCase();
+  const status = String(nestedError?.status || responseData?.status || '').toUpperCase();
+  return status === 'FAILED_PRECONDITION' || message.includes('person.etag') || message.includes('clear local cache');
+}
+
+function isGoogleNotFoundError(err) {
+  const responseData = err?.response?.data || {};
+  const nestedError = responseData?.error || {};
+  const message = String(nestedError?.message || responseData?.message || err?.message || '').toLowerCase();
+  const status = String(nestedError?.status || responseData?.status || '').toUpperCase();
+  const code = Number(nestedError?.code || responseData?.code || err?.code || 0);
+  return code === 404 || status === 'NOT_FOUND' || message.includes('not found');
+}
+
 function buildGoogleNamePayload(fullName) {
   const parts = splitNameParts(fullName);
   return [{
@@ -1140,6 +1170,54 @@ function buildGoogleNamePayload(fullName) {
     givenName: parts.firstName || '',
     familyName: parts.lastName || '',
   }];
+}
+
+function buildGoogleContactCreateBody({ normalizedPhone = '', finalName = '', note = '' } = {}) {
+  const body = {};
+  if (normalizedPhone) body.phoneNumbers = [{ value: normalizedPhone }];
+  if (finalName) body.names = buildGoogleNamePayload(finalName);
+  if (note) body.biographies = [{ value: note }];
+  return body;
+}
+
+function buildGoogleContactUpdatePlan(person, { normalizedPhone = '', finalName = '', note = '' } = {}) {
+  const currentName = getGoogleContactDisplayName(person);
+  const currentNote = getGoogleContactBiographyText(person);
+  const shouldUpdateName = !!finalName && (isLikelyGenericContactName(currentName) || normalize(currentName) !== normalize(finalName));
+  const shouldUpdateNote = !!note && normalize(currentNote) !== normalize(note);
+  const shouldUpdatePhone = !!normalizedPhone && !googleContactHasPhone(person, normalizedPhone);
+
+  if (!shouldUpdateName && !shouldUpdateNote && !shouldUpdatePhone) {
+    return {
+      shouldUpdate: false,
+      displayName: currentName,
+      requestBody: null,
+      updateFields: '',
+    };
+  }
+
+  const requestBody = { etag: getGoogleContactEtag(person) };
+  const fields = [];
+
+  if (shouldUpdatePhone) {
+    requestBody.phoneNumbers = [{ value: normalizedPhone }];
+    fields.push('phoneNumbers');
+  }
+  if (shouldUpdateName) {
+    requestBody.names = buildGoogleNamePayload(finalName);
+    fields.push('names');
+  }
+  if (shouldUpdateNote) {
+    requestBody.biographies = [{ value: note }];
+    fields.push('biographies');
+  }
+
+  return {
+    shouldUpdate: true,
+    displayName: finalName || currentName,
+    requestBody,
+    updateFields: Array.from(new Set(fields)).join(','),
+  };
 }
 
 async function searchGoogleContactsByPhone(target, phoneRaw) {
@@ -1201,48 +1279,64 @@ async function upsertGoogleContactInTarget(target, { phoneRaw, explicitName = ''
 
   const normalizedPhone = normalizeHubSpotPhone(phoneRaw) || `+${normalizePhoneDigits(phoneRaw)}`;
   const finalName = cleanNameCandidate(explicitName) || cleanNameCandidate(profileName) || '';
+  const createBody = buildGoogleContactCreateBody({ normalizedPhone, finalName, note });
 
   const existingRows = await searchGoogleContactsByPhone(target, phoneRaw);
-  const existing = existingRows[0] || null;
+  let existing = existingRows[0] || null;
 
   if (!existing) {
-    const body = {
-      phoneNumbers: normalizedPhone ? [{ value: normalizedPhone }] : [],
-      biographies: note ? [{ value: note }] : [],
-    };
-    if (finalName) body.names = buildGoogleNamePayload(finalName);
-    const created = await people.people.createContact({ requestBody: body });
+    const created = await people.people.createContact({ requestBody: createBody });
     return { action: 'created', resourceName: created?.data?.resourceName || '', displayName: finalName, account: target.email };
   }
 
-  const currentName = getGoogleContactDisplayName(existing);
-  const shouldUpdateName = !!finalName && (isLikelyGenericContactName(currentName) || normalize(currentName) !== normalize(finalName));
-  const shouldUpdateNote = !!note;
-  if (!shouldUpdateName && !shouldUpdateNote) {
-    return { action: 'unchanged', resourceName: existing.resourceName, displayName: currentName, account: target.email };
-  }
+  const tryUpdatePerson = async (person) => {
+    const plan = buildGoogleContactUpdatePlan(person, { normalizedPhone, finalName, note });
+    if (!plan.shouldUpdate) {
+      return { action: 'unchanged', resourceName: person.resourceName, displayName: plan.displayName, account: target.email };
+    }
 
-  const body = {
-    etag: getGoogleContactEtag(existing),
-    phoneNumbers: normalizedPhone ? [{ value: normalizedPhone }] : (existing.phoneNumbers || []),
+    await people.people.updateContact({
+      resourceName: person.resourceName,
+      updatePersonFields: plan.updateFields,
+      requestBody: plan.requestBody,
+    });
+
+    return { action: 'updated', resourceName: person.resourceName, displayName: plan.displayName, account: target.email };
   };
-  const fields = ['phoneNumbers'];
-  if (shouldUpdateName) {
-    body.names = buildGoogleNamePayload(finalName);
-    fields.push('names');
-  }
-  if (shouldUpdateNote) {
-    body.biographies = [{ value: note }];
-    fields.push('biographies');
-  }
 
-  await people.people.updateContact({
-    resourceName: existing.resourceName,
-    updatePersonFields: Array.from(new Set(fields)).join(','),
-    requestBody: body,
-  });
+  try {
+    return await tryUpdatePerson(existing);
+  } catch (e) {
+    if (e?.googleContactsDisabled || isGoogleInvalidGrantError(e)) {
+      return { action: 'skipped_disabled', account: target.email, error: 'invalid_grant' };
+    }
 
-  return { action: 'updated', resourceName: existing.resourceName, displayName: finalName || currentName, account: target.email };
+    if (!isGoogleFailedPreconditionEtagError(e) && !isGoogleNotFoundError(e)) {
+      throw e;
+    }
+
+    const freshRows = await searchGoogleContactsByPhone(target, phoneRaw);
+    existing = freshRows[0] || null;
+
+    if (!existing) {
+      const created = await people.people.createContact({ requestBody: createBody });
+      return { action: isGoogleNotFoundError(e) ? 'recreated' : 'created_after_refresh', resourceName: created?.data?.resourceName || '', displayName: finalName, account: target.email };
+    }
+
+    try {
+      const retried = await tryUpdatePerson(existing);
+      return { ...retried, action: retried.action === 'updated' ? 'updated_after_refresh' : retried.action };
+    } catch (retryErr) {
+      if (retryErr?.googleContactsDisabled || isGoogleInvalidGrantError(retryErr)) {
+        return { action: 'skipped_disabled', account: target.email, error: 'invalid_grant' };
+      }
+      if (isGoogleNotFoundError(retryErr)) {
+        const created = await people.people.createContact({ requestBody: createBody });
+        return { action: 'recreated', resourceName: created?.data?.resourceName || '', displayName: finalName, account: target.email };
+      }
+      throw retryErr;
+    }
+  }
 }
 
 async function syncGoogleContactsForPhone({ phoneRaw, explicitName = '', profileName = '', note = '' } = {}) {
