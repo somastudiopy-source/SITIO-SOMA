@@ -3447,11 +3447,20 @@ function parseStylistDecisionAction(msg = {}, text = '') {
     return 'suggest';
   }
 
-  if (/(?:^|\b)(accept|accepted|acept|aceptar|confirm|confirmar|disponible|puedo|sí|si|ok)(?:\b|$)/i.test(hay)) {
+  if (/(?:^|\b)(accept|accepted|acept|aceptar|confirm|confirmar|disponible|puedo|si puedo|sí puedo)(?:\b|$)/i.test(hay)) {
     return 'accept';
   }
 
   return '';
+}
+
+function stylistSuggestionNeedsDetails(msg = {}, text = '') {
+  const buttonText = normalize(msg?.button?.text || msg?.interactive?.button_reply?.title || '');
+  const raw = normalize(text || '');
+  if (!raw) return true;
+  if (/^(sugerir otro|sugerir otro horario|otro horario|suggest)$/.test(raw)) return true;
+  if (buttonText && raw === buttonText) return true;
+  return false;
 }
 
 async function notifyStylistTurnConfirmed(apptRow) {
@@ -3516,6 +3525,11 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
     return true;
   }
 
+  if (String(appt.status || '').trim() !== 'pending_stylist_confirmation') {
+    await sendWhatsAppText(phone, 'Ese turno ya no está pendiente de confirmación. Si querés responder otro, hacelo sobre el mensaje correcto del turno pendiente.');
+    return true;
+  }
+
   const action = parseStylistDecisionAction(msg, text);
   const suggestionDate = extractLikelyDateFromText(text);
   const suggestionTime = extractLikelyHourFromText(text);
@@ -3542,12 +3556,22 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
   }
 
   if (action === 'decline' || action === 'suggest') {
+    if (action === 'suggest' && stylistSuggestionNeedsDetails(msg, text)) {
+      await sendWhatsAppText(phone, 'Decime el nuevo día y horario en el mismo mensaje, por ejemplo: *martes 17 de abril a las 18 hs*. También respetá los horarios permitidos: 10, 11, 12, 14, 15, 16, 17, 18, 19 o 20 hs.');
+      return true;
+    }
+
     await deleteAppointmentDraft(appt.wa_id);
     clearPendingStylistSuggestion(appt.wa_id);
 
     const suggestedDateYMD = suggestionDate || (appt.appointment_date ? String(appt.appointment_date).slice(0, 10) : '');
-    const suggestedTimeHM = normalizeHourHM(suggestionTime || appt.appointment_time || '');
+    const suggestedTimeHM = normalizeHourHM(suggestionTime || '');
     const suggestedMode = suggestedTimeHM && isHourAllowedForAvailabilityMode(suggestedTimeHM, 'siesta') ? 'siesta' : 'commercial';
+
+    if (action === 'suggest' && (!suggestedDateYMD || !suggestedTimeHM || !isHourAllowedForAvailabilityMode(suggestedTimeHM, suggestedMode) || isSundayYMD(suggestedDateYMD) || isPastAppointmentDateTime(suggestedDateYMD, suggestedTimeHM))) {
+      await sendWhatsAppText(phone, 'Necesito que me sugieras un día y horario válido dentro de los permitidos. Ejemplo: *jueves 17 de abril a las 18 hs* o *mañana 15 hs*.');
+      return true;
+    }
 
     await updateAppointmentStatus(appt.id, {
       status: action === 'suggest' && suggestionText ? 'stylist_suggested' : 'stylist_rejected',
@@ -3571,7 +3595,7 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
     }
 
     const msgClient = action === 'suggest' && suggestionText
-      ? `La estilista no puede en ese horario, pero me ofrece *${suggestionText}*.
+      ? `La estilista no puede en ese horario, pero me ofrece *${suggestedDateYMD ? `${capitalizeEs(weekdayEsFromYMD(suggestedDateYMD))} ${ymdToDM(suggestedDateYMD)} ` : ''}${suggestedTimeHM}*.
 
 Si le sirve, respóndame *sí* y le paso la seña. Si no, dígame otro día u horario y le paso lo disponible 😊`
       : `La estilista no puede en ese horario.
