@@ -1886,6 +1886,43 @@ function clearLastCourseContext(waId) {
   if (waId) lastCourseContextByUser.delete(waId);
 }
 
+
+function toCourseContextRow(course = {}) {
+  const nombre = String(course?.nombre || '').trim();
+  if (!nombre) return null;
+  return {
+    nombre,
+    categoria: String(course?.categoria || '').trim(),
+    modalidad: String(course?.modalidad || '').trim(),
+    duracionTotal: String(course?.duracionTotal || '').trim(),
+    fechaInicio: String(course?.fechaInicio || '').trim(),
+    fechaFin: String(course?.fechaFin || '').trim(),
+    diasHorarios: String(course?.diasHorarios || '').trim(),
+    requisitos: String(course?.requisitos || '').trim(),
+    info: String(course?.info || '').trim(),
+    cupos: String(course?.cupos || '').trim(),
+    sena: String(course?.sena || '').trim(),
+    precio: String(course?.precio || '').trim(),
+    estado: String(course?.estado || '').trim(),
+  };
+}
+
+function mergeCourseContextRows(freshRows = [], previousRows = [], limit = 12) {
+  const seen = new Set();
+  const out = [];
+  const pushRow = (row) => {
+    const normalizedName = normalize(row?.nombre || '');
+    if (!normalizedName || seen.has(normalizedName)) return;
+    seen.add(normalizedName);
+    const compact = toCourseContextRow(row);
+    if (compact) out.push(compact);
+  };
+
+  for (const row of (Array.isArray(freshRows) ? freshRows : [])) pushRow(row);
+  for (const row of (Array.isArray(previousRows) ? previousRows : [])) pushRow(row);
+  return out.slice(0, limit);
+}
+
 const pendingAmbiguousBeautyByUser = new Map();
 const lastResolvedBeautyByUser = new Map();
 const BEAUTY_CONTEXT_TTL_MS = Number(process.env.BEAUTY_CONTEXT_TTL_MS || 45 * 60 * 1000);
@@ -5737,6 +5774,7 @@ function sanitizeCourseSearchQuery(query) {
     .replace(/\b(curso|cursos|clase|clases|capacitacion|capacitaciones|capacitación|taller|talleres|masterclass|seminario|seminarios|workshop|formacion|formación|certificacion|certificación)\b/g, ' ')
     .replace(/\b(algun|alguno|alguna|de ese|ese curso|de ese curso|mas info|más info|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|cuando empieza|cuándo empieza|cuando arranca|cuándo arranca|inicio|duracion|duración|horario|horarios|dias|días|cupo|cupos|inscripcion|inscripción|requisitos|modalidad|presencial|online|virtual|hay|tenes|tenés|tienen|ofrecen|dictan|dan|brindan|disponibles|abiertos|abiertas|busco|ando buscando)\b/g, ' ')
     .replace(/\b(de|del|de la|de las|de los|para|sobre)\b/g, ' ')
+    .replace(/\b(y|e|o|u|ni)\b/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -5932,6 +5970,223 @@ function resolveImplicitCourseFollowupQuery(text, lastCourseContext = null) {
   }
 
   return '';
+}
+
+function detectCourseFollowupGoal(text) {
+  const t = normalize(text || '');
+  if (!t) return '';
+
+  if (/^(ese|ese curso|de ese|de ese curso|mas info|más info|info)$/.test(t)) return 'DETAIL';
+  if (/(precio|precios|valor|valores|costo|costos|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta)/i.test(t)) return 'PRICE';
+  if (/(cuando empieza|cuándo empieza|cuando arranca|cuándo arranca|inicio|fecha de inicio|cuando es|cuándo es)/i.test(t)) return 'START';
+  if (/(requisitos|requisito)/i.test(t)) return 'REQUIREMENTS';
+  if (/(modalidad|presencial|online|virtual)/i.test(t)) return 'MODALITY';
+  if (/(duracion|duración|cuanto dura|cuánto dura)/i.test(t)) return 'DURATION';
+  if (/(horario|horarios|dias|días)/i.test(t)) return 'SCHEDULE';
+  if (/(cupo|cupos)/i.test(t)) return 'CUPS';
+  if (/(seña|sena|inscripcion|inscripción|reservar lugar|reserva de lugar)/i.test(t)) return 'SIGNUP';
+  return '';
+}
+
+function findCourseByContextName(rows, courseName) {
+  const wanted = normalize(String(courseName || '').trim());
+  if (!wanted) return null;
+  const list = Array.isArray(rows) ? rows : [];
+  return list.find((row) => normalize(row?.nombre || '') === wanted)
+    || list.find((row) => normalize(row?.nombre || '').includes(wanted))
+    || list.find((row) => wanted.includes(normalize(row?.nombre || '')))
+    || null;
+}
+
+
+const COURSE_REFERENCE_STOPWORDS = new Set([
+  'curso', 'cursos', 'clase', 'clases', 'capacitacion', 'capacitaciones', 'taller', 'talleres',
+  'masterclass', 'seminario', 'seminarios', 'workshop', 'de', 'del', 'la', 'las', 'el', 'los',
+  'ese', 'esa', 'este', 'esta', 'cuanto', 'sale', 'cuesta', 'precio', 'precios', 'valor', 'valores',
+  'cuando', 'empieza', 'arranca', 'inicio', 'requisitos', 'modalidad', 'duracion', 'horario', 'horarios',
+  'dias', 'cupos', 'cupo', 'inscripcion', 'info', 'mas', 'quiero', 'saber', 'sobre', 'para', 'y'
+]);
+
+function courseReferenceHaystack(row) {
+  return normalize([
+    row?.nombre,
+    row?.categoria,
+    row?.modalidad,
+    row?.duracionTotal,
+    row?.fechaInicio,
+    row?.diasHorarios,
+    row?.requisitos,
+    row?.info,
+    row?.estado,
+  ].filter(Boolean).join(' | '));
+}
+
+function extractRawCourseReferenceTokens(text = '') {
+  const raw = normalize(String(text || '').trim());
+  if (!raw) return [];
+  return Array.from(new Set(
+    raw
+      .replace(/[!?¡¿.,;:()]/g, ' ')
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token && token.length >= 4 && !COURSE_REFERENCE_STOPWORDS.has(token))
+  ));
+}
+
+function findCourseByReferenceHint(rows, text) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return null;
+
+  const rawNorm = normalize(String(text || '').trim());
+  if (!rawNorm) return null;
+
+  const tokens = extractRawCourseReferenceTokens(text);
+  if (!tokens.length) return null;
+
+  const scored = list
+    .map((row) => {
+      const hay = courseReferenceHaystack(row);
+      if (!hay) return null;
+
+      let score = 0;
+      const name = normalize(row?.nombre || '');
+      const category = normalize(row?.categoria || '');
+
+      if (name && rawNorm.includes(name)) score += 6;
+      if (category && rawNorm.includes(category)) score += 4;
+
+      for (const token of tokens) {
+        if (name.includes(token)) score += 2.1;
+        else if (category.includes(token)) score += 1.6;
+        else if (hay.includes(token)) score += 0.7;
+      }
+
+      return score >= 2.2 ? { row, score } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score);
+
+  if (!scored.length) return null;
+  if (scored.length > 1 && (scored[0].score - scored[1].score) < 0.85) return null;
+  return scored[0].row || null;
+}
+
+function resolveCourseFromConversationContext(rows, text, lastCourseContext = null) {
+  const catalogRows = Array.isArray(rows) ? rows : [];
+  const recentRows = Array.isArray(lastCourseContext?.recentCourses) ? lastCourseContext.recentCourses : [];
+  const currentCourseName = lastCourseContext?.currentCourseName || lastCourseContext?.selectedName || '';
+  const currentCourse = findCourseByContextName(catalogRows, currentCourseName) || findCourseByContextName(recentRows, currentCourseName);
+
+  const cleanedQuery = sanitizeCourseSearchQuery(text);
+  const followupGoal = detectCourseFollowupGoal(text);
+
+  if (!cleanedQuery && followupGoal) {
+    if (currentCourse) return currentCourse;
+    if (recentRows.length === 1) return recentRows[0];
+  }
+
+  if (cleanedQuery) {
+    const recentMatches = findCourses(recentRows, cleanedQuery, 'DETAIL');
+    if (recentMatches.length === 1) return recentMatches[0];
+
+    const catalogMatches = findCourses(catalogRows, cleanedQuery, 'DETAIL');
+    if (catalogMatches.length === 1) return catalogMatches[0];
+
+    if (!getStrictCourseTokens(cleanedQuery).length) {
+      const hintedRecent = findCourseByReferenceHint(recentRows, text);
+      if (hintedRecent) return hintedRecent;
+      const hintedCatalog = findCourseByReferenceHint(catalogRows, text);
+      if (hintedCatalog) return hintedCatalog;
+    }
+
+    return null;
+  }
+
+  const hintedRecent = findCourseByReferenceHint(recentRows, text);
+  if (hintedRecent) return hintedRecent;
+  const hintedCatalog = findCourseByReferenceHint(catalogRows, text);
+  if (hintedCatalog) return hintedCatalog;
+
+  return currentCourse || null;
+}
+
+function formatNaturalCourseFollowupReply(course, goal = 'DETAIL') {
+  if (!course) return '';
+
+  const nombre = course.nombre || 'el curso';
+  const precio = course.precio ? moneyOrConsult(course.precio) : '';
+  const inicio = course.fechaInicio || '';
+  const modalidad = course.modalidad || '';
+  const duracion = course.duracionTotal || '';
+  const horarios = course.diasHorarios || '';
+  const requisitos = course.requisitos || '';
+  const cupos = course.cupos || '';
+  const sena = course.sena || '';
+
+  if (goal === 'PRICE') {
+    const lines = [
+      precio ? `El curso *${nombre}* sale *${precio}*.` : `No tengo el precio cargado de *${nombre}* en este momento.`,
+      sena ? `La seña / inscripción es: ${sena}.` : '',
+    ].filter(Boolean);
+    return lines.join('\n');
+  }
+
+  if (goal === 'START') {
+    return inicio
+      ? `El curso *${nombre}* comienza *${inicio}*.`
+      : `Todavía no tengo cargada la fecha de inicio de *${nombre}*.`;
+  }
+
+  if (goal === 'REQUIREMENTS') {
+    return requisitos
+      ? `Para *${nombre}*, los requisitos son: ${requisitos}.`
+      : `Por el momento no tengo requisitos cargados para *${nombre}*.`;
+  }
+
+  if (goal === 'MODALITY') {
+    return modalidad
+      ? `*${nombre}* es modalidad *${modalidad}*.`
+      : `Por el momento no tengo cargada la modalidad de *${nombre}*.`;
+  }
+
+  if (goal === 'DURATION') {
+    return duracion
+      ? `La duración de *${nombre}* es *${duracion}*.`
+      : `Por el momento no tengo cargada la duración de *${nombre}*.`;
+  }
+
+  if (goal === 'SCHEDULE') {
+    if (horarios) return `Los días y horarios de *${nombre}* son: ${horarios}.`;
+    if (inicio) return `Por ahora tengo cargado que *${nombre}* comienza *${inicio}*.`;
+    return `Por el momento no tengo cargados los días y horarios de *${nombre}*.`;
+  }
+
+  if (goal === 'CUPS') {
+    return cupos
+      ? `Los cupos de *${nombre}* son: ${cupos}.`
+      : `Por el momento no tengo un número de cupos cargado para *${nombre}*.`;
+  }
+
+  if (goal === 'SIGNUP') {
+    const lines = [
+      sena ? `Para reservar lugar en *${nombre}*, la seña / inscripción es: ${sena}.` : `Puedo pasarle la info de inscripción de *${nombre}*.`,
+      precio ? `Precio total: *${precio}*.` : '',
+    ].filter(Boolean);
+    return lines.join('\n');
+  }
+
+  const detailLines = [
+    `Le paso la info de *${nombre}* 😊`,
+    precio ? `• Precio: *${precio}*` : '',
+    inicio ? `• Inicio: ${inicio}` : '',
+    modalidad ? `• Modalidad: ${modalidad}` : '',
+    duracion ? `• Duración: ${duracion}` : '',
+    horarios ? `• Días y horarios: ${horarios}` : '',
+    requisitos ? `• Requisitos: ${requisitos}` : '',
+    sena ? `• Seña / inscripción: ${sena}` : '',
+  ].filter(Boolean);
+
+  return detailLines.join('\n');
 }
 
 const COURSE_SIGNAL_RE = /(curso|cursos|clase|clases|capacitacion|capacitaciones|capacitación|capacitaciones|taller|talleres|masterclass|seminario|seminarios|workshop|formacion|formación|certificacion|certificación)/i;
@@ -9003,6 +9258,43 @@ ${some}
 // COURSE
     if (intent.type === "COURSE") {
       const courses = await getCoursesCatalog();
+      const previousRecentCourses = Array.isArray(lastCourseContext?.recentCourses) ? lastCourseContext.recentCourses : [];
+      const referencedCourse = resolveCourseFromConversationContext(courses, text, lastCourseContext);
+      const activeCourse = referencedCourse || findCourseByContextName(courses, lastCourseContext?.currentCourseName || lastCourseContext?.selectedName || '');
+      const followupGoal = detectCourseFollowupGoal(text);
+      const cleanedDirectFollowupText = sanitizeCourseSearchQuery(text);
+      const isOnlyFollowupGoal = !cleanedDirectFollowupText && !!followupGoal;
+      const isDirectCurrentCourseFollowup = !!activeCourse && isOnlyFollowupGoal;
+      const isExplicitReferencedCourseFollowup = !!referencedCourse && !!followupGoal;
+
+      if (isDirectCurrentCourseFollowup || isExplicitReferencedCourseFollowup) {
+        const naturalCourseReply = formatNaturalCourseFollowupReply(activeCourse, followupGoal || 'DETAIL');
+        if (naturalCourseReply) {
+          const rememberedCourses = mergeCourseContextRows([activeCourse], previousRecentCourses);
+          const currentInterest = buildHubSpotCourseInterestLabel(activeCourse?.nombre || activeCourse?.categoria || '') || lastCourseContext?.requestedInterest || '';
+
+          setLastCourseContext(waId, {
+            query: lastCourseContext?.query || activeCourse?.nombre || 'cursos',
+            selectedName: activeCourse?.nombre || '',
+            currentCourseName: activeCourse?.nombre || '',
+            lastOptions: rememberedCourses.map((c) => c.nombre).filter(Boolean).slice(0, 10),
+            recentCourses: rememberedCourses,
+            requestedInterest: currentInterest,
+          });
+
+          updateLastCloseContext(waId, {
+            intentType: 'COURSE',
+            interest: currentInterest,
+            lastUserText: text,
+          });
+
+          pushHistory(waId, 'assistant', naturalCourseReply);
+          await sendWhatsAppText(phone, naturalCourseReply);
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
+      }
+
       const courseQuery = resolveImplicitCourseFollowupQuery(text, lastCourseContext) || intent.query || '';
       const cleanedCourseQuery = sanitizeCourseSearchQuery(courseQuery);
       const normalizedCourseQuery = normalize(cleanedCourseQuery || courseQuery || '');
@@ -9016,16 +9308,47 @@ ${some}
         return;
       }
 
+      if (referencedCourse && !cleanedCourseQuery && !followupGoal) {
+        const detailReply = formatNaturalCourseFollowupReply(referencedCourse, 'DETAIL');
+        if (detailReply) {
+          const rememberedCourses = mergeCourseContextRows([referencedCourse], previousRecentCourses);
+          const currentInterest = buildHubSpotCourseInterestLabel(referencedCourse?.nombre || referencedCourse?.categoria || '') || lastCourseContext?.requestedInterest || '';
+
+          setLastCourseContext(waId, {
+            query: referencedCourse?.nombre || lastCourseContext?.query || 'cursos',
+            selectedName: referencedCourse?.nombre || '',
+            currentCourseName: referencedCourse?.nombre || '',
+            lastOptions: rememberedCourses.map((c) => c.nombre).filter(Boolean).slice(0, 10),
+            recentCourses: rememberedCourses,
+            requestedInterest: currentInterest,
+          });
+
+          updateLastCloseContext(waId, {
+            intentType: 'COURSE',
+            interest: currentInterest,
+            lastUserText: text,
+          });
+
+          pushHistory(waId, "assistant", detailReply);
+          await sendWhatsAppText(phone, detailReply);
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
+      }
+
       const matches = isGenericCourseQuery ? courses : findCourses(courses, cleanedCourseQuery || courseQuery, intent.mode);
       const replyCatalog = formatCoursesReply(matches, isGenericCourseQuery ? 'LIST' : intent.mode);
       if (replyCatalog) {
         const selectedCourseName = matches.length === 1 ? (matches[0]?.nombre || '') : '';
+        const rememberedCourses = mergeCourseContextRows(matches, previousRecentCourses);
         const courseInterestLabel = buildHubSpotCourseInterestLabel(selectedCourseName || cleanedCourseQuery || courseQuery || text);
 
         setLastCourseContext(waId, {
           query: cleanedCourseQuery || courseQuery || 'cursos',
           selectedName: selectedCourseName,
-          lastOptions: matches.slice(0, 10).map((c) => c.nombre).filter(Boolean),
+          currentCourseName: selectedCourseName || '',
+          lastOptions: rememberedCourses.map((c) => c.nombre).filter(Boolean).slice(0, 10),
+          recentCourses: rememberedCourses,
           requestedInterest: courseInterestLabel || '',
         });
 
@@ -9038,18 +9361,20 @@ ${some}
         pushHistory(waId, "assistant", replyCatalog);
         await sendWhatsAppText(phone, replyCatalog);
         await maybeSendCoursePhotos(phone, matches);
-        // ✅ INACTIVIDAD
         scheduleInactivityFollowUp(waId, phone);
         return;
       }
 
       const someRows = courses.slice(0, 12);
       const wantedCourseInterest = buildHubSpotCourseInterestLabel(cleanedCourseQuery || courseQuery || text);
+      const rememberedCourses = mergeCourseContextRows(previousRecentCourses, someRows);
 
       setLastCourseContext(waId, {
         query: cleanedCourseQuery || courseQuery || 'cursos',
         selectedName: '',
-        lastOptions: someRows.map((c) => c.nombre).filter(Boolean),
+        currentCourseName: '',
+        lastOptions: rememberedCourses.map((c) => c.nombre).filter(Boolean).slice(0, 10),
+        recentCourses: rememberedCourses,
         requestedInterest: wantedCourseInterest || '',
       });
 
@@ -9062,8 +9387,12 @@ ${some}
       if (!isGenericCourseQuery) {
         const topic = humanizeCourseSearchQuery(cleanedCourseQuery || courseQuery);
         const msgNo = topic
-          ? `Por el momento no tenemos un curso de *${topic}* disponible.\n\nApenas salga algo relacionado, le vamos a estar avisando 😊`
-          : `Por el momento no tenemos un curso similar disponible.\n\nApenas salga algo relacionado, le vamos a estar avisando 😊`;
+          ? `Por el momento no tenemos un curso de *${topic}* disponible.
+
+Apenas salga algo relacionado, le vamos a estar avisando 😊`
+          : `Por el momento no tenemos un curso similar disponible.
+
+Apenas salga algo relacionado, le vamos a estar avisando 😊`;
         pushHistory(waId, "assistant", msgNo);
         await sendWhatsAppText(phone, msgNo);
         scheduleInactivityFollowUp(waId, phone);
@@ -9071,7 +9400,12 @@ ${some}
       }
 
       const some = someRows.map(c => `🎓 ${c.nombre}`).join("\n");
-      const msgNo = `No encontré una coincidencia exacta en la hoja CURSOS.\n\nCursos disponibles (algunos):\n${some}\n\nSi quiere, le paso información de cualquiera de esos 😊`;
+      const msgNo = `No encontré una coincidencia exacta en la hoja CURSOS.
+
+Cursos disponibles (algunos):
+${some}
+
+Si quiere, le paso información de cualquiera de esos 😊`;
       pushHistory(waId, "assistant", msgNo);
       await sendWhatsAppText(phone, msgNo);
       scheduleInactivityFollowUp(waId, phone);
