@@ -3473,6 +3473,96 @@ function stylistSuggestionNeedsDetails(msg = {}, text = '') {
   return false;
 }
 
+function stylistMessageLooksLikeTurnoAction(msg = {}, text = '') {
+  const contextMsgId = String(msg?.context?.id || '').trim();
+  if (contextMsgId) return true;
+
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+
+  if (parseStylistDecisionAction(msg, raw)) return true;
+  if (extractLikelyDateFromText(raw) || extractLikelyHourFromText(raw)) return true;
+
+  return false;
+}
+
+function scoreStylistMessageAgainstAppointment(appt = {}, text = '') {
+  const raw = String(text || '').trim();
+  const normText = normalize(raw);
+  if (!normText) return 0;
+
+  let score = 0;
+  const wantedDate = extractLikelyDateFromText(raw);
+  const wantedTime = normalizeHourHM(extractLikelyHourFromText(raw));
+  const apptDate = toYMD(appt?.appointment_date || '');
+  const apptTime = normalizeHourHM(appt?.appointment_time || '');
+  const serviceName = normalize(appt?.service_name || '');
+  const clientName = normalize(appt?.client_name || '');
+
+  if (wantedDate && apptDate && wantedDate === apptDate) score += 6;
+  if (wantedTime && apptTime && wantedTime === apptTime) score += 5;
+
+  if (serviceName) {
+    if (normText.includes(serviceName)) {
+      score += 4;
+    } else {
+      for (const token of serviceName.split(' ').filter((x) => x.length >= 4)) {
+        if (normText.includes(token)) {
+          score += 1;
+          break;
+        }
+      }
+    }
+  }
+
+  if (clientName) {
+    if (normText.includes(clientName)) {
+      score += 3;
+    } else {
+      for (const token of clientName.split(' ').filter((x) => x.length >= 4)) {
+        if (normText.includes(token)) {
+          score += 1;
+          break;
+        }
+      }
+    }
+  }
+
+  return score;
+}
+
+function findBestPendingAppointmentForStylistText(pendingRows = [], text = '') {
+  const rows = Array.isArray(pendingRows) ? pendingRows : [];
+  if (!rows.length) return null;
+
+  const scored = rows
+    .map((row) => ({ row, score: scoreStylistMessageAgainstAppointment(row, text) }))
+    .sort((a, b) => b.score - a.score);
+
+  const top = scored[0];
+  const second = scored[1];
+  if (!top || top.score <= 0) return null;
+  if (!second || top.score >= second.score + 2) return top.row;
+  return null;
+}
+
+function buildStylistPendingAppointmentsPrompt(pendingRows = []) {
+  const rows = (Array.isArray(pendingRows) ? pendingRows : []).slice(0, 5);
+  const lines = rows.map((row, idx) => {
+    const fecha = formatAppointmentDateForTemplate(row?.appointment_date || '') || ymdToDMY(String(row?.appointment_date || '').slice(0, 10)) || 'Fecha';
+    const hora = formatAppointmentTimeForTemplate(row?.appointment_time || '') || 'Hora';
+    const servicio = String(row?.service_name || 'Servicio').trim();
+    const cliente = String(row?.client_name || '').trim();
+    return `${idx + 1}) ${fecha} - ${hora} - ${servicio}${cliente ? ` - ${cliente}` : ''}`;
+  });
+
+  return [
+    'Veo más de un turno pendiente.',
+    lines.join('\\n'),
+    'Respondeme sobre el mensaje puntual del turno correcto o escribime el día y la hora del que querés responder.'
+  ].filter(Boolean).join('\\n\\n');
+}
+
 async function notifyStylistTurnConfirmed(apptRow) {
   const recipient = normalizeWhatsAppRecipient(STYLIST_NOTIFY_PHONE_RAW);
   if (!recipient || !apptRow?.id) return false;
@@ -3512,21 +3602,34 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
   const inboundPhone = normalizePhone(phoneRaw || phone || '');
   if (!stylistPhone || inboundPhone !== stylistPhone) return false;
 
+  const rawText = String(text || '').trim();
+  if (!stylistMessageLooksLikeTurnoAction(msg, rawText)) return false;
+
   const contextMsgId = msg?.context?.id || '';
+  let action = parseStylistDecisionAction(msg, rawText);
+  const suggestionDate = extractLikelyDateFromText(rawText);
+  const suggestionTime = extractLikelyHourFromText(rawText);
+  if (!action && (suggestionDate || suggestionTime)) action = 'suggest';
+
   let appt = await findAppointmentByNotificationMessageId(contextMsgId);
   if (!appt) {
     const r = await db.query(
       `SELECT * FROM appointments
         WHERE status = 'pending_stylist_confirmation'
         ORDER BY updated_at DESC, created_at DESC
-        LIMIT 2`
+        LIMIT 5`
     );
     const pendingRows = Array.isArray(r.rows) ? r.rows : [];
     if (pendingRows.length === 1) {
       appt = pendingRows[0];
     } else if (pendingRows.length > 1) {
-      await sendWhatsAppText(phone, 'Veo más de un turno pendiente. Respondeme tocando o contestando sobre el mensaje puntual del turno para no equivocarme.');
-      return true;
+      const matched = findBestPendingAppointmentForStylistText(pendingRows, rawText);
+      if (matched) {
+        appt = matched;
+      } else {
+        await sendWhatsAppText(phone, buildStylistPendingAppointmentsPrompt(pendingRows));
+        return true;
+      }
     }
   }
 
@@ -3540,20 +3643,16 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
     return true;
   }
 
-  let action = parseStylistDecisionAction(msg, text);
-  const suggestionDate = extractLikelyDateFromText(text);
-  const suggestionTime = extractLikelyHourFromText(text);
-  if (!action && (suggestionDate || suggestionTime)) action = 'suggest';
   const suggestionBits = [];
   if (suggestionDate) suggestionBits.push(ymdToDMY(suggestionDate));
   if (suggestionTime) suggestionBits.push(normalizeHourHM(suggestionTime));
-  const suggestionText = suggestionBits.length ? suggestionBits.join(' a las ') : String(text || '').trim();
+  const suggestionText = suggestionBits.length ? suggestionBits.join(' a las ') : rawText;
 
   if (action === 'accept') {
     const updated = await updateAppointmentStatus(appt.id, {
       status: 'awaiting_payment',
       payment_status: 'not_paid',
-      stylist_decision_note: String(text || '').trim() || 'Aceptado por estilista',
+      stylist_decision_note: rawText || 'Aceptado por estilista',
       mark_stylist_decision_at: true,
     });
     await saveAppointmentDraft(appt.wa_id, appt.wa_phone, mapAppointmentRowToDraft(updated || appt));
@@ -3567,7 +3666,7 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
   }
 
   if (action === 'decline' || action === 'suggest') {
-    if (action === 'suggest' && stylistSuggestionNeedsDetails(msg, text)) {
+    if (action === 'suggest' && stylistSuggestionNeedsDetails(msg, rawText)) {
       await sendWhatsAppText(phone, 'Decime el nuevo día y horario en el mismo mensaje, por ejemplo: *martes 17 de abril a las 18 hs*.');
       return true;
     }
@@ -3586,7 +3685,7 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
 
     await updateAppointmentStatus(appt.id, {
       status: action === 'suggest' && suggestionText ? 'stylist_suggested' : 'stylist_rejected',
-      stylist_decision_note: String(text || '').trim() || (action === 'suggest' ? 'La estilista propuso otro horario' : 'La estilista no puede en ese horario'),
+      stylist_decision_note: rawText || (action === 'suggest' ? 'La estilista propuso otro horario' : 'La estilista no puede en ese horario'),
       mark_stylist_decision_at: true,
     });
 
@@ -3601,7 +3700,7 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
         telefono_contacto: normalizePhone(appt.contact_phone || appt.wa_phone || ''),
         wa_phone: normalizePhone(appt.wa_phone || ''),
         availability_mode: normalizeAvailabilityMode(suggestedMode),
-        stylist_note: String(text || '').trim(),
+        stylist_note: rawText,
       });
     }
 
