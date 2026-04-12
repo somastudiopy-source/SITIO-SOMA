@@ -1639,7 +1639,7 @@ Ofrecés:
 - Productos e insumos
 - Muebles y equipamiento (espejos, sillones, camillas)
 - Cursos de estética y capacitaciones
-- Si preguntan por cursos, respondé SOLO con lo que exista en la hoja CURSOS. Nunca enumeres ni inventes cursos por tu cuenta. Si no encontrás coincidencias, decilo claramente.
+- Si preguntan por cursos, respondé SOLO con lo que exista en la hoja CURSOS. Nunca enumeres ni inventes cursos por tu cuenta. Si no encontrás coincidencias, decí claramente que por el momento no hay uno similar y que le vamos a avisar cuando salga algo relacionado.
 
 TURNOS:
 - Información de turnos (siempre):
@@ -5722,8 +5722,79 @@ function findServices(rows, query, mode) {
   return matched;
 }
 
+function sanitizeCourseSearchQuery(query) {
+  let q = normalize(String(query || '').trim());
+  if (!q) return '';
+
+  q = q
+    .replace(/[!?¡¿.,;:()]/g, ' ')
+    .replace(/\b(hola|buenas|buenos dias|buen dia|buen día|buenas tardes|buenas noches)\b/g, ' ')
+    .replace(/\b(quiero info|quisiera info|quiero saber|quisiera saber|queria saber|quería saber|me pasas info|me pasás info|mandame info|mandáme info|pasame info|pasáme info|consulto por|consulta por|consulta sobre|informacion|información)\b/g, ' ')
+    .replace(/\b(curso|cursos|clase|clases|capacitacion|capacitaciones|capacitación|taller|talleres|masterclass|seminario|seminarios|workshop|formacion|formación|certificacion|certificación)\b/g, ' ')
+    .replace(/\b(algun|alguno|alguna|de ese|ese curso|de ese curso|mas info|más info|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|cuando empieza|cuándo empieza|cuando arranca|cuándo arranca|inicio|duracion|duración|horario|horarios|dias|días|cupo|cupos|inscripcion|inscripción|requisitos|modalidad|presencial|online|virtual|hay|tenes|tenés|tienen|ofrecen|dictan|dan|brindan|disponibles|abiertos|abiertas|busco|ando buscando)\b/g, ' ')
+    .replace(/\b(de|del|de la|de las|de los|para|sobre)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (q === 'barber') q = 'barberia';
+  return q;
+}
+
+function humanizeCourseSearchQuery(query) {
+  const q = sanitizeCourseSearchQuery(query);
+  if (!q) return '';
+  return sentenceCase(
+    q
+      .replace(/\bbarberia\b/g, 'barbería')
+      .replace(/\bcolorimetria\b/g, 'colorimetría')
+      .replace(/\bestetica\b/g, 'estética')
+      .replace(/\bpeluqueria\b/g, 'peluquería')
+      .replace(/\bninos\b/g, 'niños')
+  );
+}
+
+function scoreCourseCandidate(row, queryRaw) {
+  const query = sanitizeCourseSearchQuery(queryRaw) || normalize(queryRaw || '');
+  if (!query) return 0;
+
+  const hay = [
+    row?.nombre,
+    row?.categoria,
+    row?.modalidad,
+    row?.duracionTotal,
+    row?.fechaInicio,
+    row?.fechaFin,
+    row?.diasHorarios,
+    row?.info,
+    row?.estado,
+    row?.requisitos,
+  ].filter(Boolean).join(' | ');
+
+  const hayNorm = normalize(hay);
+  let score = Math.max(
+    scoreField(query, row?.nombre || '') * 1.25,
+    scoreField(query, row?.categoria || '') * 1.05,
+    scoreField(query, row?.info || '') * 0.78,
+    scoreField(query, row?.requisitos || '') * 0.52,
+    scoreField(query, row?.modalidad || '') * 0.36,
+  );
+
+  if (containsCatalogPhrase(hayNorm, query)) score += 0.6;
+
+  const qTokens = tokenize(query, { expandSynonyms: true });
+  const hayTokens = tokenize(hayNorm, { expandSynonyms: false });
+  if (qTokens.length && hayTokens.length) {
+    score += jaccard(qTokens, hayTokens) * 0.85;
+    if (qTokens.some((tok) => tok.length >= 4 && hayNorm.includes(tok))) score += 0.25;
+  }
+
+  return score;
+}
+
 function findCourses(rows, query, mode) {
-  const q = normalize(query);
+  const rawQuery = String(query || '').trim();
+  const cleanQuery = sanitizeCourseSearchQuery(rawQuery);
+  const q = normalize(cleanQuery || rawQuery);
   if (!q) return [];
 
   const match = (x) => {
@@ -5741,16 +5812,23 @@ function findCourses(rows, query, mode) {
     return hay.includes(q);
   };
 
-  if (mode === "LIST") return rows.filter(match);
+  if (mode === "LIST") {
+    const listed = rows.filter(match);
+    if (listed.length) return listed;
+  }
 
-  const exact = rows.filter(r => normalize(r.nombre) === q);
+  const exact = rows.filter((r) => normalize(r.nombre) === q || normalize(r.categoria) === q);
   if (exact.length) return exact;
 
-  const contains = rows.filter(r => normalize(r.nombre).includes(q));
+  const contains = rows.filter((r) => normalize(r.nombre).includes(q) || normalize(r.categoria).includes(q));
   if (contains.length) return contains;
 
-  const categoryContains = rows.filter(r => normalize(r.categoria).includes(q));
-  if (categoryContains.length) return categoryContains;
+  const scored = rows
+    .map((row) => ({ row, score: scoreCourseCandidate(row, cleanQuery || rawQuery) }))
+    .filter((item) => item.score >= 0.72)
+    .sort((a, b) => b.score - a.score)
+    .map((item) => item.row);
+  if (scored.length) return scored;
 
   return rows.filter(match);
 }
@@ -6475,6 +6553,7 @@ Ejemplos:
 - "están dictando clases?" => COURSE + query "cursos" + LIST
 - "tienen capacitaciones?" => COURSE + query "cursos" + LIST
 - "alguno de barbería" con contexto de curso => COURSE + DETAIL
+- "cursos de barbería" => COURSE + query "barbería" + DETAIL
 - "hay espejos?" => PRODUCT + LIST
 - "qué stock hay de camillas" => PRODUCT + LIST
 - "precio del espejo led" => PRODUCT + DETAIL
@@ -7515,7 +7594,8 @@ updateLastCloseContext(waId, {
     // ===================== ✅ REGLAS ESPECIALES (sin inventar servicios) =====================
     let normTxt = normalize(text);
     const activeCourseContextEarly = getLastCourseContext(waId);
-    const shouldSkipBarberWalkInRule = !!activeCourseContextEarly && (isExplicitCourseKeyword(text) || looksLikeCourseFollowUp(text));
+    const explicitCourseIntentEarly = detectCourseIntentFromContext(text, { lastCourseContext: activeCourseContextEarly });
+    const shouldSkipBarberWalkInRule = !!explicitCourseIntentEarly?.isCourse || (!!activeCourseContextEarly && looksLikeCourseFollowUp(text));
 
     // Corte masculino: solo por orden de llegada (no se toma turno)
     if (/(\bcorte\b.*\b(mascul|varon|hombre)\b|\bcorte\s+masculino\b|\bbarber\b|\bbarberia\b)/i.test(normTxt) && !detectFemaleContext(text) && !shouldSkipBarberWalkInRule) {
@@ -8838,7 +8918,8 @@ ${some}
     if (intent.type === "COURSE") {
       const courses = await getCoursesCatalog();
       const courseQuery = resolveImplicitCourseFollowupQuery(text, lastCourseContext) || intent.query || '';
-      const normalizedCourseQuery = normalize(courseQuery || '');
+      const cleanedCourseQuery = sanitizeCourseSearchQuery(courseQuery);
+      const normalizedCourseQuery = normalize(cleanedCourseQuery || courseQuery || '');
       const isGenericCourseQuery = !normalizedCourseQuery || isLikelyGenericCourseListQuery(courseQuery || '') || /^(curso|cursos|clase|clases|taller|talleres|capacitacion|capacitaciones|capacitación|masterclass|seminario|seminarios|workshop)$/.test(normalizedCourseQuery);
 
       if (!courses.length) {
@@ -8849,11 +8930,11 @@ ${some}
         return;
       }
 
-      const matches = isGenericCourseQuery ? courses : findCourses(courses, courseQuery, intent.mode);
+      const matches = isGenericCourseQuery ? courses : findCourses(courses, cleanedCourseQuery || courseQuery, intent.mode);
       const replyCatalog = formatCoursesReply(matches, isGenericCourseQuery ? 'LIST' : intent.mode);
       if (replyCatalog) {
         setLastCourseContext(waId, {
-          query: courseQuery || 'cursos',
+          query: cleanedCourseQuery || courseQuery || 'cursos',
           selectedName: matches.length === 1 ? (matches[0]?.nombre || '') : '',
           lastOptions: matches.slice(0, 10).map((c) => c.nombre).filter(Boolean),
         });
@@ -8867,17 +8948,24 @@ ${some}
 
       const someRows = courses.slice(0, 12);
       setLastCourseContext(waId, {
-        query: courseQuery || 'cursos',
+        query: cleanedCourseQuery || courseQuery || 'cursos',
         selectedName: '',
         lastOptions: someRows.map((c) => c.nombre).filter(Boolean),
       });
+
+      if (!isGenericCourseQuery) {
+        const topic = humanizeCourseSearchQuery(cleanedCourseQuery || courseQuery);
+        const msgNo = topic
+          ? `Por el momento no tenemos un curso de *${topic}* disponible.\n\nApenas salga algo relacionado, le vamos a estar avisando 😊`
+          : `Por el momento no tenemos un curso similar disponible.\n\nApenas salga algo relacionado, le vamos a estar avisando 😊`;
+        pushHistory(waId, "assistant", msgNo);
+        await sendWhatsAppText(phone, msgNo);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+
       const some = someRows.map(c => `🎓 ${c.nombre}`).join("\n");
-      const msgNo = `No encontré una coincidencia exacta en la hoja CURSOS.
-
-Cursos disponibles (algunos):
-${some}
-
-Si quiere, le paso información de cualquiera de esos 😊`;
+      const msgNo = `No encontré una coincidencia exacta en la hoja CURSOS.\n\nCursos disponibles (algunos):\n${some}\n\nSi quiere, le paso información de cualquiera de esos 😊`;
       pushHistory(waId, "assistant", msgNo);
       await sendWhatsAppText(phone, msgNo);
       scheduleInactivityFollowUp(waId, phone);
