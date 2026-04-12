@@ -2758,11 +2758,11 @@ function isHourAllowedForAvailabilityMode(timeHM, mode = 'commercial') {
 function textRequestsSiestaAvailability(text = '') {
   const t = normalize(text || '');
   if (!t) return false;
-  return /(ninguno de esos horarios|ninguno me sirve|no me sirve ninguno|no me sirven esos horarios|no puedo en esos horarios|no puedo ni a la manana ni a la tarde|no puedo ni a la mañana ni a la tarde|tenes a la siesta|tenes horario de siesta|tienen horario de siesta|siesta|14 hs|15 hs|16 hs|a las 14|a las 15|a las 16)/i.test(t);
+  return /(ninguno de esos horarios|ninguno me sirve|no me sirve ninguno|no me sirven esos horarios|no puedo en esos horarios|no puedo ni a la manana ni a la tarde|no puedo ni a la mañana ni a la tarde|tenes a la siesta|tenes horario de siesta|tienen horario de siesta|horario de siesta|franja de siesta|a la siesta|de siesta|14 hs|15 hs|16 hs|14:00|15:00|16:00|a las 14|a las 15|a las 16)/i.test(t);
 }
 
 function buildCommercialHoursBridge() {
-  return 'Primero trabajo con los horarios comerciales de 10, 11, 12, 17, 18, 19 y 20 hs. Si ninguno de esos le sirve, también puedo revisar una franja especial de siesta a las 14, 15 o 16 hs 😊';
+  return 'Trabajo con estos horarios comerciales para turnos: 10, 11, 12, 17, 18, 19 y 20 hs 😊';
 }
 
 function turnoInfoBlock() {
@@ -2778,8 +2778,6 @@ Profesional: ${TURNOS_STYLIST_NAME}
 • 18:00
 • 19:00
 • 20:00
-
-Si ninguno de esos horarios le sirve, también puedo revisar una franja especial de siesta: 14:00, 15:00 o 16:00.
 
 La seña se solicita recién después de confirmar disponibilidad con la estilista.`
   );
@@ -3159,6 +3157,19 @@ function paymentMessageIsTooWeakToVerify(text) {
   return /^(ok|dale|listo|perfecto|gracias|chau|bueno|si|sí)$/i.test(t) || looksLikePaymentIntentOnly(t);
 }
 
+function shouldBypassAppointmentDraftControl(text, { pendingDraft = null, mediaMeta = null } = {}) {
+  if (!pendingDraft) return false;
+  const raw = String(text || '').trim();
+  if (!raw && !mediaMeta) return false;
+  if (mediaMeta) return true;
+  if (looksLikePaymentIntentOnly(raw) || looksLikeProofAlreadySent(raw) || looksLikePaymentProofText(raw) || detectSenaPaid({ text: raw })) return true;
+  if (extractLikelyDateFromText(raw) || extractLikelyHourFromText(raw)) return true;
+  if (textRequestsSiestaAvailability(raw)) return true;
+  const info = extractContactInfo(raw);
+  if (info?.nombre || info?.telefono) return true;
+  return false;
+}
+
 async function tryApplyPaymentToDraft(base, { text, mediaMeta } = {}) {
   const next = { ...(base || {}) };
   const rawText = String(text || "").trim();
@@ -3410,14 +3421,13 @@ async function updateAppointmentStatus(appointmentId, patch = {}) {
 function buildAppointmentPaymentMessageFromRow(row) {
   const appt = row || {};
   const dateYMD = appt.appointment_date ? String(appt.appointment_date).slice(0, 10) : '';
-  const diaOk = dateYMD ? weekdayEsFromYMD(dateYMD) : '';
-  const fechaTxt = dateYMD ? ymdToDMY(dateYMD) : '';
+  const fechaVisible = dateYMD ? formatVisibleTurnoDate(dateYMD) : '';
   const horaTxt = normalizeHourHM(appt.appointment_time || '') || String(appt.appointment_time || '').slice(0, 5);
   return [
     `Perfecto 😊 ${TURNOS_STYLIST_NAME} ya confirmó que puede tomar ese turno.`,
     '',
     `Servicio: ${appt.service_name || ''}`,
-    `📅 Día: ${diaOk ? `${diaOk} ` : ''}${fechaTxt}`.trim(),
+    `📅 Día: ${fechaVisible}`.trim(),
     `🕐 Hora: ${horaTxt}`,
     '',
     `*PARA TERMINAR DE CONFIRMAR EL TURNO SE SOLICITA UNA SEÑA DE ${TURNOS_SENA_TXT}*`,
@@ -3439,11 +3449,11 @@ function parseStylistDecisionAction(msg = {}, text = '') {
   const title = normalize(msg?.button?.text || msg?.interactive?.button_reply?.title || text || '');
   const hay = `${payload} | ${title}`.trim();
 
-  if (/(?:^|\b)(decline|reject|rechaz|rechazar|no_puede|no puede|no_disponible|ocupada|ocupado|imposible|no me da|no llego)(?:\b|$)/i.test(hay)) {
+  if (/(?:^|\b)(decline|reject|rechaz|rechazar|no_puede|no puede|no puedo|no podria|no podría|no_disponible|ocupada|ocupado|imposible|no me da|no llego|no tomo|no lo tomo)(?:\b|$)/i.test(hay)) {
     return 'decline';
   }
 
-  if (/(?:^|\b)(suggest|suger|sugerir|proponer|propongo|otro_horario|otro horario|te ofrezco|ofrezco|podria|podría)(?:\b|$)/i.test(hay)) {
+  if (/(?:^|\b)(suggest|suger|sugerir|proponer|propongo|otro_horario|otro horario|otro_turno|otro turno|te ofrezco|ofrezco|podria|podría|alternativo)(?:\b|$)/i.test(hay)) {
     return 'suggest';
   }
 
@@ -3458,7 +3468,7 @@ function stylistSuggestionNeedsDetails(msg = {}, text = '') {
   const buttonText = normalize(msg?.button?.text || msg?.interactive?.button_reply?.title || '');
   const raw = normalize(text || '');
   if (!raw) return true;
-  if (/^(sugerir otro|sugerir otro horario|otro horario|suggest)$/.test(raw)) return true;
+  if (/^(sugerir otro|sugerir otro horario|sugerir otro turno|otro horario|otro turno|pedir otro|pedir otro turno|pedir o sugerir otro turno|suggest)$/.test(raw)) return true;
   if (buttonText && raw === buttonText) return true;
   return false;
 }
@@ -3530,9 +3540,10 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
     return true;
   }
 
-  const action = parseStylistDecisionAction(msg, text);
+  let action = parseStylistDecisionAction(msg, text);
   const suggestionDate = extractLikelyDateFromText(text);
   const suggestionTime = extractLikelyHourFromText(text);
+  if (!action && (suggestionDate || suggestionTime)) action = 'suggest';
   const suggestionBits = [];
   if (suggestionDate) suggestionBits.push(ymdToDMY(suggestionDate));
   if (suggestionTime) suggestionBits.push(normalizeHourHM(suggestionTime));
@@ -3595,7 +3606,7 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
     }
 
     const msgClient = action === 'suggest' && suggestionText
-      ? `La estilista no puede en ese horario, pero me ofrece *${suggestedDateYMD ? `${capitalizeEs(weekdayEsFromYMD(suggestedDateYMD))} ${ymdToDM(suggestedDateYMD)} ` : ''}${suggestedTimeHM}*.
+      ? `La estilista no puede en ese horario, pero me ofrece *${suggestedDateYMD ? `${formatVisibleTurnoDate(suggestedDateYMD)} ` : ''}${suggestedTimeHM}*.
 
 Si le sirve, respóndame *sí* y le paso la seña. Si no, dígame otro día u horario y le paso lo disponible 😊`
       : `La estilista no puede en ese horario.
@@ -4334,12 +4345,12 @@ async function buildWeeklyAvailabilityMessage({ servicio, durationMin, limitDays
   if (!available.length) {
     return mode === 'siesta'
       ? `En este momento no me quedan turnos disponibles en horario especial de siesta. Si quiere, le reviso otras opciones comerciales 😊`
-      : `En este momento no me quedan turnos disponibles en los próximos días dentro de los horarios comerciales. Si ninguno de esos horarios le sirve, también puedo revisar la franja especial de siesta de 14, 15 o 16 hs 😊`;
+      : `En este momento no me quedan turnos disponibles en los próximos días dentro de los horarios comerciales.`;
   }
 
   const daysToShow = available.slice(0, 3);
   const lines = daysToShow.map((item) => {
-    const dayHeader = `*${capitalizeEs(item.weekday)} ${ymdToDM(item.dateYMD)}*`;
+    const dayHeader = `*${formatVisibleTurnoDate(item.dateYMD)}*`;
     const slotLines = formatSlotsByBlockMultiline(item.slots, mode);
     return `${dayHeader}
 ${slotLines}`;
@@ -4347,7 +4358,7 @@ ${slotLines}`;
 
   const footer = mode === 'siesta'
     ? `Decime qué día y horario especial de siesta le queda mejor y lo dejo presentado a la estilista.`
-    : `Decime qué día y horario le queda mejor y lo presento primero a la estilista. Si ninguno de estos horarios le sirve, también puedo revisar 14, 15 o 16 hs 😊`;
+    : `Decime qué día y horario le queda mejor y lo presento primero a la estilista.`;
 
   return `Perfecto 😊
 
@@ -4372,12 +4383,12 @@ Si quiere, le paso las opciones disponibles de lunes a sábado.`;
 
   const mode = normalizeAvailabilityMode(availabilityMode);
   const [summary] = await getAvailabilitySummaries({ daysYMD: [safeDate], durationMin, availabilityMode: mode });
-  const dayLabel = `${capitalizeEs(summary?.weekday || weekdayEsFromYMD(safeDate))} ${ymdToDM(safeDate)}`;
+  const dayLabel = formatVisibleTurnoDate(safeDate);
 
   if (summary?.slots?.length) {
     const footer = mode === 'siesta'
       ? 'Decime cuál le queda mejor dentro del horario especial de siesta y lo presento a la estilista.'
-      : 'Decime cuál le queda mejor y lo presento a la estilista. Si ninguno de estos horarios le sirve, también puedo revisar 14, 15 o 16 hs 😊';
+      : 'Decime cuál le queda mejor y lo presento a la estilista.';
     return `Te digo lo que nos queda disponible:
 
 ${servicio ? `Servicio: ${servicio}
@@ -4482,6 +4493,25 @@ function ymdToDM(ymd) {
   const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return s;
   return `${m[3]}/${m[2]}`;
+}
+
+
+function formatVisibleTurnoDate(ymd) {
+  const safe = toYMD(ymd);
+  if (!safe) return String(ymd || '').trim();
+  try {
+    const d = new Date(`${safe}T12:00:00-03:00`);
+    const formatted = d.toLocaleDateString('es-AR', {
+      timeZone: TIMEZONE,
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+    });
+    const clean = String(formatted || '').replace(/\s+/g, ' ').trim();
+    return clean ? capitalizeEs(clean) : ymdToDMY(safe);
+  } catch {
+    return ymdToDMY(safe);
+  }
 }
 
 // Acepta "DD/MM/YYYY", "DD-MM-YYYY", "YYYY-MM-DD" y devuelve siempre "YYYY-MM-DD" (si puede).
@@ -7454,7 +7484,7 @@ function looksLikeAppointmentContextFollowUp(text, { pendingDraft, lastService }
   if (isExplicitProductIntent(text)) return false;
 
   const t = normalize(text || '');
-  return /(?:lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|hoy|mañana|pasado\s+mañana|proximo|próximo|el\s+dia|el\s+día|y\s+el|que\s+horarios|qué\s+horarios|que\s+disponibilidad|qué\s+disponibilidad|tenes\s+lugar|tenés\s+lugar|disponible|disponibilidad|a\s+la\s+mañana|por\s+la\s+mañana|a\s+la\s+tarde|por\s+la\s+tarde|\d{1,2}[:.]\d{2}|\d{1,2}\s*(?:hs|horas?)|\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)/i.test(t);
+  return /(?:\blunes\b|\bmartes\b|\bmiercoles\b|\bmiércoles\b|\bjueves\b|\bviernes\b|\bsabado\b|\bsábado\b|\bdomingo\b|\bhoy\b|\bmañana\b|\bpasado\s+mañana\b|\bproximo\b|\bpróximo\b|\bel\s+dia\b|\bel\s+día\b|\by\s+el\b|\bque\s+horarios\b|\bqué\s+horarios\b|\bque\s+disponibilidad\b|\bqué\s+disponibilidad\b|\btenes\s+lugar\b|\btenés\s+lugar\b|\bdisponible\b|\bdisponibilidad\b|\ba\s+la\s+mañana\b|\bpor\s+la\s+mañana\b|\ba\s+la\s+tarde\b|\bpor\s+la\s+tarde\b|\b\d{1,2}[:.]\d{2}\b|\b\d{1,2}\s*(?:hs|horas?)\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b)/i.test(t);
 }
 
 function looksLikeAppointmentIntent(text, { pendingDraft, lastService } = {}) {
@@ -8782,7 +8812,7 @@ lastCloseContext.set(waId, {
 
     // ✅ Si el cliente frena, posterga o cambia de tema en medio del flujo, resolvemos eso antes de seguir.
     const pauseDraftEarly = await getAppointmentDraft(waId);
-    if (pauseDraftEarly) {
+    if (pauseDraftEarly && !shouldBypassAppointmentDraftControl(text, { pendingDraft: pauseDraftEarly, mediaMeta })) {
       const draftControlEarly = await classifyAppointmentDraftControl(text, {
         serviceName: pauseDraftEarly?.servicio || pauseDraftEarly?.last_service_name || '',
         date: pauseDraftEarly?.fecha || '',
@@ -8915,7 +8945,12 @@ updateLastCloseContext(waId, {
         }
       }
 
-      if (/^(no|no me sirve|no puedo|prefiero otro|otro horario|busquemos otro|busco otro)$/i.test(normalizeShortReply(text || ''))) {
+      if (
+        /^(no|no me sirve|no puedo|prefiero otro|otro horario|busquemos otro|busco otro)$/i.test(normalizeShortReply(text || '')) ||
+        !!extractLikelyDateFromText(text) ||
+        !!extractLikelyHourFromText(text) ||
+        textRequestsSiestaAvailability(text)
+      ) {
         clearPendingStylistSuggestion(waId);
         pendingStylistSuggestion = null;
       }
@@ -8974,7 +9009,7 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
     const recentDbMessages = await getRecentDbMessages(phone, 12);
     const convForAI = mergeConversationForAI(recentDbMessages, ensureConv(waId).messages || []);
 
-    if (pendingDraft) {
+    if (pendingDraft && !shouldBypassAppointmentDraftControl(text, { pendingDraft, mediaMeta })) {
       const draftControl = await classifyAppointmentDraftControl(text, {
         serviceName: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
         date: pendingDraft?.fecha || '',
@@ -9274,12 +9309,11 @@ Ahora necesito este dato 😊
 
       await saveAppointmentDraft(waId, phone, { ...base, awaiting_contact: false, flow_step: 'awaiting_payment', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' });
       updateLastCloseContext(waId, { suppressInactivityPrompt: true });
-      const diaOk = base.fecha ? weekdayEsFromYMD(base.fecha) : '';
-      const fechaTxt = base.fecha ? ymdToDMY(base.fecha) : '';
+      const fechaVisible = base.fecha ? formatVisibleTurnoDate(base.fecha) : '';
       const lines = [
         '',
         `Servicio: ${base.servicio || base.last_service_name || ''}`,
-        `📅 Día: ${diaOk ? `${diaOk} ` : ''}${fechaTxt}`.trim(),
+        `📅 Día: ${fechaVisible}`.trim(),
         `🕐 Hora: ${normalizeHourHM(base.hora) || base.hora || ''}`,
         '',
         `*PARA TERMINAR DE CONFIRMAR EL TURNO SE SOLICITA UNA SEÑA DE ${TURNOS_SENA_TXT}*`,
@@ -9456,11 +9490,11 @@ Apenas ella me diga que puede, ahí le paso los datos para la seña.`;
       }
       if (result.type === "pending_stylist_confirmation") {
         clearProductMemory(waId);
-        const diaOk = weekdayEsFromYMD(base.fecha);
+        const fechaVisible = formatVisibleTurnoDate(base.fecha);
         const msgPend = `✅ Solicitud recibida
 
 Servicio: ${base.servicio}
-📅 Día: ${diaOk} ${ymdToDMY(base.fecha)}
+📅 Día: ${fechaVisible}
 🕐 Hora: ${normalizeHourHM(base.hora) || base.hora}
 👤 Cliente: ${base.cliente_full}
 📱 Teléfono: ${normalizePhone(base.telefono_contacto || '')}
@@ -9473,11 +9507,11 @@ Ahora consulto con la estilista ${TURNOS_STYLIST_NAME}. Si ella puede en ese hor
       }
       if (result.type === "booked") {
         clearProductMemory(waId);
-        const diaOk = weekdayEsFromYMD(base.fecha);
+        const fechaVisible = formatVisibleTurnoDate(base.fecha);
         const msgOk = `*TURNO RESERVADO*✅
 
 Servicio: ${base.servicio}
-📅 Día: ${diaOk} ${ymdToDMY(base.fecha)}
+📅 Día: ${fechaVisible}
 🕐 Hora: ${normalizeHourHM(base.hora) || base.hora}
 👤 Cliente: ${base.cliente_full}
 📱 Teléfono: ${normalizePhone(base.telefono_contacto || '')}
