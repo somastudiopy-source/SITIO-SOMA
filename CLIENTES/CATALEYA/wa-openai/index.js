@@ -4003,6 +4003,10 @@ function cleanProductLabel(value) {
 function pickPrimaryProducto(text) {
   const source = String(text || '').trim();
   if (!source) return '';
+
+  const courseInterest = buildHubSpotCourseInterestLabel(source);
+  if (courseInterest && courseInterest !== 'CURSO') return courseInterest;
+
   const hits = detectProductKeywords(source);
   return hits[0] || '';
 }
@@ -5753,6 +5757,74 @@ function humanizeCourseSearchQuery(query) {
   );
 }
 
+
+const COURSE_BROAD_CATEGORY_TOKENS = new Set([
+  'barber', 'barberia', 'maquillaje', 'colorimetria', 'peluqueria', 'estetica',
+  'auxiliar', 'peinados', 'recogidos', 'ninos', 'niñas', 'ninas'
+]);
+
+const COURSE_STRICT_MODIFIER_TOKENS = new Set([
+  'avanzada', 'avanzado', 'basica', 'basico', 'inicial', 'intermedio', 'intermedia',
+  'profesional', 'perfeccionamiento', 'intensivo', 'intensiva', 'experto', 'experta',
+  'especializacion', 'especialización'
+]);
+
+function buildHubSpotCourseInterestLabel(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+  const hasCourseSignal =
+    COURSE_SIGNAL_RE.test(raw)
+    || /(dictan clases|dan clases|masterclass|seminario|workshop)/i.test(raw)
+    || /^curso\s+/i.test(raw);
+
+  const topic = sanitizeCourseSearchQuery(raw);
+  if (!topic) return hasCourseSignal ? 'CURSO' : '';
+
+  return `CURSO ${normalize(topic).toUpperCase().replace(/\s+/g, ' ').trim()}`.trim();
+}
+
+function getStrictCourseTokens(queryRaw) {
+  const cleaned = sanitizeCourseSearchQuery(queryRaw);
+  if (!cleaned) return [];
+
+  const tokens = Array.from(new Set(
+    normalize(cleaned)
+      .split(' ')
+      .map((x) => x.trim())
+      .filter(Boolean)
+  ));
+
+  if (!tokens.length) return [];
+
+  const strictModifiers = tokens.filter((tok) => COURSE_STRICT_MODIFIER_TOKENS.has(tok));
+  if (strictModifiers.length) return strictModifiers;
+
+  const specific = tokens.filter((tok) => tok.length >= 4 && !COURSE_BROAD_CATEGORY_TOKENS.has(tok));
+  if (specific.length >= 2) return specific;
+
+  return [];
+}
+
+function courseCandidateSatisfiesStrictQuery(row, queryRaw) {
+  const required = getStrictCourseTokens(queryRaw);
+  if (!required.length) return true;
+
+  const hay = normalize([
+    row?.nombre,
+    row?.categoria,
+    row?.modalidad,
+    row?.duracionTotal,
+    row?.fechaInicio,
+    row?.fechaFin,
+    row?.diasHorarios,
+    row?.info,
+    row?.estado,
+    row?.requisitos,
+  ].filter(Boolean).join(' | '));
+
+  return required.every((tok) => hay.includes(tok));
+}
+
 function scoreCourseCandidate(row, queryRaw) {
   const query = sanitizeCourseSearchQuery(queryRaw) || normalize(queryRaw || '');
   if (!query) return 0;
@@ -5797,6 +5869,9 @@ function findCourses(rows, query, mode) {
   const q = normalize(cleanQuery || rawQuery);
   if (!q) return [];
 
+  const scopedRows = (Array.isArray(rows) ? rows : []).filter((row) => courseCandidateSatisfiesStrictQuery(row, rawQuery));
+  if (!scopedRows.length) return [];
+
   const match = (x) => {
     const hay = normalize([
       x.nombre,
@@ -5813,24 +5888,24 @@ function findCourses(rows, query, mode) {
   };
 
   if (mode === "LIST") {
-    const listed = rows.filter(match);
+    const listed = scopedRows.filter(match);
     if (listed.length) return listed;
   }
 
-  const exact = rows.filter((r) => normalize(r.nombre) === q || normalize(r.categoria) === q);
+  const exact = scopedRows.filter((r) => normalize(r.nombre) === q || normalize(r.categoria) === q);
   if (exact.length) return exact;
 
-  const contains = rows.filter((r) => normalize(r.nombre).includes(q) || normalize(r.categoria).includes(q));
+  const contains = scopedRows.filter((r) => normalize(r.nombre).includes(q) || normalize(r.categoria).includes(q));
   if (contains.length) return contains;
 
-  const scored = rows
+  const scored = scopedRows
     .map((row) => ({ row, score: scoreCourseCandidate(row, cleanQuery || rawQuery) }))
     .filter((item) => item.score >= 0.72)
     .sort((a, b) => b.score - a.score)
     .map((item) => item.row);
   if (scored.length) return scored;
 
-  return rows.filter(match);
+  return scopedRows.filter(match);
 }
 
 function isExplicitCourseKeyword(text) {
@@ -6490,6 +6565,17 @@ function shouldUseAmbiguousBridgeMessage({ waId, text }) {
   if (!waId) return false;
   if (isGreetingOnly(text)) return false;
   if (!isAmbiguousBridgeCandidate(text)) return false;
+
+  // Si ya existe contexto reciente, nunca tratamos el mensaje como ambiguo.
+  if (
+    getLastCourseContext(waId) ||
+    getLastProductContext(waId) ||
+    getPendingAmbiguousBeauty(waId) ||
+    getLastResolvedBeauty(waId) ||
+    getLastKnownService(waId, null)
+  ) {
+    return false;
+  }
 
   const conv = ensureConv(waId);
   const history = Array.isArray(conv?.messages) ? conv.messages : [];
@@ -8933,11 +9019,22 @@ ${some}
       const matches = isGenericCourseQuery ? courses : findCourses(courses, cleanedCourseQuery || courseQuery, intent.mode);
       const replyCatalog = formatCoursesReply(matches, isGenericCourseQuery ? 'LIST' : intent.mode);
       if (replyCatalog) {
+        const selectedCourseName = matches.length === 1 ? (matches[0]?.nombre || '') : '';
+        const courseInterestLabel = buildHubSpotCourseInterestLabel(selectedCourseName || cleanedCourseQuery || courseQuery || text);
+
         setLastCourseContext(waId, {
           query: cleanedCourseQuery || courseQuery || 'cursos',
-          selectedName: matches.length === 1 ? (matches[0]?.nombre || '') : '',
+          selectedName: selectedCourseName,
           lastOptions: matches.slice(0, 10).map((c) => c.nombre).filter(Boolean),
+          requestedInterest: courseInterestLabel || '',
         });
+
+        updateLastCloseContext(waId, {
+          intentType: 'COURSE',
+          interest: courseInterestLabel || (selectedCourseName || cleanedCourseQuery || courseQuery || lastCloseContext.get(waId)?.interest || ''),
+          lastUserText: text,
+        });
+
         pushHistory(waId, "assistant", replyCatalog);
         await sendWhatsAppText(phone, replyCatalog);
         await maybeSendCoursePhotos(phone, matches);
@@ -8947,10 +9044,19 @@ ${some}
       }
 
       const someRows = courses.slice(0, 12);
+      const wantedCourseInterest = buildHubSpotCourseInterestLabel(cleanedCourseQuery || courseQuery || text);
+
       setLastCourseContext(waId, {
         query: cleanedCourseQuery || courseQuery || 'cursos',
         selectedName: '',
         lastOptions: someRows.map((c) => c.nombre).filter(Boolean),
+        requestedInterest: wantedCourseInterest || '',
+      });
+
+      updateLastCloseContext(waId, {
+        intentType: 'COURSE',
+        interest: wantedCourseInterest || (cleanedCourseQuery || courseQuery || text),
+        lastUserText: text,
       });
 
       if (!isGenericCourseQuery) {
