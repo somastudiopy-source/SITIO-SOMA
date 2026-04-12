@@ -3557,7 +3557,7 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
 
   if (action === 'decline' || action === 'suggest') {
     if (action === 'suggest' && stylistSuggestionNeedsDetails(msg, text)) {
-      await sendWhatsAppText(phone, 'Decime el nuevo día y horario en el mismo mensaje, por ejemplo: *martes 17 de abril a las 18 hs*. También respetá los horarios permitidos: 10, 11, 12, 14, 15, 16, 17, 18, 19 o 20 hs.');
+      await sendWhatsAppText(phone, 'Decime el nuevo día y horario en el mismo mensaje, por ejemplo: *martes 17 de abril a las 18 hs*.');
       return true;
     }
 
@@ -3600,7 +3600,7 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
 Si le sirve, respóndame *sí* y le paso la seña. Si no, dígame otro día u horario y le paso lo disponible 😊`
       : `La estilista no puede en ese horario.
 
-Si quiere, dígame otro día u horario y le paso lo disponible. También, si ninguno de los horarios comerciales le sirve, puedo revisar la franja de siesta de 14, 15 o 16 hs 😊`;
+Si ninguno de los horarios comerciales le sirve, puedo revisar otros horarios 😊`;
     pushHistory(appt.wa_id, 'assistant', msgClient);
     await sendWhatsAppText(appt.contact_phone || appt.wa_phone, msgClient);
     await sendWhatsAppText(phone, action === 'suggest' && suggestionText
