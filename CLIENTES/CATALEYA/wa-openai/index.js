@@ -1315,21 +1315,51 @@ async function upsertGoogleContactInTarget(target, { phoneRaw, explicitName = ''
       throw e;
     }
 
-    const freshRows = await searchGoogleContactsByPhone(target, phoneRaw);
-    existing = freshRows[0] || null;
+    const refreshPersonByResourceName = async (resourceName) => {
+      if (!resourceName) return null;
+      try {
+        const resp = await people.people.get({
+          resourceName,
+          personFields: 'names,phoneNumbers,metadata,biographies',
+        });
+        return resp?.data || null;
+      } catch (getErr) {
+        if (isGoogleNotFoundError(getErr)) return null;
+        throw getErr;
+      }
+    };
 
-    if (!existing) {
+    let freshPerson = await refreshPersonByResourceName(existing?.resourceName || '');
+
+    if (!freshPerson) {
+      await sleep(700);
+      freshPerson = await refreshPersonByResourceName(existing?.resourceName || '');
+    }
+
+    if (!freshPerson) {
       const created = await people.people.createContact({ requestBody: createBody });
       return { action: isGoogleNotFoundError(e) ? 'recreated' : 'created_after_refresh', resourceName: created?.data?.resourceName || '', displayName: finalName, account: target.email };
     }
 
     try {
-      const retried = await tryUpdatePerson(existing);
+      const retried = await tryUpdatePerson(freshPerson);
       return { ...retried, action: retried.action === 'updated' ? 'updated_after_refresh' : retried.action };
     } catch (retryErr) {
       if (retryErr?.googleContactsDisabled || isGoogleInvalidGrantError(retryErr)) {
         return { action: 'skipped_disabled', account: target.email, error: 'invalid_grant' };
       }
+
+      if (isGoogleFailedPreconditionEtagError(retryErr)) {
+        await sleep(700);
+        const latestPerson = await refreshPersonByResourceName(freshPerson?.resourceName || existing?.resourceName || '');
+        if (!latestPerson) {
+          const created = await people.people.createContact({ requestBody: createBody });
+          return { action: 'recreated', resourceName: created?.data?.resourceName || '', displayName: finalName, account: target.email };
+        }
+        const thirdTry = await tryUpdatePerson(latestPerson);
+        return { ...thirdTry, action: thirdTry.action === 'updated' ? 'updated_after_refresh' : thirdTry.action };
+      }
+
       if (isGoogleNotFoundError(retryErr)) {
         const created = await people.people.createContact({ requestBody: createBody });
         return { action: 'recreated', resourceName: created?.data?.resourceName || '', displayName: finalName, account: target.email };
