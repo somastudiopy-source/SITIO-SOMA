@@ -2437,7 +2437,7 @@ function extractContactInfo(text) {
       }
     }
 
-    const explicitPhone = raw.match(/(?:telefono|tel|cel|celular|whatsapp|wsp|numero|número)\s*(?:es|:)?\s*(\+?\d[\d\s().-]{6,}\d)/i);
+    const explicitPhone = raw.match(/(?:telefono|tel|cel|celular|whatsapp|wsp|numero|número|contacto)\s*(?:es|:)?\s*(\+?\d[\d\s().-]{6,}\d)/i);
     if (explicitPhone) {
       const cleanPhone = sanitizePossiblePhone(explicitPhone[1]);
       if (cleanPhone) telefono = cleanPhone;
@@ -2448,28 +2448,58 @@ function extractContactInfo(text) {
   if (!isLikelyPaymentText(raw)) {
     const explicitName = raw.match(/(?:me llamo|mi nombre es|soy)\s+([A-Za-zÁÉÍÓÚÑáéíóúñ' ]{5,60})/i);
     if (explicitName) {
-      const cand = explicitName[1].replace(/\s+/g, ' ').trim();
-      if (!/\d/.test(cand) && cand.split(' ').length >= 2) nombre = cand;
+      const cleanedExplicitName = cleanNameCandidate(explicitName[1]);
+      if (cleanedExplicitName) nombre = cleanedExplicitName;
     }
 
     if (!nombre) {
-      const nameBeforePhone = raw.match(/^\s*([A-Za-zÁÉÍÓÚÑáéíóúñ' ]{5,80}?)(?:\s*,\s*|\s+y\s+)?(?:(?:y\s+)?(?:su\s+)?(?:numero|número|telefono|tel|cel|celular|whatsapp|wsp)\b)/i);
-      if (nameBeforePhone) {
-        const cand = String(nameBeforePhone[1] || '').replace(/\s+/g, ' ').trim().replace(/[,:;.-]+$/, '');
-        if (!/\d/.test(cand) && cand.split(' ').length >= 2) nombre = cand;
+      const lines = raw
+        .split(/\r?\n+/)
+        .map((line) => line.replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
+
+      for (const line of lines) {
+        if (/\d/.test(line)) continue;
+        if (/(?:telefono|tel|cel|celular|whatsapp|wsp|numero|número|contacto)\b/i.test(line)) continue;
+        const cleanedLineName = cleanNameCandidate(line);
+        if (cleanedLineName) {
+          nombre = cleanedLineName;
+          break;
+        }
       }
     }
 
     if (!nombre) {
+      const normalizedSpaces = raw.replace(/\r?\n+/g, ' ').replace(/\s+/g, ' ').trim();
+      const nameBeforePhone = normalizedSpaces.match(/^([A-Za-zÁÉÍÓÚÑáéíóúñ' ]{5,80}?)(?:\s*,\s*|\s+y\s+)?(?:(?:y\s+)?(?:su\s+)?(?:numero|número|telefono|tel|cel|celular|whatsapp|wsp|contacto)\b)/i);
+      if (nameBeforePhone) {
+        const cleanedBeforePhone = cleanNameCandidate(String(nameBeforePhone[1] || '').replace(/[,:;.-]+$/, ''));
+        if (cleanedBeforePhone) nombre = cleanedBeforePhone;
+      }
+    }
+
+    if (!nombre) {
+      const compactWithoutPhone = raw
+        .replace(/(\+?\d[\d\s().-]{6,}\d)/g, ' ')
+        .replace(/(?:telefono|tel|cel|celular|whatsapp|wsp|numero|número|contacto)\s*(?:es|:)?/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      const cleanedCompactName = cleanNameCandidate(compactWithoutPhone);
+      if (cleanedCompactName) nombre = cleanedCompactName;
+    }
+
+    if (!nombre) {
       const cleaned = raw.replace(/\s+/g, ' ').trim();
+      const cleanedPureName = cleanNameCandidate(cleaned);
       const looksLikePureName = (
+        !!cleanedPureName &&
         !/\d/.test(cleaned) &&
-        cleaned.split(' ').length >= 2 &&
         cleaned.length >= 5 &&
         cleaned.length <= 60 &&
         !/(quiero|quisiera|consulto|consulta|pregunto|pregunta|hola|buen dia|buen día|buenas|gracias|turno|mañana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|servicio|producto|hora|hs|alisado|botox|keratina|shampoo|matizador|nutricion|nutrición)/i.test(norm)
       );
-      if (looksLikePureName) nombre = cleaned;
+      if (looksLikePureName) nombre = cleanedPureName;
     }
   }
 
