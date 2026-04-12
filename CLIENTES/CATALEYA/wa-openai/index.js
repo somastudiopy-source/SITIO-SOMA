@@ -604,10 +604,11 @@ async function buildHubSpotContactProperties(ctx, existingContact, { isClient = 
   const observacion = mergeObservationHistory(existing?.[HUBSPOT_PROPERTY.observacion] || '', observacionLine);
 
   const explicitFromSnippet = extractExplicitNameFromSnippet(conversationSnippet);
+  const forcedExplicitName = cleanNameCandidate(ctx.forceContactName || ctx.explicitName || '') || '';
   const chosenName = chooseBestContactName({
     existingName: existing?.[HUBSPOT_PROPERTY.firstname] || '',
     existingLastName: existing?.[HUBSPOT_PROPERTY.lastname] || '',
-    explicitName: aiAnalysis?.explicitName || ctx.explicitName || explicitFromSnippet || '',
+    explicitName: forcedExplicitName || aiAnalysis?.explicitName || explicitFromSnippet || '',
     profileName: ctx.profileName || ctx.name || '',
   });
 
@@ -619,6 +620,8 @@ async function buildHubSpotContactProperties(ctx, existingContact, { isClient = 
   const mergedProducto = mergeSlashText(existing?.[HUBSPOT_PROPERTY.producto] || '', finalProductos, 8);
   const existingFullName = [existing?.[HUBSPOT_PROPERTY.firstname], existing?.[HUBSPOT_PROPERTY.lastname]].filter(Boolean).join(' ').trim();
   const existingIsGeneric = isLikelyGenericContactName(existingFullName);
+  const shouldForceContactName = !!forcedExplicitName && !!chosenName.fullName;
+  const shouldOverwriteExistingName = !!chosenName.fullName && (existingIsGeneric || normalize(existingFullName) !== normalize(chosenName.fullName));
 
   const properties = {
     [HUBSPOT_PROPERTY.phone]: normalizedPhone || rawPhone || existing?.[HUBSPOT_PROPERTY.phone] || '',
@@ -634,12 +637,12 @@ async function buildHubSpotContactProperties(ctx, existingContact, { isClient = 
     [HUBSPOT_PROPERTY.whatsappProfileName]: cleanNameCandidate(ctx.profileName || ctx.name || '') || existing?.[HUBSPOT_PROPERTY.whatsappProfileName] || '',
   };
 
-  if (chosenName.firstName && (chosenName.source === 'chat_explicit' || chosenName.source === 'whatsapp_profile' || existingIsGeneric)) {
+  if (chosenName.firstName && (shouldForceContactName || chosenName.source === 'chat_explicit' || chosenName.source === 'whatsapp_profile' || shouldOverwriteExistingName)) {
     properties[HUBSPOT_PROPERTY.firstname] = chosenName.firstName;
     if (HUBSPOT_PROPERTY.lastname) {
-      properties[HUBSPOT_PROPERTY.lastname] = chosenName.lastName || existing?.[HUBSPOT_PROPERTY.lastname] || '';
+      properties[HUBSPOT_PROPERTY.lastname] = chosenName.lastName || '';
     }
-    properties[HUBSPOT_PROPERTY.nameSource] = chosenName.source || existing?.[HUBSPOT_PROPERTY.nameSource] || '';
+    properties[HUBSPOT_PROPERTY.nameSource] = shouldForceContactName ? 'chat_explicit' : (chosenName.source || existing?.[HUBSPOT_PROPERTY.nameSource] || '');
     properties[HUBSPOT_PROPERTY.nameUpdatedAt] = hubspotDateTimeValue(now);
   }
 
@@ -1281,13 +1284,19 @@ async function upsertGoogleContactInTarget(target, { phoneRaw, explicitName = ''
   const finalName = cleanNameCandidate(explicitName) || cleanNameCandidate(profileName) || '';
   const createBody = buildGoogleContactCreateBody({ normalizedPhone, finalName, note });
 
-  const existingRows = await searchGoogleContactsByPhone(target, phoneRaw);
-  let existing = existingRows[0] || null;
-
-  if (!existing) {
-    const created = await people.people.createContact({ requestBody: createBody });
-    return { action: 'created', resourceName: created?.data?.resourceName || '', displayName: finalName, account: target.email };
-  }
+  const refreshPersonByResourceName = async (resourceName) => {
+    if (!resourceName) return null;
+    try {
+      const resp = await people.people.get({
+        resourceName,
+        personFields: 'names,phoneNumbers,metadata,biographies',
+      });
+      return resp?.data || null;
+    } catch (getErr) {
+      if (isGoogleNotFoundError(getErr)) return null;
+      throw getErr;
+    }
+  };
 
   const tryUpdatePerson = async (person) => {
     const plan = buildGoogleContactUpdatePlan(person, { normalizedPhone, finalName, note });
@@ -1304,69 +1313,94 @@ async function upsertGoogleContactInTarget(target, { phoneRaw, explicitName = ''
     return { action: 'updated', resourceName: person.resourceName, displayName: plan.displayName, account: target.email };
   };
 
-  try {
-    return await tryUpdatePerson(existing);
-  } catch (e) {
-    if (e?.googleContactsDisabled || isGoogleInvalidGrantError(e)) {
-      return { action: 'skipped_disabled', account: target.email, error: 'invalid_grant' };
-    }
-
-    if (!isGoogleFailedPreconditionEtagError(e) && !isGoogleNotFoundError(e)) {
-      throw e;
-    }
-
-    const refreshPersonByResourceName = async (resourceName) => {
-      if (!resourceName) return null;
-      try {
-        const resp = await people.people.get({
-          resourceName,
-          personFields: 'names,phoneNumbers,metadata,biographies',
-        });
-        return resp?.data || null;
-      } catch (getErr) {
-        if (isGoogleNotFoundError(getErr)) return null;
-        throw getErr;
-      }
-    };
-
-    let freshPerson = await refreshPersonByResourceName(existing?.resourceName || '');
-
-    if (!freshPerson) {
-      await sleep(700);
-      freshPerson = await refreshPersonByResourceName(existing?.resourceName || '');
-    }
-
-    if (!freshPerson) {
-      const created = await people.people.createContact({ requestBody: createBody });
-      return { action: isGoogleNotFoundError(e) ? 'recreated' : 'created_after_refresh', resourceName: created?.data?.resourceName || '', displayName: finalName, account: target.email };
-    }
-
+  const updateExistingPersonWithRetry = async (existing) => {
     try {
-      const retried = await tryUpdatePerson(freshPerson);
-      return { ...retried, action: retried.action === 'updated' ? 'updated_after_refresh' : retried.action };
-    } catch (retryErr) {
-      if (retryErr?.googleContactsDisabled || isGoogleInvalidGrantError(retryErr)) {
+      return await tryUpdatePerson(existing);
+    } catch (e) {
+      if (e?.googleContactsDisabled || isGoogleInvalidGrantError(e)) {
         return { action: 'skipped_disabled', account: target.email, error: 'invalid_grant' };
       }
 
-      if (isGoogleFailedPreconditionEtagError(retryErr)) {
+      if (!isGoogleFailedPreconditionEtagError(e) && !isGoogleNotFoundError(e)) {
+        throw e;
+      }
+
+      let freshPerson = await refreshPersonByResourceName(existing?.resourceName || '');
+      if (!freshPerson) {
         await sleep(700);
-        const latestPerson = await refreshPersonByResourceName(freshPerson?.resourceName || existing?.resourceName || '');
-        if (!latestPerson) {
+        freshPerson = await refreshPersonByResourceName(existing?.resourceName || '');
+      }
+
+      if (!freshPerson) {
+        const created = await people.people.createContact({ requestBody: createBody });
+        return { action: isGoogleNotFoundError(e) ? 'recreated' : 'created_after_refresh', resourceName: created?.data?.resourceName || '', displayName: finalName, account: target.email };
+      }
+
+      try {
+        const retried = await tryUpdatePerson(freshPerson);
+        return { ...retried, action: retried.action === 'updated' ? 'updated_after_refresh' : retried.action };
+      } catch (retryErr) {
+        if (retryErr?.googleContactsDisabled || isGoogleInvalidGrantError(retryErr)) {
+          return { action: 'skipped_disabled', account: target.email, error: 'invalid_grant' };
+        }
+
+        if (isGoogleFailedPreconditionEtagError(retryErr)) {
+          await sleep(700);
+          const latestPerson = await refreshPersonByResourceName(freshPerson?.resourceName || existing?.resourceName || '');
+          if (!latestPerson) {
+            const created = await people.people.createContact({ requestBody: createBody });
+            return { action: 'recreated', resourceName: created?.data?.resourceName || '', displayName: finalName, account: target.email };
+          }
+          const thirdTry = await tryUpdatePerson(latestPerson);
+          return { ...thirdTry, action: thirdTry.action === 'updated' ? 'updated_after_refresh' : thirdTry.action };
+        }
+
+        if (isGoogleNotFoundError(retryErr)) {
           const created = await people.people.createContact({ requestBody: createBody });
           return { action: 'recreated', resourceName: created?.data?.resourceName || '', displayName: finalName, account: target.email };
         }
-        const thirdTry = await tryUpdatePerson(latestPerson);
-        return { ...thirdTry, action: thirdTry.action === 'updated' ? 'updated_after_refresh' : thirdTry.action };
+        throw retryErr;
       }
+    }
+  };
 
-      if (isGoogleNotFoundError(retryErr)) {
-        const created = await people.people.createContact({ requestBody: createBody });
-        return { action: 'recreated', resourceName: created?.data?.resourceName || '', displayName: finalName, account: target.email };
+  const existingRows = await searchGoogleContactsByPhone(target, phoneRaw);
+  const uniqueExistingRows = Array.from(new Map((existingRows || []).filter(Boolean).map((person) => [person.resourceName || `${Math.random()}`, person])).values())
+    .filter((person) => !!person?.resourceName);
+
+  if (!uniqueExistingRows.length) {
+    const created = await people.people.createContact({ requestBody: createBody });
+    return { action: 'created', resourceName: created?.data?.resourceName || '', displayName: finalName, account: target.email };
+  }
+
+  const results = [];
+  for (const existing of uniqueExistingRows) {
+    try {
+      const row = await updateExistingPersonWithRetry(existing);
+      results.push(row);
+    } catch (e) {
+      if (e?.googleContactsDisabled || isGoogleInvalidGrantError(e)) {
+        return { action: 'skipped_disabled', account: target.email, error: 'invalid_grant' };
       }
-      throw retryErr;
+      console.error(`❌ Error actualizando contacto exacto en Google Contacts (${target.email}):`, e?.response?.data || e?.message || e);
+      results.push({ action: 'error', account: target.email, resourceName: existing?.resourceName || '', error: e?.message || 'error' });
     }
   }
+
+  const preferred = results.find((row) => /^updated|^recreated|^created/.test(String(row?.action || '')))
+    || results.find((row) => row?.action === 'unchanged')
+    || results[0];
+
+  if (preferred) {
+    return {
+      ...preferred,
+      account: target.email,
+      matches: results,
+    };
+  }
+
+  const created = await people.people.createContact({ requestBody: createBody });
+  return { action: 'created_fallback', resourceName: created?.data?.resourceName || '', displayName: finalName, account: target.email, matches: results };
 }
 
 async function syncGoogleContactsForPhone({ phoneRaw, explicitName = '', profileName = '', note = '' } = {}) {
@@ -1459,6 +1493,7 @@ async function syncIdentityEverywhere({ waId, phoneRaw, profileName = '', explic
       profileName,
       name: profileName,
       explicitName: cleanExplicit,
+      forceContactName: cleanExplicit,
       lastUserText: '',
       intentType: 'OTHER',
       interest: null,
