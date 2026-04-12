@@ -2437,7 +2437,7 @@ function extractContactInfo(text) {
       }
     }
 
-    const explicitPhone = raw.match(/(?:telefono|tel|cel|celular|whatsapp|wsp|numero|número|contacto)\s*(?:es|:)?\s*(\+?\d[\d\s().-]{6,}\d)/i);
+    const explicitPhone = raw.match(/(?:telefono|tel|cel|celular|whatsapp|wsp|numero|número)\s*(?:es|:)?\s*(\+?\d[\d\s().-]{6,}\d)/i);
     if (explicitPhone) {
       const cleanPhone = sanitizePossiblePhone(explicitPhone[1]);
       if (cleanPhone) telefono = cleanPhone;
@@ -2448,58 +2448,28 @@ function extractContactInfo(text) {
   if (!isLikelyPaymentText(raw)) {
     const explicitName = raw.match(/(?:me llamo|mi nombre es|soy)\s+([A-Za-zÁÉÍÓÚÑáéíóúñ' ]{5,60})/i);
     if (explicitName) {
-      const cleanedExplicitName = cleanNameCandidate(explicitName[1]);
-      if (cleanedExplicitName) nombre = cleanedExplicitName;
+      const cand = explicitName[1].replace(/\s+/g, ' ').trim();
+      if (!/\d/.test(cand) && cand.split(' ').length >= 2) nombre = cand;
     }
 
     if (!nombre) {
-      const lines = raw
-        .split(/\r?\n+/)
-        .map((line) => line.replace(/\s+/g, ' ').trim())
-        .filter(Boolean);
-
-      for (const line of lines) {
-        if (/\d/.test(line)) continue;
-        if (/(?:telefono|tel|cel|celular|whatsapp|wsp|numero|número|contacto)\b/i.test(line)) continue;
-        const cleanedLineName = cleanNameCandidate(line);
-        if (cleanedLineName) {
-          nombre = cleanedLineName;
-          break;
-        }
-      }
-    }
-
-    if (!nombre) {
-      const normalizedSpaces = raw.replace(/\r?\n+/g, ' ').replace(/\s+/g, ' ').trim();
-      const nameBeforePhone = normalizedSpaces.match(/^([A-Za-zÁÉÍÓÚÑáéíóúñ' ]{5,80}?)(?:\s*,\s*|\s+y\s+)?(?:(?:y\s+)?(?:su\s+)?(?:numero|número|telefono|tel|cel|celular|whatsapp|wsp|contacto)\b)/i);
+      const nameBeforePhone = raw.match(/^\s*([A-Za-zÁÉÍÓÚÑáéíóúñ' ]{5,80}?)(?:\s*,\s*|\s+y\s+)?(?:(?:y\s+)?(?:su\s+)?(?:numero|número|telefono|tel|cel|celular|whatsapp|wsp)\b)/i);
       if (nameBeforePhone) {
-        const cleanedBeforePhone = cleanNameCandidate(String(nameBeforePhone[1] || '').replace(/[,:;.-]+$/, ''));
-        if (cleanedBeforePhone) nombre = cleanedBeforePhone;
+        const cand = String(nameBeforePhone[1] || '').replace(/\s+/g, ' ').trim().replace(/[,:;.-]+$/, '');
+        if (!/\d/.test(cand) && cand.split(' ').length >= 2) nombre = cand;
       }
-    }
-
-    if (!nombre) {
-      const compactWithoutPhone = raw
-        .replace(/(\+?\d[\d\s().-]{6,}\d)/g, ' ')
-        .replace(/(?:telefono|tel|cel|celular|whatsapp|wsp|numero|número|contacto)\s*(?:es|:)?/gi, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      const cleanedCompactName = cleanNameCandidate(compactWithoutPhone);
-      if (cleanedCompactName) nombre = cleanedCompactName;
     }
 
     if (!nombre) {
       const cleaned = raw.replace(/\s+/g, ' ').trim();
-      const cleanedPureName = cleanNameCandidate(cleaned);
       const looksLikePureName = (
-        !!cleanedPureName &&
         !/\d/.test(cleaned) &&
+        cleaned.split(' ').length >= 2 &&
         cleaned.length >= 5 &&
         cleaned.length <= 60 &&
         !/(quiero|quisiera|consulto|consulta|pregunto|pregunta|hola|buen dia|buen día|buenas|gracias|turno|mañana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|servicio|producto|hora|hs|alisado|botox|keratina|shampoo|matizador|nutricion|nutrición)/i.test(norm)
       );
-      if (looksLikePureName) nombre = cleanedPureName;
+      if (looksLikePureName) nombre = cleaned;
     }
   }
 
@@ -3252,9 +3222,15 @@ Respondé JSON estricto con:
 - faltantes: array de strings ("fecha", "hora", "servicio")
 
 Reglas:
-- Interpretá fechas relativas ("mañana", "el viernes") usando ${nowTxt} y zona ${TIMEZONE}.
+- Interpretá fechas relativas ("mañana", "el viernes", "el lunes") usando ${nowTxt} y zona ${TIMEZONE}.
 - Si el texto NO es un pedido de turno NI una continuación de reserva, ok=false.
 - Si te paso un contexto con datos ya conocidos, mantenelos y completá lo faltante.
+- Si el contexto ya trae servicio y el cliente responde solo con fecha, hora o ambas cosas, eso sigue siendo continuación de turno y ok=true.
+- Ejemplos de continuación válida con contexto previo:
+  - servicio=Alisado + mensaje="el lunes a las 17" => ok=true, fecha y hora completas.
+  - servicio=Alisado + mensaje="lunes 17 hs" => ok=true.
+  - servicio=Alisado + mensaje="a las 17:30" => ok=true, conservar fecha del contexto si ya existía.
+  - servicio=Alisado + mensaje="el lunes" => ok=true, completar fecha y dejar hora faltante.
 `,
       },
       {
@@ -6748,6 +6724,7 @@ Importante:
 - "quiero comprar un shampoo", "tenés fotos de las camillas", "qué cursos hay", "cancelar" => SWITCH_TOPIC si además cambia a otra consulta, o PAUSE_APPOINTMENT si solo corta el turno.
 - "no gracias" puede ser PAUSE_APPOINTMENT si solo cierra el tema del turno.
 - Si manda fecha, hora, nombre, teléfono o comprobante, casi siempre es CONTINUE_APPOINTMENT.
+- Respuestas como "el lunes a las 17", "lunes 17 hs", "a las 17", "el martes" o similares son CONTINUE_APPOINTMENT.
 
 Respondé SOLO JSON.`
         },
@@ -6912,6 +6889,7 @@ Reglas de negocio:
 - Si una palabra puede ser producto o servicio y el cliente no lo aclaró, devolvé OTHER.
 - Si el mensaje es genérico y pide opciones, lista, qué tienen o si hay disponible, mode=LIST.
 - Si nombra algo puntual o sigue una conversación ya abierta sobre ese tema, mode=DETAIL.
+- Si hay borrador de turno activo o servicio_actual cargado y el cliente manda fecha, hora, nombre, teléfono, comprobante o una continuación tipo "el lunes a las 17", priorizá SERVICE.
 
 Tené en cuenta el contexto previo:
 - servicio_actual: si existe, mensajes como "quiero el turno", "dale", "quiero ese", "bien" suelen referirse a ese servicio.
@@ -7992,6 +7970,8 @@ updateLastCloseContext(waId, {
 
     // ===================== ✅ TURNOS (Calendar + Railway Postgres) =====================
     let pendingDraft = await getAppointmentDraft(waId);
+    const recentDbMessages = await getRecentDbMessages(phone, 12);
+    const convForAI = mergeConversationForAI(recentDbMessages, ensureConv(waId).messages || []);
 
     if (pendingDraft) {
       const draftControl = await classifyAppointmentDraftControl(text, {
@@ -8027,8 +8007,6 @@ Cuando quiera retomarlo, me escribe y le paso nuevamente los horarios disponible
       }
     }
 
-    const recentDbMessages = await getRecentDbMessages(phone, 12);
-    const convForAI = mergeConversationForAI(recentDbMessages, ensureConv(waId).messages || []);
     const lastKnownService = getLastKnownService(waId, pendingDraft);
     const lastBookedTurno = await getLastBookedAppointmentForUser({ waId, waPhone: phone });
 
