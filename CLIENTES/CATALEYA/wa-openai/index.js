@@ -364,7 +364,10 @@ function cleanNameCandidate(value) {
     'grupo', 'cata', 'cataleya', 'nuevo', 'nueva', 'salon', 'belleza',
     'hola', 'buen', 'bueno', 'dia', 'dias', 'tarde', 'tardes', 'noche', 'noches',
     'consulta', 'consulto', 'consultar', 'pregunta', 'pregunto', 'quisiera', 'quiero',
-    'precio', 'info', 'informacion', 'gracias', 'te', 'me', 'mi', 'soy', 'que', 'por', 'para', 'necesito', 'busco'
+    'precio', 'info', 'informacion', 'gracias', 'te', 'me', 'mi', 'soy', 'que', 'por', 'para', 'necesito', 'busco',
+    'botox', 'keratina', 'color', 'lavado', 'peinado', 'brushing', 'mascara', 'máscara', 'serum', 'sérum',
+    'ampolla', 'ampollas', 'acondicionador', 'masterclass', 'tratamiento', 'alisar', 'matiz', 'matizador',
+    'barberia', 'barbería', 'maquillaje', 'rubio', 'rubia', 'decolorante', 'mechas', 'secado'
   ]);
 
   const normalizedParts = parts.map((p) => normalize(p));
@@ -372,7 +375,7 @@ function cleanNameCandidate(value) {
   if (parts.some((p) => p.length < 2)) return '';
 
   const t = normalize(txt);
-  if (/(alisado|tintura|corte|unas|uñas|depil|pestan|pestañ|ceja|curso|mueble|shampoo|matizador|nutricion|nutrición|bano de crema|baño de crema|camilla|silla|mesa|barber|consult|precio|gracias|hola|buen dia|buen día|necesito|busco|quisiera|ampolla)/i.test(t)) {
+  if (/(alisado|tintura|corte|unas|uñas|depil|pestan|pestañ|ceja|curso|mueble|shampoo|matizador|nutricion|nutrición|bano de crema|baño de crema|camilla|silla|mesa|barber|consult|precio|gracias|hola|buen dia|buen día|necesito|busco|quisiera|ampolla|ampollas|botox|keratina|mascara|máscara|serum|sérum|lavado|peinado|brushing|color|masterclass|tratamiento|acondicionador|decolorante|rubio|mechas|secado)/i.test(t)) {
     return '';
   }
 
@@ -385,7 +388,7 @@ function isLikelyGenericContactName(value) {
   if (!cleaned) return true;
   if (cleaned.length < 3) return true;
   if (/^(cliente|clienta|nuevo cliente|nueva clienta|sin nombre|sin apellido|nombre pendiente)$/i.test(t)) return true;
-  if (/(interesad|estimad|servicio|producto|curso|turno|alisado|depilacion|depilación|mechita|mechas|tintura|corte|cliente salon|cliente salon de belleza|consult|pregunt|hola|buen dia|buen día|gracias|quisiera|quiero|ampolla)/i.test(t)) return true;
+  if (/(interesad|estimad|servicio|producto|curso|turno|alisado|depilacion|depilación|mechita|mechas|tintura|corte|cliente salon|cliente salon de belleza|consult|pregunt|hola|buen dia|buen día|gracias|quisiera|quiero|ampolla|ampollas|botox|keratina|mascara|máscara|serum|sérum|lavado|peinado|brushing|color|masterclass|tratamiento|acondicionador|decolorante|rubio|secado)/i.test(t)) return true;
   return false;
 }
 
@@ -913,6 +916,159 @@ function buildContactNameUpdatedMessage(firstName = '', options = {}) {
   return nice
     ? `Gracias ${nice} 😊 Ya te registré correctamente. ¿En qué puedo ayudarte?`
     : `Gracias 😊 Ya te registré correctamente. ¿En qué puedo ayudarte?`;
+}
+
+const NAME_REPLY_AI_MAX_CHARS = Number(process.env.NAME_REPLY_AI_MAX_CHARS || 220);
+
+function extractNameFromMixedTextFast(text = '') {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return '';
+
+  const explicit = extractExplicitNameFromSnippet(raw);
+  if (explicit) return explicit;
+
+  const candidates = [];
+  const beforeComma = raw.split(/[\n,;:-]/).map((x) => cleanNameCandidate(x)).find(Boolean);
+  if (beforeComma) candidates.push(beforeComma);
+
+  const leadingWords = raw.match(/^([A-Za-zÁÉÍÓÚÑáéíóúñ' ]{2,60})(?:\s+\d|[,;:-]|$)/);
+  if (leadingWords) {
+    const cleaned = cleanNameCandidate(leadingWords[1]);
+    if (cleaned) candidates.push(cleaned);
+  }
+
+  return candidates.find((value) => value && !isLikelyGenericContactName(value)) || '';
+}
+
+function removeDetectedNameFromTextFast(text = '', explicitName = '') {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  const name = String(explicitName || '').trim();
+  if (!raw || !name) return '';
+
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let out = raw
+    .replace(new RegExp(`^(?:me llamo|mi nombre es|soy|habla)\\s+${escaped}\\b[\\s,.:;-]*`, 'i'), '')
+    .replace(new RegExp(`^${escaped}\\b[\\s,.:;-]*`, 'i'), '')
+    .trim();
+
+  return out;
+}
+
+function looksLikeNameCollectionRefusal(text = '') {
+  const t = normalize(text || '');
+  if (!t) return false;
+  return /(no quiero dar(?:te|le|lo)? mi nombre|prefiero no dar(?:te|le|lo)? mi nombre|prefiero no decir(?:te|le|lo)? mi nombre|no te lo quiero pasar|no quiero pasar(?:te|le)? mi nombre|sin nombre|dejalo asi|dejalo así|despues te lo paso|después te lo paso)/i.test(t);
+}
+
+async function detectInboundNameWithAI(text = '', context = {}) {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return { hasName: false, explicitName: '', remainingText: '', isRefusal: false, source: 'empty' };
+
+  const explicit = extractExplicitNameFromSnippet(raw);
+  if (explicit) {
+    return {
+      hasName: true,
+      explicitName: explicit,
+      remainingText: removeDetectedNameFromTextFast(raw, explicit),
+      isRefusal: false,
+      source: 'pattern',
+    };
+  }
+
+  const fastMixed = extractNameFromMixedTextFast(raw);
+  if (fastMixed && !looksLikeNameCollectionRefusal(raw)) {
+    const remainingFast = removeDetectedNameFromTextFast(raw, fastMixed);
+    const compact = raw.replace(/\s+/g, ' ').trim();
+    const compactWithoutName = remainingFast.replace(/\s+/g, ' ').trim();
+    const safeStandalone = looksLikeStandaloneNameAnswer(raw) || (!compactWithoutName && compact.length <= 80);
+    if (safeStandalone) {
+      return { hasName: true, explicitName: fastMixed, remainingText: compactWithoutName, isRefusal: false, source: 'fast' };
+    }
+  }
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Analizá la respuesta de una persona cuando un salón le pidió su nombre por WhatsApp. Devolvé SOLO JSON válido con estas claves:
+- has_name: boolean
+- explicit_name: string
+- remaining_text: string
+- is_refusal: boolean
+
+Reglas:
+- explicit_name debe contener solo el nombre real de la persona, en formato natural.
+- Si el texto contiene nombre y además otros datos o preguntas, separalos en remaining_text.
+- Si el texto NO aporta un nombre real, has_name debe ser false.
+- Rechazá como nombre palabras de belleza/comercial como botox, keratina, alisado, color, máscara, serum, ampollas, masterclass, producto, servicio, curso, turno y similares.
+- Si la persona se niega a dar el nombre o posterga pasarlo, marcá is_refusal=true.
+- No inventes nombres.`
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje: raw.slice(0, NAME_REPLY_AI_MAX_CHARS),
+            contexto_pendiente: String(context.pendingTopic || '').slice(0, 140),
+            nombre_perfil_whatsapp: String(context.profileName || '').slice(0, 80),
+          })
+        }
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const parsed = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const explicitName = cleanNameCandidate(parsed?.explicit_name || '');
+    const remainingText = String(parsed?.remaining_text || '').replace(/\s+/g, ' ').trim();
+    return {
+      hasName: !!parsed?.has_name && !!explicitName && !isLikelyGenericContactName(explicitName),
+      explicitName: explicitName && !isLikelyGenericContactName(explicitName) ? explicitName : '',
+      remainingText,
+      isRefusal: !!parsed?.is_refusal,
+      source: 'ai',
+    };
+  } catch {
+    return { hasName: false, explicitName: '', remainingText: '', isRefusal: looksLikeNameCollectionRefusal(raw), source: 'fallback' };
+  }
+}
+
+async function resolveInboundExplicitName(text = '', context = {}) {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return { hasName: false, explicitName: '', remainingText: '', isRefusal: false, source: 'empty' };
+
+  const explicit = extractExplicitNameFromSnippet(raw);
+  if (explicit) {
+    return { hasName: true, explicitName: explicit, remainingText: removeDetectedNameFromTextFast(raw, explicit), isRefusal: false, source: 'pattern' };
+  }
+
+  if (context?.pendingNameRequest) {
+    return detectInboundNameWithAI(raw, {
+      pendingTopic: context?.pendingTopic || context?.pendingNameRequest?.deferredText || '',
+      profileName: context?.profileName || '',
+    });
+  }
+
+  const cleanStandalone = cleanNameCandidate(raw);
+  if (cleanStandalone && looksLikeStandaloneNameAnswer(raw) && !isLikelyGenericContactName(cleanStandalone)) {
+    return { hasName: true, explicitName: cleanStandalone, remainingText: '', isRefusal: false, source: 'fast' };
+  }
+
+  return { hasName: false, explicitName: '', remainingText: '', isRefusal: false, source: 'none' };
+}
+
+function shouldAskContactNameFirst({ waId = '', text = '', explicitName = '', pendingNameRequest = null } = {}) {
+  if (pendingNameRequest?.awaiting) return false;
+  if (explicitName) return false;
+
+  const conv = ensureConv(waId);
+  const messageCount = Array.isArray(conv?.messages) ? conv.messages.length : 0;
+  if (messageCount !== 0) return false;
+
+  const raw = String(text || '').trim();
+  return !!raw;
 }
 
 function buildGoogleContactsNote(ctx = {}) {
@@ -7866,10 +8022,23 @@ lastCloseContext.set(waId, {
     });
 
     const pendingNameReq = getPendingContactNameRequest(waId);
-    const explicitNameAnswer = extractNameAnswer(text);
+    const inboundName = await resolveInboundExplicitName(text, {
+      pendingNameRequest: pendingNameReq,
+      pendingTopic: pendingNameReq?.deferredText || '',
+      profileName: name,
+    });
+    const explicitNameAnswer = inboundName?.explicitName || '';
 
     if (pendingNameReq?.awaiting) {
-      if (!explicitNameAnswer) {
+      if (!inboundName?.hasName) {
+        if (inboundName?.isRefusal) {
+          const refusalMsg = buildContactAskNameReminderMessage(pendingNameReq?.deferredText || text);
+          pushHistory(waId, "assistant", refusalMsg);
+          await sendWhatsAppText(phone, refusalMsg);
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
+
         const mergedDeferredText = mergeDeferredNameRequestText(
           pendingNameReq?.deferredText || '',
           text
@@ -7899,30 +8068,31 @@ lastCloseContext.set(waId, {
       const deferredText = String(pendingNameReq?.deferredText || '').trim();
       const deferredUserIntentText = String(pendingNameReq?.deferredUserIntentText || deferredText || '').trim();
       const deferredMediaMeta = pendingNameReq?.deferredMediaMeta || null;
+      const remainingAfterName = String(inboundName?.remainingText || '').trim();
+      const resumedText = mergeDeferredNameRequestText(deferredText, remainingAfterName);
+      const resumedUserIntentText = mergeDeferredNameRequestText(deferredUserIntentText, remainingAfterName);
 
       await syncIdentityEverywhere({ waId, phoneRaw, profileName: name, explicitName: explicitNameAnswer });
       updateLastCloseContext(waId, { explicitName: explicitNameAnswer, profileName: name || explicitNameAnswer });
       clearPendingContactNameRequest(waId);
 
-      if (looksLikeStandaloneNameAnswer(text)) {
-        if (deferredText) {
-          setOneShotReplyPrefix(phone, buildContactNameUpdatedMessage(explicitNameAnswer, { resumeOriginalRequest: true }));
-          text = deferredText;
-          userIntentText = deferredUserIntentText || deferredText;
-          mediaMeta = deferredMediaMeta || mediaMeta || null;
-          contactInfoFromText = extractContactInfo(text);
-          updateLastCloseContext(waId, {
-            explicitName: explicitNameAnswer,
-            lastUserText: text,
-            profileName: name || explicitNameAnswer,
-          });
-        } else {
-          const msgNameOk = buildContactNameUpdatedMessage(explicitNameAnswer);
-          pushHistory(waId, "assistant", msgNameOk);
-          await sendWhatsAppText(phone, msgNameOk);
-          scheduleInactivityFollowUp(waId, phone);
-          return;
-        }
+      if (resumedText) {
+        setOneShotReplyPrefix(phone, buildContactNameUpdatedMessage(explicitNameAnswer, { resumeOriginalRequest: true }));
+        text = resumedText;
+        userIntentText = resumedUserIntentText || resumedText;
+        mediaMeta = deferredMediaMeta || mediaMeta || null;
+        contactInfoFromText = extractContactInfo(text);
+        updateLastCloseContext(waId, {
+          explicitName: explicitNameAnswer,
+          lastUserText: text,
+          profileName: name || explicitNameAnswer,
+        });
+      } else {
+        const msgNameOk = buildContactNameUpdatedMessage(explicitNameAnswer);
+        pushHistory(waId, "assistant", msgNameOk);
+        await sendWhatsAppText(phone, msgNameOk);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
       }
     } else if (explicitNameAnswer && !isLikelyGenericContactName(explicitNameAnswer)) {
       await syncIdentityEverywhere({ waId, phoneRaw, profileName: name, explicitName: explicitNameAnswer });
@@ -7959,6 +8129,24 @@ lastCloseContext.set(waId, {
     }
 
     const knownIdentity = await resolveKnownContactIdentity({ waId, phoneRaw, profileName: name });
+    if (shouldAskContactNameFirst({ waId, text, explicitName: explicitNameAnswer, pendingNameRequest: pendingNameReq })) {
+      const deferredText = mergeDeferredNameRequestText(text, '');
+      setPendingContactNameRequest(waId, {
+        awaiting: true,
+        phoneRaw,
+        profileName: name,
+        deferredText,
+        deferredUserIntentText: mergeDeferredNameRequestText(userIntentText || text, ''),
+        deferredMediaMeta: mediaMeta || null,
+        reminderCount: 0,
+      });
+      const askNameMsg = buildContactAskNameMessage(deferredText || text);
+      pushHistory(waId, "assistant", askNameMsg);
+      await sendWhatsAppText(phone, askNameMsg);
+      scheduleInactivityFollowUp(waId, phone);
+      return;
+    }
+
     if (!pendingNameReq?.awaiting && knownIdentity?.shouldAskName && !explicitNameAnswer) {
       const deferredText = mergeDeferredNameRequestText(text, '');
       setPendingContactNameRequest(waId, {
