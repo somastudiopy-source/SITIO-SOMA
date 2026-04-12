@@ -2783,6 +2783,25 @@ La seña se solicita recién después de confirmar disponibilidad con la estilis
   );
 }
 
+function buildInitialCommercialTurnoMessage(servicio = '') {
+  return `Perfecto 😊
+
+${servicio ? `Servicio: ${servicio}
+
+` : ''}Primero trabajo con estos horarios comerciales de lunes a sábado:
+
+• 10:00
+• 11:00
+• 12:00
+• 17:00
+• 18:00
+• 19:00
+• 20:00
+
+Decime qué día y cuál de esos horarios le queda mejor.
+Si ninguno le sirve, me avisa y ahí reviso otras opciones.`;
+}
+
 function pedirDatosRegistroTurnoBlock() {
   return (
 `Perfecto 😊
@@ -3688,6 +3707,31 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
       stylist_decision_note: rawText || (action === 'suggest' ? 'La estilista propuso otro horario' : 'La estilista no puede en ese horario'),
       mark_stylist_decision_at: true,
     });
+
+    if (action === 'decline') {
+      await saveAppointmentDraft(appt.wa_id, appt.contact_phone || appt.wa_phone, {
+        appointment_id: null,
+        servicio: appt.service_name || '',
+        fecha: appt.appointment_date ? String(appt.appointment_date).slice(0, 10) : '',
+        hora: '',
+        duracion_min: Number(appt.duration_min || 60) || 60,
+        notas: '',
+        cliente_full: appt.client_name || '',
+        telefono_contacto: normalizePhone(appt.contact_phone || appt.wa_phone || ''),
+        payment_status: 'not_paid',
+        payment_amount: null,
+        payment_sender: '',
+        payment_receiver: '',
+        payment_proof_text: '',
+        payment_proof_media_id: '',
+        payment_proof_filename: '',
+        awaiting_contact: false,
+        flow_step: appt.appointment_date ? 'awaiting_time' : 'awaiting_date',
+        last_intent: 'book_appointment',
+        last_service_name: appt.service_name || '',
+        availability_mode: normalizeAvailabilityMode(appt.availability_mode || 'commercial'),
+      });
+    }
 
     if (action === 'suggest' && suggestionText) {
       setPendingStylistSuggestion(appt.wa_id, {
@@ -9145,6 +9189,29 @@ Cuando quiera retomarlo, me escribe y le paso nuevamente los horarios disponible
     const lastKnownService = getLastKnownService(waId, pendingDraft);
     const lastBookedTurno = await getLastBookedAppointmentForUser({ waId, waPhone: phone });
 
+    if (pendingDraft && isWarmAffirmativeReply(text) && lastAssistantWasQuestion(waId)) {
+      let resumeDraft = await applyCatalogServiceDataToTurno({
+        ...pendingDraft,
+        servicio: pendingDraft?.servicio || pendingDraft?.last_service_name || lastKnownService?.nombre || '',
+        last_service_name: pendingDraft?.last_service_name || pendingDraft?.servicio || lastKnownService?.nombre || '',
+        duracion_min: Number(pendingDraft?.duracion_min || lastBookedTurno?.duracion_min || 60) || 60,
+      });
+      resumeDraft.flow_step = inferDraftFlowStep(resumeDraft);
+      resumeDraft.last_intent = 'book_appointment';
+      resumeDraft.last_service_name = resumeDraft.servicio || resumeDraft.last_service_name || '';
+      await saveAppointmentDraft(waId, phone, resumeDraft);
+      updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+
+      if (!resumeDraft.servicio || !resumeDraft.fecha || !resumeDraft.hora || !resumeDraft.cliente_full || !resumeDraft.telefono_contacto) {
+        await askForMissingTurnoData(resumeDraft);
+        return;
+      }
+
+      const resumedResult = await finalizeAppointmentFlow({ waId, phone, name, merged: resumeDraft });
+      const resumedHandled = await respondFinalizeResult(resumeDraft, resumedResult);
+      if (resumedHandled) return;
+    }
+
     // ✅ Si el cliente responde afirmativamente a una propuesta de turno y ya veníamos hablando de un servicio,
     // iniciamos el flujo sin volver a preguntar el servicio.
     if (!pendingDraft && lastKnownService?.nombre && isWarmAffirmativeReply(text) && lastAssistantWasQuestion(waId)) {
@@ -9294,12 +9361,14 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
       }
 
       if (!base?.fecha && !base?.hora) {
-        const msgFalt = await buildWeeklyAvailabilityMessage({
-          servicio: servicioTxt,
-          durationMin: Number(base?.duracion_min || 60) || 60,
-          limitDays: 6,
-          availabilityMode,
-        });
+        const msgFalt = availabilityMode === 'commercial'
+          ? buildInitialCommercialTurnoMessage(servicioTxt)
+          : await buildWeeklyAvailabilityMessage({
+              servicio: servicioTxt,
+              durationMin: Number(base?.duracion_min || 60) || 60,
+              limitDays: 6,
+              availabilityMode,
+            });
         pushHistory(waId, "assistant", msgFalt);
         await sendWhatsAppText(phone, msgFalt);
         scheduleInactivityFollowUp(waId, phone);
