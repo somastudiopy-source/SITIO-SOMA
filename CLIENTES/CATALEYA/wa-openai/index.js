@@ -781,6 +781,7 @@ function hasGoogleContactsSyncEnabled() {
 }
 
 const pendingContactNameRequests = new Map();
+const oneShotReplyPrefixByPhone = new Map();
 const contactIdentityCache = new Map();
 const CONTACT_IDENTITY_CACHE_MS = Number(process.env.CONTACT_IDENTITY_CACHE_MS || 10 * 60 * 1000);
 
@@ -820,6 +821,27 @@ function clearPendingContactNameRequest(waId) {
   if (waId) pendingContactNameRequests.delete(waId);
 }
 
+function getReplyPrefixPhoneKey(phone = '') {
+  const raw = String(phone || '').trim();
+  if (!raw) return '';
+  return normalizePhone(raw) || normalizeWhatsAppRecipient(raw) || raw.replace(/[^\d]/g, '');
+}
+
+function setOneShotReplyPrefix(phone = '', prefix = '') {
+  const key = getReplyPrefixPhoneKey(phone);
+  const value = String(prefix || '').trim();
+  if (!key || !value) return;
+  oneShotReplyPrefixByPhone.set(key, value);
+}
+
+function consumeOneShotReplyPrefix(phone = '') {
+  const key = getReplyPrefixPhoneKey(phone);
+  if (!key) return '';
+  const value = oneShotReplyPrefixByPhone.get(key) || '';
+  if (value) oneShotReplyPrefixByPhone.delete(key);
+  return value;
+}
+
 function extractNameAnswer(text = '') {
   const explicit = extractExplicitNameFromSnippet(text);
   if (explicit) return explicit;
@@ -834,14 +856,60 @@ function looksLikeStandaloneNameAnswer(text = '') {
   return compact.length <= 60 && !/[?.!,;:]/.test(compact.replace(/[ÁÉÍÓÚÑáéíóúñ' -]/g, ''));
 }
 
-function buildContactAskNameMessage() {
-  return `Buen día 😊 No te tengo agendada todavía con un nombre correcto.
-
-¿Me pasás por favor tu nombre así te registro bien y puedo seguir tu historial?`;
+function cleanDeferredNameRequestText(text = '') {
+  return String(text || '')
+    .replace(/\s+/g, ' ')
+    .replace(/^(hola|holi|holis|buen dia|buen día|buenas|buenas tardes|buenas noches|que tal|qué tal|como va|cómo va)\b[\s,.:;!-]*/i, '')
+    .trim();
 }
 
-function buildContactNameUpdatedMessage(firstName = '') {
+function mergeDeferredNameRequestText(base = '', extra = '') {
+  const parts = [];
+  const seen = new Set();
+
+  for (const raw of [base, extra]) {
+    const clean = cleanDeferredNameRequestText(raw);
+    if (!clean) continue;
+    const key = normalize(clean);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    parts.push(clean);
+  }
+
+  return parts.join('\n').trim();
+}
+
+function buildContactPendingTopicLabel(text = '') {
+  let clean = cleanDeferredNameRequestText(text);
+  if (!clean) return '';
+  clean = clean.replace(/[¿?]+/g, '').trim();
+  if (clean.length > 80) clean = `${clean.slice(0, 77).trim()}...`;
+  return clean ? `*${clean}*` : '';
+}
+
+function buildContactAskNameMessage(contextText = '') {
+  const topic = buildContactPendingTopicLabel(contextText);
+  return topic
+    ? `Buen día 😊 No te tengo agendada todavía.
+
+¿Te podría pedir por favor tu nombre así te registro bien y seguimos con ${topic}? Así también podés ver nuestras historias y publicaciones.`
+    : `Buen día 😊 No te tengo agendada todavía.
+
+¿Te podría pedir por favor tu nombre así te registro bien? Así también podés ver nuestras historias y publicaciones.`;
+}
+
+function buildContactAskNameReminderMessage(contextText = '') {
+  const topic = buildContactPendingTopicLabel(contextText);
+  return topic
+    ? `Antes de seguir con ${topic}, ¿me pasás por favor tu nombre así te registro bien? 😊`
+    : `Antes de seguir, ¿me pasás por favor tu nombre así te registro bien? 😊`;
+}
+
+function buildContactNameUpdatedMessage(firstName = '', options = {}) {
   const nice = titleCaseName(firstName || '');
+  if (options?.resumeOriginalRequest) {
+    return nice ? `Gracias ${nice} 😊` : `Gracias 😊`;
+  }
   return nice
     ? `Gracias ${nice} 😊 Ya te registré correctamente. ¿En qué puedo ayudarte?`
     : `Gracias 😊 Ya te registré correctamente. ¿En qué puedo ayudarte?`;
@@ -6943,7 +7011,13 @@ Respondé SOLO JSON.`
 
 // ===================== WHATSAPP SEND =====================
 async function sendWhatsAppText(to, text) {
-const body = String(text || "");
+let body = String(text || "");
+const oneShotPrefix = consumeOneShotReplyPrefix(to);
+if (oneShotPrefix) {
+  body = body ? `${oneShotPrefix}
+
+${body}`.trim() : String(oneShotPrefix || '').trim();
+}
 const dedupKey = `${to}::${body}`;
 const now = Date.now();
 const prevTs = lastSentOutByPeer.get(dedupKey) || 0;
@@ -6955,7 +7029,7 @@ lastSentOutByPeer.set(dedupKey, now);
 
   const resp = await axios.post(
     `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
-    { messaging_product: "whatsapp", to, text: { body: text } },
+    { messaging_product: "whatsapp", to, text: { body } },
     {
       headers: {
         Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
@@ -6971,7 +7045,7 @@ lastSentOutByPeer.set(dedupKey, now);
     direction: "out",
     wa_peer: to,
     name: null,
-    text,
+    text: body,
     msg_type: "text",
     wa_msg_id,
     raw: resp?.data || {},
@@ -7796,25 +7870,59 @@ lastCloseContext.set(waId, {
 
     if (pendingNameReq?.awaiting) {
       if (!explicitNameAnswer) {
-        const askAgain = `No llegué a tomar bien el nombre 😊
+        const mergedDeferredText = mergeDeferredNameRequestText(
+          pendingNameReq?.deferredText || '',
+          text
+        );
+        const mergedDeferredUserIntentText = mergeDeferredNameRequestText(
+          pendingNameReq?.deferredUserIntentText || pendingNameReq?.deferredText || '',
+          userIntentText || text
+        );
 
-¿Me lo pasa por favor como nombre y apellido?`;
+        setPendingContactNameRequest(waId, {
+          awaiting: true,
+          phoneRaw,
+          profileName: name,
+          deferredText: mergedDeferredText || pendingNameReq?.deferredText || '',
+          deferredUserIntentText: mergedDeferredUserIntentText || pendingNameReq?.deferredUserIntentText || '',
+          deferredMediaMeta: pendingNameReq?.deferredMediaMeta || mediaMeta || null,
+          reminderCount: Number(pendingNameReq?.reminderCount || 0) + 1,
+        });
+
+        const askAgain = buildContactAskNameReminderMessage(mergedDeferredText || pendingNameReq?.deferredText || text);
         pushHistory(waId, "assistant", askAgain);
         await sendWhatsAppText(phone, askAgain);
         scheduleInactivityFollowUp(waId, phone);
         return;
       }
 
+      const deferredText = String(pendingNameReq?.deferredText || '').trim();
+      const deferredUserIntentText = String(pendingNameReq?.deferredUserIntentText || deferredText || '').trim();
+      const deferredMediaMeta = pendingNameReq?.deferredMediaMeta || null;
+
       await syncIdentityEverywhere({ waId, phoneRaw, profileName: name, explicitName: explicitNameAnswer });
       updateLastCloseContext(waId, { explicitName: explicitNameAnswer, profileName: name || explicitNameAnswer });
       clearPendingContactNameRequest(waId);
 
       if (looksLikeStandaloneNameAnswer(text)) {
-        const msgNameOk = buildContactNameUpdatedMessage(explicitNameAnswer);
-        pushHistory(waId, "assistant", msgNameOk);
-        await sendWhatsAppText(phone, msgNameOk);
-        scheduleInactivityFollowUp(waId, phone);
-        return;
+        if (deferredText) {
+          setOneShotReplyPrefix(phone, buildContactNameUpdatedMessage(explicitNameAnswer, { resumeOriginalRequest: true }));
+          text = deferredText;
+          userIntentText = deferredUserIntentText || deferredText;
+          mediaMeta = deferredMediaMeta || mediaMeta || null;
+          contactInfoFromText = extractContactInfo(text);
+          updateLastCloseContext(waId, {
+            explicitName: explicitNameAnswer,
+            lastUserText: text,
+            profileName: name || explicitNameAnswer,
+          });
+        } else {
+          const msgNameOk = buildContactNameUpdatedMessage(explicitNameAnswer);
+          pushHistory(waId, "assistant", msgNameOk);
+          await sendWhatsAppText(phone, msgNameOk);
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
       }
     } else if (explicitNameAnswer && !isLikelyGenericContactName(explicitNameAnswer)) {
       await syncIdentityEverywhere({ waId, phoneRaw, profileName: name, explicitName: explicitNameAnswer });
@@ -7850,19 +7958,28 @@ lastCloseContext.set(waId, {
       }
     }
 
-    if (shouldUseAmbiguousBridgeMessage({ waId, text })) {
-      pushHistory(waId, "assistant", AMBIGUOUS_BRIDGE_MESSAGE);
-      await sendWhatsAppText(phone, AMBIGUOUS_BRIDGE_MESSAGE);
+    const knownIdentity = await resolveKnownContactIdentity({ waId, phoneRaw, profileName: name });
+    if (!pendingNameReq?.awaiting && knownIdentity?.shouldAskName && !explicitNameAnswer) {
+      const deferredText = mergeDeferredNameRequestText(text, '');
+      setPendingContactNameRequest(waId, {
+        awaiting: true,
+        phoneRaw,
+        profileName: name,
+        deferredText,
+        deferredUserIntentText: mergeDeferredNameRequestText(userIntentText || text, ''),
+        deferredMediaMeta: mediaMeta || null,
+        reminderCount: 0,
+      });
+      const askNameMsg = buildContactAskNameMessage(deferredText || text);
+      pushHistory(waId, "assistant", askNameMsg);
+      await sendWhatsAppText(phone, askNameMsg);
       scheduleInactivityFollowUp(waId, phone);
       return;
     }
 
-    const knownIdentity = await resolveKnownContactIdentity({ waId, phoneRaw, profileName: name });
-    if (!pendingNameReq?.awaiting && knownIdentity?.shouldAskName && !explicitNameAnswer) {
-      setPendingContactNameRequest(waId, { awaiting: true, phoneRaw, profileName: name });
-      const askNameMsg = buildContactAskNameMessage();
-      pushHistory(waId, "assistant", askNameMsg);
-      await sendWhatsAppText(phone, askNameMsg);
+    if (shouldUseAmbiguousBridgeMessage({ waId, text })) {
+      pushHistory(waId, "assistant", AMBIGUOUS_BRIDGE_MESSAGE);
+      await sendWhatsAppText(phone, AMBIGUOUS_BRIDGE_MESSAGE);
       scheduleInactivityFollowUp(waId, phone);
       return;
     }
