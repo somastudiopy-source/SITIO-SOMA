@@ -150,6 +150,7 @@ async function ensureAppointmentTables() {
     CREATE TABLE IF NOT EXISTS appointment_drafts (
       wa_id TEXT PRIMARY KEY,
       wa_phone TEXT NOT NULL,
+      appointment_id BIGINT,
       client_name TEXT,
       contact_phone TEXT,
       service_name TEXT,
@@ -158,6 +159,7 @@ async function ensureAppointmentTables() {
       appointment_time TIME,
       duration_min INTEGER NOT NULL DEFAULT 60,
       wants_color_confirmation BOOLEAN NOT NULL DEFAULT FALSE,
+      availability_mode TEXT NOT NULL DEFAULT 'commercial',
       payment_status TEXT NOT NULL DEFAULT 'not_paid',
       payment_amount NUMERIC(10,2),
       payment_sender TEXT,
@@ -173,9 +175,12 @@ async function ensureAppointmentTables() {
     )
   `);
 
+  await db.query(`ALTER TABLE appointment_drafts ADD COLUMN IF NOT EXISTS appointment_id BIGINT`);
   await db.query(`ALTER TABLE appointment_drafts ADD COLUMN IF NOT EXISTS flow_step TEXT`);
   await db.query(`ALTER TABLE appointment_drafts ADD COLUMN IF NOT EXISTS last_intent TEXT`);
   await db.query(`ALTER TABLE appointment_drafts ADD COLUMN IF NOT EXISTS last_service_name TEXT`);
+  await db.query(`ALTER TABLE appointment_drafts ADD COLUMN IF NOT EXISTS availability_mode TEXT`);
+  await db.query(`UPDATE appointment_drafts SET availability_mode = 'commercial' WHERE availability_mode IS NULL OR TRIM(availability_mode) = ''`);
 
   await db.query(`
     CREATE TABLE IF NOT EXISTS appointments (
@@ -199,7 +204,10 @@ async function ensureAppointmentTables() {
       payment_proof_filename TEXT,
       calendar_event_id TEXT,
       is_color_service BOOLEAN NOT NULL DEFAULT FALSE,
+      availability_mode TEXT NOT NULL DEFAULT 'commercial',
       stylist_notified_at TIMESTAMPTZ,
+      stylist_decision_at TIMESTAMPTZ,
+      stylist_decision_note TEXT,
       reminder_client_24h_at TIMESTAMPTZ,
       reminder_client_2h_at TIMESTAMPTZ,
       reminder_stylist_24h_at TIMESTAMPTZ,
@@ -208,6 +216,11 @@ async function ensureAppointmentTables() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+
+  await db.query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS availability_mode TEXT`);
+  await db.query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS stylist_decision_at TIMESTAMPTZ`);
+  await db.query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS stylist_decision_note TEXT`);
+  await db.query(`UPDATE appointments SET availability_mode = 'commercial' WHERE availability_mode IS NULL OR TRIM(availability_mode) = ''`);
 
   await db.query(`
     CREATE TABLE IF NOT EXISTS appointment_notifications (
@@ -731,9 +744,8 @@ const DRIVE_FOLDER_ID = "1pKCqh1HEvQaI6XQ85ST8yvzxYWRXpxM1";
 const TIMEZONE = "America/Argentina/Salta";
 
 const WHATSAPP_TEMPLATE_LANGUAGE = process.env.WHATSAPP_TEMPLATE_LANGUAGE || "es_AR";
-const TEMPLATE_RECORDATORIO_CLIENTE = process.env.TEMPLATE_RECORDATORIO_CLIENTE || "recordatorio_turno_cataleya";
-const TEMPLATE_ALERTA_PELUQUERA = process.env.TEMPLATE_ALERTA_PELUQUERA || "alerta_turno_proximo";
-const TEMPLATE_NUEVO_TURNO_PELUQUERA = process.env.TEMPLATE_NUEVO_TURNO_PELUQUERA || "nuevo_turno_peluquera";
+const TEMPLATE_NUEVO_TURNO_PELUQUERA = process.env.TEMPLATE_NUEVO_TURNO_PELUQUERA || "consulta_disponibilidad_peluquera";
+const TEMPLATE_TURNO_CONFIRMADO_PELUQUERA = process.env.TEMPLATE_TURNO_CONFIRMADO_PELUQUERA || "turno_confirmado_peluquera";
 const STYLIST_NOTIFY_PHONE_RAW = process.env.STYLIST_NOTIFY_PHONE || "3868 466370";
 const APPOINTMENT_TEMPLATE_SCAN_MS = Number(process.env.APPOINTMENT_TEMPLATE_SCAN_MS || 60000);
 
@@ -2027,13 +2039,13 @@ Ofrecés:
 TURNOS:
 - Información de turnos (siempre):
   - Estilista: Flavia Rueda.
-  - Horarios de turnos: Lunes a Sábados de 10 a 12 hs y de 17 a 20 hs.
-  - Para CONFIRMAR TURNO, se requiere seña obligatoria de $10.000. Si no lo abona, no se guardará el turno.
+  - Primero ofrecer SOLO horarios comerciales de lunes a sábados: 10:00, 11:00, 12:00, 17:00, 18:00, 19:00 y 20:00.
+  - Si el cliente dice que ninguno de esos le sirve, recién ahí abrir la franja especial de siesta: 14:00, 15:00 y 16:00.
+  - El orden correcto es: elegir servicio + día + horario + datos de contacto -> consultar con la estilista -> si la estilista acepta, recién ahí pedir la seña obligatoria de $10.000 -> cuando la seña esté validada, el turno queda confirmado.
   - Alias para transferir: Cataleya178
   sale a nombre Monica Pacheco. Luego debe enviar foto/captura del comprobante.
-
-  - Si el cliente pide turno para color/tintura/teñirse/retocar: luego de elegir día y horario, responder que queda en confirmar y que se consulta con la estilista.
-  - Al registrar un turno, solicitar nombre completo y teléfono de contacto. Si ya pagó seña, marcar como SEÑADO.
+  - No digas que el turno está reservado ni confirmado antes de que la estilista acepte y la seña quede validada.
+  - Al registrar un turno, solicitar nombre completo y teléfono de contacto.
 - No inventes precios ni servicios: solo los que figuran en el Excel de servicios. 
 - NO se ofrece lifting de pestañas, cejas, perfilado, uñas, limpiezas faciales ni otros servicios fuera del Excel.
 
@@ -2681,28 +2693,95 @@ const TURNOS_HEADERS = [
 
 // Estado para reserva en 2 o más mensajes (si el cliente responde solo fecha/hora, igual agenda)
 const pendingTurnos = new Map(); // waId -> { fecha, hora, servicio, duracion_min, notas }
+const pendingStylistSuggestions = new Map();
+const STYLIST_SUGGESTION_TTL_MS = Number(process.env.STYLIST_SUGGESTION_TTL_MS || 12 * 60 * 60 * 1000);
+
+function getPendingStylistSuggestion(waId) {
+  const row = pendingStylistSuggestions.get(waId);
+  if (!row) return null;
+  if ((Date.now() - Number(row.ts || 0)) > STYLIST_SUGGESTION_TTL_MS) {
+    pendingStylistSuggestions.delete(waId);
+    return null;
+  }
+  return row;
+}
+
+function setPendingStylistSuggestion(waId, patch = {}) {
+  if (!waId) return null;
+  const next = { ...(patch || {}), ts: Date.now() };
+  pendingStylistSuggestions.set(waId, next);
+  return next;
+}
+
+function clearPendingStylistSuggestion(waId) {
+  if (waId) pendingStylistSuggestions.delete(waId);
+}
 
 // ===================== ✅ INFO FIJA DE TURNOS (NO CAMBIAR ARQUITECTURA) =====================
 const TURNOS_STYLIST_NAME = "Flavia Rueda";
-const TURNOS_HORARIOS_TXT = "Lunes a Sábados de 10 a 12 hs y de 17 a 20 hs";
+const TURNOS_HORARIOS_TXT = "Lunes a Sábados en horarios comerciales de 10, 11, 12, 17, 18, 19 y 20 hs";
 const TURNOS_SENA_TXT = "$10.000";
 const TURNOS_ALIAS = "Cataleya178";
 const TURNOS_ALIAS_TITULAR = "Monica Pacheco";
-const TURNOS_ALLOWED_BLOCKS = [
-  { label: "mañana", start: "10:00", end: "12:00" },
-  { label: "tarde", start: "17:00", end: "20:00" },
+const TURNOS_ALLOWED_BLOCKS_COMMERCIAL = [
+  { label: "mañana", start: "10:00", end: "13:00" },
+  { label: "tarde", start: "17:00", end: "21:00" },
 ];
+const TURNOS_ALLOWED_BLOCKS_SIESTA = [
+  { label: "siesta", start: "14:00", end: "17:00" },
+];
+const TURNOS_ALLOWED_START_TIMES_COMMERCIAL = ["10:00", "11:00", "12:00", "17:00", "18:00", "19:00", "20:00"];
+const TURNOS_ALLOWED_START_TIMES_SIESTA = ["14:00", "15:00", "16:00"];
+
+function normalizeAvailabilityMode(mode) {
+  return String(mode || '').trim().toLowerCase() === 'siesta' ? 'siesta' : 'commercial';
+}
+
+function getTurnoAllowedBlocks(mode = 'commercial') {
+  const normalized = normalizeAvailabilityMode(mode);
+  return normalized === 'siesta' ? TURNOS_ALLOWED_BLOCKS_SIESTA : TURNOS_ALLOWED_BLOCKS_COMMERCIAL;
+}
+
+function getTurnoAllowedStartTimes(mode = 'commercial') {
+  const normalized = normalizeAvailabilityMode(mode);
+  return normalized === 'siesta'
+    ? TURNOS_ALLOWED_START_TIMES_SIESTA
+    : TURNOS_ALLOWED_START_TIMES_COMMERCIAL;
+}
+
+function isHourAllowedForAvailabilityMode(timeHM, mode = 'commercial') {
+  const safeHM = normalizeHourHM(timeHM);
+  if (!safeHM) return false;
+  return getTurnoAllowedStartTimes(mode).includes(safeHM);
+}
+
+function textRequestsSiestaAvailability(text = '') {
+  const t = normalize(text || '');
+  if (!t) return false;
+  return /(ninguno de esos horarios|ninguno me sirve|no me sirve ninguno|no me sirven esos horarios|no puedo en esos horarios|no puedo ni a la manana ni a la tarde|no puedo ni a la mañana ni a la tarde|tenes a la siesta|tenes horario de siesta|tienen horario de siesta|siesta|14 hs|15 hs|16 hs|a las 14|a las 15|a las 16)/i.test(t);
+}
+
+function buildCommercialHoursBridge() {
+  return 'Primero trabajo con los horarios comerciales de 10, 11, 12, 17, 18, 19 y 20 hs. Si ninguno de esos le sirve, también puedo revisar una franja especial de siesta a las 14, 15 o 16 hs 😊';
+}
 
 function turnoInfoBlock() {
   return (
 `✨ Turnos en Cataleya
 
 Profesional: ${TURNOS_STYLIST_NAME}
-📅 Horarios para turnos:
-• 10:00 a 12:00
-• 17:00 a 20:00
+📅 Horarios comerciales para turnos:
+• 10:00
+• 11:00
+• 12:00
+• 17:00
+• 18:00
+• 19:00
+• 20:00
 
-Para confirmar el turno se solicita una seña de ${TURNOS_SENA_TXT}.`
+Si ninguno de esos horarios le sirve, también puedo revisar una franja especial de siesta: 14:00, 15:00 o 16:00.
+
+La seña se solicita recién después de confirmar disponibilidad con la estilista.`
   );
 }
 
@@ -2936,6 +3015,7 @@ function isExpectedReceiver(receiver) {
 function mapDraftRowToTurno(row) {
   if (!row) return null;
   return {
+    appointment_id: row.appointment_id == null ? null : Number(row.appointment_id),
     fecha: row.appointment_date ? String(row.appointment_date).slice(0, 10) : "",
     hora: row.appointment_time ? String(row.appointment_time).slice(0, 5) : "",
     servicio: row.service_name || "",
@@ -2943,6 +3023,7 @@ function mapDraftRowToTurno(row) {
     notas: row.service_notes || "",
     cliente_full: row.client_name || "",
     telefono_contacto: row.contact_phone || row.wa_phone || "",
+    availability_mode: normalizeAvailabilityMode(row.availability_mode || 'commercial'),
     payment_status: row.payment_status || "not_paid",
     payment_amount: row.payment_amount == null ? null : Number(row.payment_amount),
     payment_sender: row.payment_sender || "",
@@ -2967,16 +3048,17 @@ async function saveAppointmentDraft(waId, waPhone, draft) {
   const d = draft || {};
   await db.query(
     `INSERT INTO appointment_drafts (
-      wa_id, wa_phone, client_name, contact_phone, service_name, service_notes,
+      wa_id, wa_phone, appointment_id, client_name, contact_phone, service_name, service_notes,
       appointment_date, appointment_time, duration_min, wants_color_confirmation,
-      payment_status, payment_amount, payment_sender, payment_receiver,
+      availability_mode, payment_status, payment_amount, payment_sender, payment_receiver,
       payment_proof_text, payment_proof_media_id, payment_proof_filename,
       awaiting_contact, flow_step, last_intent, last_service_name, updated_at
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW()
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NOW()
     )
     ON CONFLICT (wa_id) DO UPDATE SET
       wa_phone = EXCLUDED.wa_phone,
+      appointment_id = EXCLUDED.appointment_id,
       client_name = EXCLUDED.client_name,
       contact_phone = EXCLUDED.contact_phone,
       service_name = EXCLUDED.service_name,
@@ -2985,6 +3067,7 @@ async function saveAppointmentDraft(waId, waPhone, draft) {
       appointment_time = EXCLUDED.appointment_time,
       duration_min = EXCLUDED.duration_min,
       wants_color_confirmation = EXCLUDED.wants_color_confirmation,
+      availability_mode = EXCLUDED.availability_mode,
       payment_status = EXCLUDED.payment_status,
       payment_amount = EXCLUDED.payment_amount,
       payment_sender = EXCLUDED.payment_sender,
@@ -3000,6 +3083,7 @@ async function saveAppointmentDraft(waId, waPhone, draft) {
     [
       waId,
       normalizePhone(waPhone || d.telefono_contacto || ""),
+      d.appointment_id == null ? null : Number(d.appointment_id),
       d.cliente_full || null,
       normalizePhone(d.telefono_contacto || waPhone || "") || null,
       d.servicio || null,
@@ -3008,6 +3092,7 @@ async function saveAppointmentDraft(waId, waPhone, draft) {
       d.hora || null,
       Number(d.duracion_min || 60) || 60,
       !!d.wants_color_confirmation,
+      normalizeAvailabilityMode(d.availability_mode || 'commercial'),
       d.payment_status || "not_paid",
       d.payment_amount == null ? null : Number(d.payment_amount),
       d.payment_sender || null,
@@ -3028,7 +3113,9 @@ async function deleteAppointmentDraft(waId) {
 }
 
 function buildPaymentPendingMessage() {
-  return `Para confirmar el turno se solicita una seña de ${TURNOS_SENA_TXT}.
+  return `La estilista ya confirmó el horario 😊
+
+Para terminar de confirmar el turno se solicita una seña de ${TURNOS_SENA_TXT}.
 
 💳 Datos para la transferencia
 
@@ -3139,10 +3226,10 @@ async function createAppointmentRecord({ waId, waPhone, merged, status, calendar
       appointment_date, appointment_time, duration_min, status, payment_status,
       payment_amount, payment_sender, payment_receiver, payment_proof_text,
       payment_proof_media_id, payment_proof_filename, calendar_event_id, is_color_service,
-      created_at, updated_at
+      availability_mode, created_at, updated_at
     ) VALUES (
       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
-      $12,$13,$14,$15,$16,$17,$18,$19,NOW(),NOW()
+      $12,$13,$14,$15,$16,$17,$18,$19,$20,NOW(),NOW()
     ) RETURNING id`,
     [
       waId,
@@ -3164,6 +3251,7 @@ async function createAppointmentRecord({ waId, waPhone, merged, status, calendar
       merged.payment_proof_filename || null,
       calendarEventId || null,
       isColorOrTinturaService(merged.servicio || merged.notas || ""),
+      normalizeAvailabilityMode(merged.availability_mode || 'commercial'),
     ]
   );
   return r.rows[0];
@@ -3198,6 +3286,311 @@ async function getAppointmentRowById(appointmentId) {
   return r.rows[0] ? buildAppointmentData(r.rows[0]) : null;
 }
 
+function mapAppointmentRowToDraft(row) {
+  if (!row) return null;
+  return {
+    appointment_id: row.id == null ? null : Number(row.id),
+    fecha: row.appointment_date ? String(row.appointment_date).slice(0, 10) : '',
+    hora: row.appointment_time ? String(row.appointment_time).slice(0, 5) : '',
+    servicio: row.service_name || '',
+    duracion_min: Number(row.duration_min || 60) || 60,
+    notas: row.service_notes || '',
+    cliente_full: row.client_name || '',
+    telefono_contacto: row.contact_phone || row.wa_phone || '',
+    availability_mode: normalizeAvailabilityMode(row.availability_mode || 'commercial'),
+    payment_status: row.payment_status || 'not_paid',
+    payment_amount: row.payment_amount == null ? null : Number(row.payment_amount),
+    payment_sender: row.payment_sender || '',
+    payment_receiver: row.payment_receiver || '',
+    payment_proof_text: row.payment_proof_text || '',
+    payment_proof_media_id: row.payment_proof_media_id || '',
+    payment_proof_filename: row.payment_proof_filename || '',
+    awaiting_contact: false,
+    flow_step: 'awaiting_payment',
+    last_intent: 'book_appointment',
+    last_service_name: row.service_name || '',
+    wa_phone: row.wa_phone || '',
+  };
+}
+
+async function getAppointmentById(appointmentId) {
+  if (!appointmentId) return null;
+  const r = await db.query(`SELECT * FROM appointments WHERE id = $1 LIMIT 1`, [Number(appointmentId)]);
+  return r.rows?.[0] || null;
+}
+
+async function getLatestAppointmentForClient({ waId, phone, statuses = [] } = {}) {
+  const filters = [];
+  const values = [];
+  let idx = 1;
+
+  if (waId) {
+    filters.push(`wa_id = $${idx++}`);
+    values.push(String(waId));
+  }
+
+  const phoneNorm = normalizePhone(phone || '');
+  if (phoneNorm) {
+    filters.push(`(wa_phone = $${idx} OR contact_phone = $${idx})`);
+    values.push(phoneNorm);
+    idx += 1;
+  }
+
+  if (!filters.length) return null;
+
+  let sql = `SELECT * FROM appointments WHERE (${filters.join(' OR ')})`;
+  if (Array.isArray(statuses) && statuses.length) {
+    const placeholders = statuses.map(() => `$${idx++}`);
+    sql += ` AND status IN (${placeholders.join(', ')})`;
+    values.push(...statuses.map((x) => String(x)));
+  }
+  sql += ` ORDER BY updated_at DESC, created_at DESC LIMIT 1`;
+
+  const r = await db.query(sql, values);
+  return r.rows?.[0] || null;
+}
+
+async function findAppointmentByNotificationMessageId(messageId) {
+  if (!messageId) return null;
+  const r = await db.query(
+    `SELECT a.*
+       FROM appointment_notifications n
+       JOIN appointments a ON a.id = n.appointment_id
+      WHERE n.wa_message_id = $1
+      ORDER BY n.sent_at DESC
+      LIMIT 1`,
+    [String(messageId)]
+  );
+  return r.rows?.[0] || null;
+}
+
+async function updateAppointmentStatus(appointmentId, patch = {}) {
+  if (!appointmentId) return null;
+  const allowed = {
+    status: patch.status,
+    payment_status: patch.payment_status,
+    payment_amount: patch.payment_amount,
+    payment_sender: patch.payment_sender,
+    payment_receiver: patch.payment_receiver,
+    payment_proof_text: patch.payment_proof_text,
+    payment_proof_media_id: patch.payment_proof_media_id,
+    payment_proof_filename: patch.payment_proof_filename,
+    calendar_event_id: patch.calendar_event_id,
+    client_name: patch.client_name,
+    contact_phone: patch.contact_phone ? normalizePhone(patch.contact_phone) : patch.contact_phone,
+    service_name: patch.service_name,
+    service_notes: patch.service_notes,
+    appointment_date: patch.appointment_date ? toYMD(patch.appointment_date) : patch.appointment_date,
+    appointment_time: patch.appointment_time ? normalizeHourHM(patch.appointment_time) : patch.appointment_time,
+    duration_min: patch.duration_min == null ? undefined : Number(patch.duration_min || 60) || 60,
+    availability_mode: patch.availability_mode ? normalizeAvailabilityMode(patch.availability_mode) : patch.availability_mode,
+    stylist_decision_note: patch.stylist_decision_note,
+  };
+
+  const sets = [];
+  const values = [];
+  let idx = 1;
+  for (const [key, value] of Object.entries(allowed)) {
+    if (value === undefined) continue;
+    sets.push(`${key} = $${idx++}`);
+    values.push(value);
+  }
+  if (patch.mark_stylist_decision_at) sets.push(`stylist_decision_at = NOW()`);
+  if (!sets.length) return getAppointmentById(appointmentId);
+  sets.push(`updated_at = NOW()`);
+  values.push(Number(appointmentId));
+
+  const r = await db.query(
+    `UPDATE appointments SET ${sets.join(', ')} WHERE id = $${idx} RETURNING *`,
+    values
+  );
+  return r.rows?.[0] || null;
+}
+
+function buildAppointmentPaymentMessageFromRow(row) {
+  const appt = row || {};
+  const dateYMD = appt.appointment_date ? String(appt.appointment_date).slice(0, 10) : '';
+  const diaOk = dateYMD ? weekdayEsFromYMD(dateYMD) : '';
+  const fechaTxt = dateYMD ? ymdToDMY(dateYMD) : '';
+  const horaTxt = normalizeHourHM(appt.appointment_time || '') || String(appt.appointment_time || '').slice(0, 5);
+  return [
+    `Perfecto 😊 ${TURNOS_STYLIST_NAME} ya confirmó que puede tomar ese turno.`,
+    '',
+    `Servicio: ${appt.service_name || ''}`,
+    `📅 Día: ${diaOk ? `${diaOk} ` : ''}${fechaTxt}`.trim(),
+    `🕐 Hora: ${horaTxt}`,
+    '',
+    `*PARA TERMINAR DE CONFIRMAR EL TURNO SE SOLICITA UNA SEÑA DE ${TURNOS_SENA_TXT}*`,
+    '',
+    '💳 Datos para la transferencia',
+    '',
+    'Alias:',
+    TURNOS_ALIAS,
+    '',
+    'Titular:',
+    TURNOS_ALIAS_TITULAR,
+    '',
+    'Cuando haga la transferencia, envíe por aquí el comprobante 📩',
+  ].join('\n').trim();
+}
+
+function parseStylistDecisionAction(msg = {}, text = '') {
+  const payload = normalize(msg?.button?.payload || msg?.interactive?.button_reply?.id || '');
+  const title = normalize(msg?.button?.text || msg?.interactive?.button_reply?.title || text || '');
+  const hay = `${payload} | ${title}`.trim();
+
+  if (/(?:^|\b)(decline|reject|rechaz|rechazar|no_puede|no puede|no_disponible|ocupada|ocupado|imposible|no me da|no llego)(?:\b|$)/i.test(hay)) {
+    return 'decline';
+  }
+
+  if (/(?:^|\b)(suggest|suger|sugerir|proponer|propongo|otro_horario|otro horario|te ofrezco|ofrezco|podria|podría)(?:\b|$)/i.test(hay)) {
+    return 'suggest';
+  }
+
+  if (/(?:^|\b)(accept|accepted|acept|aceptar|confirm|confirmar|disponible|puedo|sí|si|ok)(?:\b|$)/i.test(hay)) {
+    return 'accept';
+  }
+
+  return '';
+}
+
+async function notifyStylistTurnConfirmed(apptRow) {
+  const recipient = normalizeWhatsAppRecipient(STYLIST_NOTIFY_PHONE_RAW);
+  if (!recipient || !apptRow?.id) return false;
+
+  const appt = buildAppointmentData({
+    id: apptRow.id,
+    wa_id: apptRow.wa_id || '',
+    wa_phone: apptRow.wa_phone || '',
+    client_name: apptRow.client_name || '',
+    contact_phone: apptRow.contact_phone || '',
+    service_name: apptRow.service_name || '',
+    appointment_date: apptRow.appointment_date || '',
+    appointment_time: apptRow.appointment_time || '',
+    status: apptRow.status || 'booked',
+    stylist_notified_at: apptRow.stylist_notified_at || null,
+  });
+
+  await sendAppointmentTemplateAndLog({
+    appointmentId: appt.id,
+    recipientPhone: recipient,
+    templateName: TEMPLATE_TURNO_CONFIRMADO_PELUQUERA,
+    notificationType: 'stylist_turn_confirmed',
+    vars: [
+      appt.client_name || 'Cliente',
+      appt.service_name || 'Servicio',
+      formatAppointmentDateForTemplate(appt.appointment_date),
+      formatAppointmentTimeForTemplate(appt.appointment_time),
+      normalizePhone(appt.contact_phone || appt.wa_phone || ''),
+    ],
+  });
+
+  return true;
+}
+
+async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
+  const stylistPhone = normalizePhone(STYLIST_NOTIFY_PHONE_RAW);
+  const inboundPhone = normalizePhone(phoneRaw || phone || '');
+  if (!stylistPhone || inboundPhone !== stylistPhone) return false;
+
+  const contextMsgId = msg?.context?.id || '';
+  let appt = await findAppointmentByNotificationMessageId(contextMsgId);
+  if (!appt) {
+    const r = await db.query(
+      `SELECT * FROM appointments
+        WHERE status = 'pending_stylist_confirmation'
+        ORDER BY updated_at DESC, created_at DESC
+        LIMIT 2`
+    );
+    const pendingRows = Array.isArray(r.rows) ? r.rows : [];
+    if (pendingRows.length === 1) {
+      appt = pendingRows[0];
+    } else if (pendingRows.length > 1) {
+      await sendWhatsAppText(phone, 'Veo más de un turno pendiente. Respondeme tocando o contestando sobre el mensaje puntual del turno para no equivocarme.');
+      return true;
+    }
+  }
+
+  if (!appt) {
+    await sendWhatsAppText(phone, 'No encontré un turno pendiente asociado a esa respuesta.');
+    return true;
+  }
+
+  const action = parseStylistDecisionAction(msg, text);
+  const suggestionDate = extractLikelyDateFromText(text);
+  const suggestionTime = extractLikelyHourFromText(text);
+  const suggestionBits = [];
+  if (suggestionDate) suggestionBits.push(ymdToDMY(suggestionDate));
+  if (suggestionTime) suggestionBits.push(normalizeHourHM(suggestionTime));
+  const suggestionText = suggestionBits.length ? suggestionBits.join(' a las ') : String(text || '').trim();
+
+  if (action === 'accept') {
+    const updated = await updateAppointmentStatus(appt.id, {
+      status: 'awaiting_payment',
+      payment_status: 'not_paid',
+      stylist_decision_note: String(text || '').trim() || 'Aceptado por estilista',
+      mark_stylist_decision_at: true,
+    });
+    await saveAppointmentDraft(appt.wa_id, appt.wa_phone, mapAppointmentRowToDraft(updated || appt));
+    const msgClient = buildAppointmentPaymentMessageFromRow(updated || appt);
+    pushHistory(appt.wa_id, 'assistant', msgClient);
+    await sendWhatsAppText(appt.contact_phone || appt.wa_phone, msgClient);
+    await sendWhatsAppText(phone, 'Perfecto. Ya le pedí la seña a la clienta. Cuando la envíe, te aviso por aquí.');
+    updateLastCloseContext(appt.wa_id, { suppressInactivityPrompt: true });
+    scheduleInactivityFollowUp(appt.wa_id, appt.contact_phone || appt.wa_phone);
+    return true;
+  }
+
+  if (action === 'decline' || action === 'suggest') {
+    await deleteAppointmentDraft(appt.wa_id);
+    clearPendingStylistSuggestion(appt.wa_id);
+
+    const suggestedDateYMD = suggestionDate || (appt.appointment_date ? String(appt.appointment_date).slice(0, 10) : '');
+    const suggestedTimeHM = normalizeHourHM(suggestionTime || appt.appointment_time || '');
+    const suggestedMode = suggestedTimeHM && isHourAllowedForAvailabilityMode(suggestedTimeHM, 'siesta') ? 'siesta' : 'commercial';
+
+    await updateAppointmentStatus(appt.id, {
+      status: action === 'suggest' && suggestionText ? 'stylist_suggested' : 'stylist_rejected',
+      stylist_decision_note: String(text || '').trim() || (action === 'suggest' ? 'La estilista propuso otro horario' : 'La estilista no puede en ese horario'),
+      mark_stylist_decision_at: true,
+    });
+
+    if (action === 'suggest' && suggestionText) {
+      setPendingStylistSuggestion(appt.wa_id, {
+        appointment_id: Number(appt.id),
+        fecha: suggestedDateYMD,
+        hora: suggestedTimeHM,
+        servicio: appt.service_name || '',
+        duracion_min: Number(appt.duration_min || 60) || 60,
+        cliente_full: appt.client_name || '',
+        telefono_contacto: normalizePhone(appt.contact_phone || appt.wa_phone || ''),
+        wa_phone: normalizePhone(appt.wa_phone || ''),
+        availability_mode: normalizeAvailabilityMode(suggestedMode),
+        stylist_note: String(text || '').trim(),
+      });
+    }
+
+    const msgClient = action === 'suggest' && suggestionText
+      ? `La estilista no puede en ese horario, pero me ofrece *${suggestionText}*.
+
+Si le sirve, respóndame *sí* y le paso la seña. Si no, dígame otro día u horario y le paso lo disponible 😊`
+      : `La estilista no puede en ese horario.
+
+Si quiere, dígame otro día u horario y le paso lo disponible. También, si ninguno de los horarios comerciales le sirve, puedo revisar la franja de siesta de 14, 15 o 16 hs 😊`;
+    pushHistory(appt.wa_id, 'assistant', msgClient);
+    await sendWhatsAppText(appt.contact_phone || appt.wa_phone, msgClient);
+    await sendWhatsAppText(phone, action === 'suggest' && suggestionText
+      ? 'Perfecto. Ya le propuse el horario alternativo a la clienta.'
+      : 'Perfecto. Ya le avisé a la clienta para que elija otro horario.');
+    updateLastCloseContext(appt.wa_id, { suppressInactivityPrompt: true });
+    scheduleInactivityFollowUp(appt.wa_id, appt.contact_phone || appt.wa_phone);
+    return true;
+  }
+
+  await sendWhatsAppText(phone, 'Respondeme con aceptar o no puede, o sugerime otro horario, y yo sigo el flujo con la clienta.');
+  return true;
+}
+
 async function processAppointmentTemplateNotifications() {
   const stylistRecipient = normalizeWhatsAppRecipient(STYLIST_NOTIFY_PHONE_RAW);
   if (!stylistRecipient) return;
@@ -3207,57 +3600,27 @@ async function processAppointmentTemplateNotifications() {
             appointment_date::text AS appointment_date,
             to_char(appointment_time, 'HH24:MI') AS appointment_time,
             status,
-            stylist_notified_at,
-            reminder_client_2h_at,
-            reminder_client_24h_at,
-            reminder_stylist_24h_at,
-            reminder_stylist_2h_at
+            stylist_notified_at
        FROM appointments
       WHERE appointment_date IS NOT NULL
         AND appointment_time IS NOT NULL
-        AND status IN ('booked', 'pending_stylist_confirmation')
+        AND status = 'pending_stylist_confirmation'
         AND appointment_date >= CURRENT_DATE - INTERVAL '1 day'
       ORDER BY appointment_date ASC, appointment_time ASC`
   );
 
-  const now = Date.now();
   for (const raw of (r.rows || [])) {
     const appt = buildAppointmentData(raw);
     const startAt = getAppointmentStartDate(appt);
     if (!startAt) continue;
-
-    const msUntil = startAt.getTime() - now;
-    if (msUntil <= 0) continue;
+    if (startAt.getTime() <= Date.now()) continue;
 
     try {
       if (!appt.stylist_notified_at) {
         await sendNewAppointmentTemplateToStylist(appt);
       }
-
-      const clientRecipient = normalizeWhatsAppRecipient(appt.contact_phone || appt.wa_phone || '');
-      if (!appt.reminder_client_2h_at && clientRecipient && msUntil <= (2 * 60 * 60 * 1000)) {
-        await sendAppointmentTemplateAndLog({
-          appointmentId: appt.id,
-          recipientPhone: clientRecipient,
-          templateName: TEMPLATE_RECORDATORIO_CLIENTE,
-          notificationType: 'client_reminder_2h',
-          vars: buildAppointmentTemplateVarsForClient(appt),
-          markField: 'reminder_client_2h_at',
-        });
-      }
-
-      if (!appt.reminder_stylist_2h_at && msUntil <= (2 * 60 * 60 * 1000)) {
-        await sendAppointmentTemplateAndLog({
-          appointmentId: appt.id,
-          recipientPhone: stylistRecipient,
-          templateName: TEMPLATE_ALERTA_PELUQUERA,
-          notificationType: 'stylist_reminder_2h',
-          vars: buildAppointmentTemplateVarsForStylistReminder(appt),
-          markField: 'reminder_stylist_2h_at',
-        });
-      }
     } catch (e) {
-      console.error(`❌ Error enviando plantillas de turno para appointment ${appt.id}:`, e?.response?.data || e?.message || e);
+      console.error(`❌ Error enviando plantilla inicial de turno para appointment ${appt.id}:`, e?.response?.data || e?.message || e);
     }
   }
 }
@@ -3265,7 +3628,12 @@ async function processAppointmentTemplateNotifications() {
 async function finalizeAppointmentFlow({ waId, phone, merged }) {
   merged.fecha = toYMD(merged.fecha);
   merged.hora = normalizeHourHM(merged.hora);
+  merged.availability_mode = normalizeAvailabilityMode(merged.availability_mode || 'commercial');
   if (!merged?.servicio || !merged?.fecha || !merged?.hora) return { type: "missing_core" };
+
+  if (!isHourAllowedForAvailabilityMode(merged.hora, merged.availability_mode)) {
+    return { type: 'invalid_hour' };
+  }
 
   if (isPastAppointmentDateTime(merged.fecha, merged.hora)) return { type: "invalid_past_date" };
 
@@ -3278,59 +3646,93 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
 
   if (!merged?.cliente_full) return { type: "need_name" };
   if (!merged?.telefono_contacto) return { type: "need_phone" };
-  if (merged.payment_status !== "paid_verified") return { type: "need_payment" };
 
-  if (isColorOrTinturaService(`${merged.servicio} ${merged.notas || ""}`)) {
-    const apptRow = await createAppointmentRecord({
-      waId,
-      waPhone: phone,
-      merged,
-      status: "pending_stylist_confirmation",
-      calendarEventId: null,
+  if (merged?.appointment_id) {
+    if (merged.payment_status !== "paid_verified") return { type: "need_payment" };
+
+    const currentAppt = await getAppointmentById(merged.appointment_id);
+    if (currentAppt?.status === 'pending_stylist_confirmation') return { type: 'still_waiting_stylist' };
+
+    const notasCalendar = [merged.notas || '', `SEÑA OK ${TURNOS_SENA_TXT}`].filter(Boolean).join(' | ');
+    const ev = await createCalendarTurno({
+      dateYMD: merged.fecha,
+      startHM: merged.hora,
+      durationMin: Number(merged.duracion_min || 60) || 60,
+      cliente: merged.cliente_full || "",
+      telefono: normalizePhone(merged.telefono_contacto || ""),
+      servicio: merged.servicio || "",
+      notas: notasCalendar,
     });
-    try {
-      const apptData = buildAppointmentData({
-        id: apptRow?.id,
-        wa_id: waId,
-        wa_phone: normalizePhone(phone || merged.telefono_contacto || ""),
-        client_name: merged.cliente_full || "",
-        contact_phone: normalizePhone(merged.telefono_contacto || ""),
-        service_name: merged.servicio || "",
-        appointment_date: merged.fecha,
-        appointment_time: merged.hora,
-        status: "pending_stylist_confirmation",
-      });
-      await sendNewAppointmentTemplateToStylist(apptData);
-    } catch (e) {
-      console.error('❌ Error notificando nuevo turno pendiente a la peluquera:', e?.response?.data || e?.message || e);
+
+    const bookedRow = await updateAppointmentStatus(merged.appointment_id, {
+      status: 'booked',
+      payment_status: 'paid_verified',
+      payment_amount: merged.payment_amount == null ? 10000 : Number(merged.payment_amount),
+      payment_sender: merged.payment_sender || '',
+      payment_receiver: merged.payment_receiver || TURNOS_ALIAS_TITULAR,
+      payment_proof_text: merged.payment_proof_text || '',
+      payment_proof_media_id: merged.payment_proof_media_id || '',
+      payment_proof_filename: merged.payment_proof_filename || '',
+      calendar_event_id: ev?.eventId || null,
+      client_name: merged.cliente_full || '',
+      contact_phone: normalizePhone(merged.telefono_contacto || ''),
+      service_name: merged.servicio || '',
+      service_notes: merged.notas || '',
+      appointment_date: merged.fecha,
+      appointment_time: merged.hora,
+      duration_min: Number(merged.duracion_min || 60) || 60,
+      availability_mode: merged.availability_mode,
+    });
+
+    if (TURNOS_SHEET_ID) {
+      try {
+        await appendTurnoRow({
+          fechaYMD: merged.fecha,
+          dia: weekdayEsFromYMD(merged.fecha),
+          horaHM: merged.hora,
+          cliente: merged.cliente_full || '',
+          telefono: normalizePhone(merged.telefono_contacto || ''),
+          servicio: merged.servicio || '',
+          duracionMin: Number(merged.duracion_min || 60) || 60,
+          calendarEventId: ev?.eventId || '',
+        });
+      } catch (e) {
+        console.error('❌ Error guardando turno en planilla:', e?.response?.data || e?.message || e);
+      }
     }
+
+    try {
+      await notifyStylistTurnConfirmed(bookedRow || currentAppt || {});
+    } catch (e) {
+      console.error('❌ Error avisando a la peluquera que el turno ya quedó señado:', e?.response?.data || e?.message || e);
+    }
+
     await deleteAppointmentDraft(waId);
-        updateLastCloseContext(waId, { suppressInactivityPrompt: false });
-    return { type: "pending_stylist_confirmation" };
+    updateLastCloseContext(waId, { suppressInactivityPrompt: false });
+    return { type: "booked", eventId: ev?.eventId || null };
   }
 
-  const notasCalendar = [merged.notas || '', `SEÑA OK ${TURNOS_SENA_TXT}`].filter(Boolean).join(' | ');
-  const ev = await createCalendarTurno({
-    dateYMD: merged.fecha,
-    startHM: merged.hora,
-    durationMin: Number(merged.duracion_min || 60) || 60,
-    cliente: merged.cliente_full || "",
-    telefono: normalizePhone(merged.telefono_contacto || ""),
-    servicio: merged.servicio || "",
-    notas: notasCalendar,
-  });
+  const toCreate = {
+    ...merged,
+    payment_status: 'not_paid',
+    payment_amount: null,
+    payment_sender: '',
+    payment_receiver: '',
+    payment_proof_text: '',
+    payment_proof_media_id: '',
+    payment_proof_filename: '',
+  };
 
-  const bookedRow = await createAppointmentRecord({
+  const apptRow = await createAppointmentRecord({
     waId,
     waPhone: phone,
-    merged,
-    status: "booked",
-    calendarEventId: ev?.eventId || null,
+    merged: toCreate,
+    status: "pending_stylist_confirmation",
+    calendarEventId: null,
   });
-
   try {
     const apptData = buildAppointmentData({
-      id: bookedRow?.id,
+      id: apptRow?.id,
       wa_id: waId,
       wa_phone: normalizePhone(phone || merged.telefono_contacto || ""),
       client_name: merged.cliente_full || "",
@@ -3338,38 +3740,20 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
       service_name: merged.servicio || "",
       appointment_date: merged.fecha,
       appointment_time: merged.hora,
-      status: "booked",
+      status: "pending_stylist_confirmation",
     });
     await sendNewAppointmentTemplateToStylist(apptData);
   } catch (e) {
-    console.error('❌ Error notificando nuevo turno a la peluquera:', e?.response?.data || e?.message || e);
+    console.error('❌ Error notificando nuevo turno pendiente a la peluquera:', e?.response?.data || e?.message || e);
   }
-
-  if (TURNOS_SHEET_ID) {
-    try {
-      await appendTurnoRow({
-        fechaYMD: merged.fecha,
-        dia: weekdayEsFromYMD(merged.fecha),
-        horaHM: merged.hora,
-        cliente: merged.cliente_full || '',
-        telefono: normalizePhone(merged.telefono_contacto || ''),
-        servicio: merged.servicio || '',
-        duracionMin: Number(merged.duracion_min || 60) || 60,
-        calendarEventId: ev?.eventId || '',
-      });
-    } catch (e) {
-      console.error('❌ Error guardando turno en planilla:', e?.response?.data || e?.message || e);
-    }
-  }
-
   await deleteAppointmentDraft(waId);
-        updateLastCloseContext(waId, { suppressInactivityPrompt: false });
-  return { type: "booked", eventId: ev?.eventId || null };
+  updateLastCloseContext(waId, { suppressInactivityPrompt: false });
+  return { type: "pending_stylist_confirmation" };
 }
 
 function isColorOrTinturaService(text) {
   const t = normalize(text);
-  return /(\bcolor\b|tintur|tinte|mecha|balayage|decolor|reflej|raic|raiz|ilumin|tonaliz)/i.test(t);
+  return /(\bcolor\b|coloraci|tintur|tinte|mecha|balayage|decolor|reflej|raic|raiz|ilumin|tonaliz)/i.test(t);
 }
 
 function weekdayEsFromYMD(ymd) {
@@ -3818,40 +4202,37 @@ function getUpcomingTurnoDays(limit = 6) {
   return out;
 }
 
-function getAvailableSlotsForDate({ dateYMD, durationMin, events = [] }) {
+function getAvailableSlotsForDate({ dateYMD, durationMin, events = [], availabilityMode = 'commercial' }) {
   const safeDate = toYMD(dateYMD);
   const safeDuration = Math.max(30, Number(durationMin) || 60);
   if (!safeDate || isSundayYMD(safeDate) || safeDate < todayYMDInTZ()) return [];
 
-  const step = getTurnoSlotStepMin(safeDuration);
   const nowLocal = formatYMDHMInTZ(new Date());
   const nowMinutes = safeDate === nowLocal.ymd ? hmToMinutes(nowLocal.hm) : -1;
   const slots = [];
 
-  for (const block of TURNOS_ALLOWED_BLOCKS) {
-    const blockStart = hmToMinutes(block.start);
-    const blockEnd = hmToMinutes(block.end);
-    if (Number.isNaN(blockStart) || Number.isNaN(blockEnd)) continue;
+  for (const hm of getTurnoAllowedStartTimes(availabilityMode)) {
+    const slotMinutes = hmToMinutes(hm);
+    if (Number.isNaN(slotMinutes)) continue;
+    if (safeDate === nowLocal.ymd && nowMinutes >= 0 && slotMinutes <= nowMinutes) continue;
 
-    let cursor = blockStart;
-    if (safeDate === nowLocal.ymd && nowMinutes >= 0) {
-      const roundedNow = Math.ceil(nowMinutes / step) * step;
-      cursor = Math.max(cursor, roundedNow);
-    }
+    const block = getTurnoAllowedBlocks(availabilityMode).find((item) => {
+      const start = hmToMinutes(item.start);
+      const end = hmToMinutes(item.end);
+      return !Number.isNaN(start) && !Number.isNaN(end) && slotMinutes >= start && slotMinutes < end;
+    });
+    if (!block) continue;
 
-    while ((cursor + safeDuration) <= blockEnd) {
-      const hm = minutesToHM(cursor);
-      const hasConflict = events.some((ev) => eventOverlapsSlot(ev, {
-        dateYMD: safeDate,
-        startHM: hm,
-        durationMin: safeDuration,
-      }));
+    if ((slotMinutes + safeDuration) > hmToMinutes(block.end)) continue;
 
-      if (!hasConflict) {
-        slots.push({ hm, label: block.label });
-      }
+    const hasConflict = events.some((ev) => eventOverlapsSlot(ev, {
+      dateYMD: safeDate,
+      startHM: hm,
+      durationMin: safeDuration,
+    }));
 
-      cursor += step;
+    if (!hasConflict) {
+      slots.push({ hm, label: block.label });
     }
   }
 
@@ -3872,10 +4253,10 @@ function isPastAppointmentDateTime(dateYMD, timeHM) {
   return hmToMinutes(safeHM) <= hmToMinutes(nowLocal.hm);
 }
 
-function formatSlotsByBlock(slots = []) {
+function formatSlotsByBlock(slots = [], availabilityMode = 'commercial') {
   if (!Array.isArray(slots) || !slots.length) return '';
 
-  const grouped = TURNOS_ALLOWED_BLOCKS
+  const grouped = getTurnoAllowedBlocks(availabilityMode)
     .map((block) => {
       const values = slots.filter((slot) => slot.label === block.label).map((slot) => slot.hm);
       return values.length ? `${block.label}: ${values.join(', ')}` : '';
@@ -3885,10 +4266,10 @@ function formatSlotsByBlock(slots = []) {
   return grouped.join(' | ');
 }
 
-function formatSlotsByBlockMultiline(slots = []) {
+function formatSlotsByBlockMultiline(slots = [], availabilityMode = 'commercial') {
   if (!Array.isArray(slots) || !slots.length) return '• Sin horarios disponibles';
 
-  return TURNOS_ALLOWED_BLOCKS
+  return getTurnoAllowedBlocks(availabilityMode)
     .map((block) => {
       const values = slots.filter((slot) => slot.label === block.label).map((slot) => slot.hm);
       return values.length ? `• ${capitalizeEs(block.label)}: ${values.join(', ')}` : '';
@@ -3897,7 +4278,7 @@ function formatSlotsByBlockMultiline(slots = []) {
     .join('\n');
 }
 
-async function getAvailabilitySummaries({ daysYMD, durationMin }) {
+async function getAvailabilitySummaries({ daysYMD, durationMin, availabilityMode = 'commercial' }) {
   const safeDays = (Array.isArray(daysYMD) ? daysYMD : []).map((d) => toYMD(d)).filter(Boolean);
   if (!safeDays.length) return [];
 
@@ -3905,7 +4286,7 @@ async function getAvailabilitySummaries({ daysYMD, durationMin }) {
     return safeDays.map((dateYMD) => ({
       dateYMD,
       weekday: weekdayEsFromYMD(dateYMD),
-      slots: getAvailableSlotsForDate({ dateYMD, durationMin, events: [] }),
+      slots: getAvailableSlotsForDate({ dateYMD, durationMin, events: [], availabilityMode }),
     }));
   }
 
@@ -3916,60 +4297,94 @@ async function getAvailabilitySummaries({ daysYMD, durationMin }) {
   return safeDays.map((dateYMD) => ({
     dateYMD,
     weekday: weekdayEsFromYMD(dateYMD),
-    slots: getAvailableSlotsForDate({ dateYMD, durationMin, events: items }),
+    slots: getAvailableSlotsForDate({ dateYMD, durationMin, events: items, availabilityMode }),
   }));
 }
 
-async function buildWeeklyAvailabilityMessage({ servicio, durationMin, limitDays = 6 }) {
+async function buildWeeklyAvailabilityMessage({ servicio, durationMin, limitDays = 6, availabilityMode = 'commercial' }) {
+  const mode = normalizeAvailabilityMode(availabilityMode);
   const days = getUpcomingTurnoDays(limitDays);
-  const summaries = await getAvailabilitySummaries({ daysYMD: days, durationMin });
+  const summaries = await getAvailabilitySummaries({ daysYMD: days, durationMin, availabilityMode: mode });
   const available = summaries.filter((item) => item.slots.length > 0);
 
   if (!available.length) {
-    return `En este momento no me quedan turnos disponibles en los próximos días dentro de los horarios del salón. Si quiere, después le reviso la próxima semana 😊`;
+    return mode === 'siesta'
+      ? `En este momento no me quedan turnos disponibles en horario especial de siesta. Si quiere, le reviso otras opciones comerciales 😊`
+      : `En este momento no me quedan turnos disponibles en los próximos días dentro de los horarios comerciales. Si ninguno de esos horarios le sirve, también puedo revisar la franja especial de siesta de 14, 15 o 16 hs 😊`;
   }
 
   const daysToShow = available.slice(0, 3);
   const lines = daysToShow.map((item) => {
     const dayHeader = `*${capitalizeEs(item.weekday)} ${ymdToDM(item.dateYMD)}*`;
-    const slotLines = formatSlotsByBlockMultiline(item.slots);
-    return `${dayHeader}\n${slotLines}`;
+    const slotLines = formatSlotsByBlockMultiline(item.slots, mode);
+    return `${dayHeader}
+${slotLines}`;
   });
 
-  return `Perfecto 😊\n\n${servicio ? `Servicio: ${servicio}\n\n` : ''}Te paso los próximos turnos disponibles:\n\n${lines.join('\n\n')}\n\nDecime qué día y horario te queda mejor y lo reservo.`;
+  const footer = mode === 'siesta'
+    ? `Decime qué día y horario especial de siesta le queda mejor y lo dejo presentado a la estilista.`
+    : `Decime qué día y horario le queda mejor y lo presento primero a la estilista. Si ninguno de estos horarios le sirve, también puedo revisar 14, 15 o 16 hs 😊`;
+
+  return `Perfecto 😊
+
+${servicio ? `Servicio: ${servicio}
+
+` : ''}Te paso los próximos turnos disponibles:
+
+${lines.join('\n\n')}
+
+${footer}`;
 }
 
-async function buildDateAvailabilityMessage({ dateYMD, servicio, durationMin }) {
+async function buildDateAvailabilityMessage({ dateYMD, servicio, durationMin, availabilityMode = 'commercial' }) {
   const safeDate = toYMD(dateYMD);
   if (!safeDate) return '';
 
   if (isSundayYMD(safeDate)) {
-    return `Los domingos no trabajamos con turnos 😊\n\nSi quiere, le paso las opciones disponibles de lunes a sábado.`;
+    return `Los domingos no trabajamos con turnos 😊
+
+Si quiere, le paso las opciones disponibles de lunes a sábado.`;
   }
 
-  const [summary] = await getAvailabilitySummaries({ daysYMD: [safeDate], durationMin });
+  const mode = normalizeAvailabilityMode(availabilityMode);
+  const [summary] = await getAvailabilitySummaries({ daysYMD: [safeDate], durationMin, availabilityMode: mode });
   const dayLabel = `${capitalizeEs(summary?.weekday || weekdayEsFromYMD(safeDate))} ${ymdToDM(safeDate)}`;
 
   if (summary?.slots?.length) {
-    return `Te digo lo que nos queda disponible:\n\n${servicio ? `Servicio: ${servicio}\n\n` : ''}*${dayLabel}*\n${formatSlotsByBlockMultiline(summary.slots)}\n\nDecime cuál le queda mejor y lo dejo listo.`;
+    const footer = mode === 'siesta'
+      ? 'Decime cuál le queda mejor dentro del horario especial de siesta y lo presento a la estilista.'
+      : 'Decime cuál le queda mejor y lo presento a la estilista. Si ninguno de estos horarios le sirve, también puedo revisar 14, 15 o 16 hs 😊';
+    return `Te digo lo que nos queda disponible:
+
+${servicio ? `Servicio: ${servicio}
+
+` : ''}*${dayLabel}*
+${formatSlotsByBlockMultiline(summary.slots, mode)}
+
+${footer}`;
   }
 
-  const weekly = await buildWeeklyAvailabilityMessage({ servicio, durationMin, limitDays: 6 });
-  return `Ese día no me queda lugar disponible dentro del horario del salón.\n\n${weekly}`;
+  const weekly = await buildWeeklyAvailabilityMessage({ servicio, durationMin, limitDays: 6, availabilityMode: mode });
+  return `Ese día no me queda lugar disponible dentro de ${mode === 'siesta' ? 'ese horario especial de siesta' : 'los horarios comerciales'}.
+
+${weekly}`;
 }
 
 async function buildBusyTurnoMessage({ base }) {
   const safeDate = toYMD(base?.fecha || '');
   const safeDuration = Math.max(30, Number(base?.duracion_min || 60) || 60);
   const servicio = base?.servicio || base?.last_service_name || '';
+  const availabilityMode = normalizeAvailabilityMode(base?.availability_mode || 'commercial');
 
   if (safeDate) {
-    const sameDayMsg = await buildDateAvailabilityMessage({ dateYMD: safeDate, servicio, durationMin: safeDuration });
+    const sameDayMsg = await buildDateAvailabilityMessage({ dateYMD: safeDate, servicio, durationMin: safeDuration, availabilityMode });
     const diaC = capitalizeEs(weekdayEsFromYMD(safeDate));
-    return `Ese horario ya está ocupado (${diaC} ${ymdToDM(safeDate)} ${normalizeHourHM(base?.hora) || base?.hora}).\n\n${sameDayMsg}`;
+    return `Ese horario ya está ocupado (${diaC} ${ymdToDM(safeDate)} ${normalizeHourHM(base?.hora) || base?.hora}).
+
+${sameDayMsg}`;
   }
 
-  return buildWeeklyAvailabilityMessage({ servicio, durationMin: safeDuration, limitDays: 6 });
+  return buildWeeklyAvailabilityMessage({ servicio, durationMin: safeDuration, limitDays: 6, availabilityMode });
 }
 
 // ===================== FECHAS =====================
@@ -7241,7 +7656,7 @@ function inferDraftFlowStep(base) {
   if (!base?.cliente_full && !base?.telefono_contacto) return 'awaiting_contact';
   if (!base?.cliente_full) return 'awaiting_name';
   if (!base?.telefono_contacto) return 'awaiting_phone';
-  if (base?.payment_status !== 'paid_verified') return 'awaiting_payment';
+  if (base?.appointment_id && base?.payment_status !== 'paid_verified') return 'awaiting_payment';
   return 'ready_to_book';
 }
 
@@ -7427,7 +7842,32 @@ async function sendWhatsAppTemplate(to, templateName, bodyVars = [], meta = {}) 
 
 function formatAppointmentDateForTemplate(dateYMD) {
   const ymd = toYMD(dateYMD);
-  return ymd ? ymdToDMY(ymd) : '';
+  if (!ymd) return '';
+
+  try {
+    const d = new Date(`${ymd}T12:00:00-03:00`);
+    if (Number.isNaN(d.getTime())) return ymdToDMY(ymd);
+
+    const weekday = new Intl.DateTimeFormat('es-AR', {
+      weekday: 'long',
+      timeZone: TIMEZONE,
+    }).format(d);
+
+    const day = new Intl.DateTimeFormat('es-AR', {
+      day: 'numeric',
+      timeZone: TIMEZONE,
+    }).format(d);
+
+    const month = new Intl.DateTimeFormat('es-AR', {
+      month: 'long',
+      timeZone: TIMEZONE,
+    }).format(d);
+
+    const weekdayCap = weekday ? weekday.charAt(0).toUpperCase() + weekday.slice(1) : '';
+    return `${weekdayCap} ${day} de ${month}`.trim();
+  } catch {
+    return ymdToDMY(ymd);
+  }
 }
 
 function formatAppointmentTimeForTemplate(timeHM) {
@@ -7446,41 +7886,17 @@ function buildAppointmentData(row = {}) {
     appointment_time: formatAppointmentTimeForTemplate(row.appointment_time || ''),
     status: String(row.status || '').trim(),
     stylist_notified_at: row.stylist_notified_at || null,
-    reminder_client_2h_at: row.reminder_client_2h_at || null,
-    reminder_client_24h_at: row.reminder_client_24h_at || null,
-    reminder_stylist_24h_at: row.reminder_stylist_24h_at || null,
-    reminder_stylist_2h_at: row.reminder_stylist_2h_at || null,
   };
 }
 
 function buildAppointmentTemplateVarsForStylist(appt) {
   return [
-    appt.client_name || 'Cliente',
     formatAppointmentDateForTemplate(appt.appointment_date),
     formatAppointmentTimeForTemplate(appt.appointment_time),
     appt.service_name || 'Servicio',
-    normalizePhone(appt.contact_phone || appt.wa_phone || ''),
   ];
 }
 
-function buildAppointmentTemplateVarsForStylistReminder(appt) {
-  return [
-    appt.client_name || 'Cliente',
-    appt.service_name || 'Servicio',
-    formatAppointmentDateForTemplate(appt.appointment_date),
-    formatAppointmentTimeForTemplate(appt.appointment_time),
-    normalizePhone(appt.contact_phone || appt.wa_phone || ''),
-  ];
-}
-
-function buildAppointmentTemplateVarsForClient(appt) {
-  return [
-    appt.client_name || 'Cliente',
-    formatAppointmentDateForTemplate(appt.appointment_date),
-    formatAppointmentTimeForTemplate(appt.appointment_time),
-    appt.service_name || 'Servicio',
-  ];
-}
 
 async function insertAppointmentNotificationLog({ appointmentId, notificationType, recipientPhone, templateName, waMessageId, payload }) {
   await db.query(
@@ -7498,13 +7914,7 @@ async function insertAppointmentNotificationLog({ appointmentId, notificationTyp
 }
 
 async function markAppointmentNotificationField(appointmentId, fieldName) {
-  const allowed = new Set([
-    'stylist_notified_at',
-    'reminder_client_2h_at',
-    'reminder_client_24h_at',
-    'reminder_stylist_24h_at',
-    'reminder_stylist_2h_at',
-  ]);
+  const allowed = new Set(['stylist_notified_at']);
   if (!allowed.has(fieldName)) throw new Error(`Campo de notificación no permitido: ${fieldName}`);
   await db.query(`UPDATE appointments SET ${fieldName} = NOW(), updated_at = NOW() WHERE id = $1`, [appointmentId]);
 }
@@ -7680,6 +8090,17 @@ async function describeImageWithVision(dataUrl) {
 async function extractTextFromIncomingMessage(msg) {
   if (msg.type === "text") {
     return { text: msg.text?.body || "", kind: "text" };
+  }
+
+  if (msg.type === "button") {
+    return { text: msg.button?.text || msg.button?.payload || "", kind: "button" };
+  }
+
+  if (msg.type === "interactive") {
+    return {
+      text: msg.interactive?.button_reply?.title || msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.title || msg.interactive?.list_reply?.id || "",
+      kind: "interactive"
+    };
   }
 
   if (msg.type === "audio") {
@@ -8180,6 +8601,10 @@ lastCloseContext.set(waId, {
       profileName: name || lastCloseContext.get(waId)?.profileName || '',
     });
 
+
+    const stylistHandled = await handleStylistWorkflowInbound({ msg, text, phone, phoneRaw });
+    if (stylistHandled) return;
+
     const pendingNameReq = getPendingContactNameRequest(waId);
     const inboundName = await resolveInboundExplicitName(text, {
       pendingNameRequest: pendingNameReq,
@@ -8434,6 +8859,94 @@ updateLastCloseContext(waId, {
 
     // ===================== ✅ TURNOS (Calendar + Railway Postgres) =====================
     let pendingDraft = await getAppointmentDraft(waId);
+    let pendingStylistSuggestion = getPendingStylistSuggestion(waId);
+
+    if (!pendingDraft && pendingStylistSuggestion) {
+      if (isWarmAffirmativeReply(text)) {
+        const updatedSuggestion = await updateAppointmentStatus(pendingStylistSuggestion.appointment_id, {
+          status: 'awaiting_payment',
+          payment_status: 'not_paid',
+          appointment_date: pendingStylistSuggestion.fecha || undefined,
+          appointment_time: pendingStylistSuggestion.hora || undefined,
+          duration_min: Number(pendingStylistSuggestion.duracion_min || 60) || 60,
+          client_name: pendingStylistSuggestion.cliente_full || '',
+          contact_phone: normalizePhone(pendingStylistSuggestion.telefono_contacto || phone || ''),
+          service_name: pendingStylistSuggestion.servicio || '',
+          availability_mode: normalizeAvailabilityMode(pendingStylistSuggestion.availability_mode || 'commercial'),
+          stylist_decision_note: pendingStylistSuggestion.stylist_note || 'Horario alternativo aceptado por cliente',
+        });
+        const suggestionRow = updatedSuggestion || await getAppointmentById(pendingStylistSuggestion.appointment_id);
+        if (suggestionRow) {
+          const suggestionDraft = mapAppointmentRowToDraft(suggestionRow);
+          await saveAppointmentDraft(waId, phone, suggestionDraft);
+          clearPendingStylistSuggestion(waId);
+          pendingStylistSuggestion = null;
+          pendingDraft = suggestionDraft;
+          const msgPaySuggestion = buildAppointmentPaymentMessageFromRow(suggestionRow);
+          pushHistory(waId, 'assistant', msgPaySuggestion);
+          await sendWhatsAppText(phone, msgPaySuggestion);
+          updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
+      }
+
+      if (/^(no|no me sirve|no puedo|prefiero otro|otro horario|busquemos otro|busco otro)$/i.test(normalizeShortReply(text || ''))) {
+        clearPendingStylistSuggestion(waId);
+        pendingStylistSuggestion = null;
+      }
+    }
+
+    if (!pendingDraft) {
+      const latestPendingStylist = await getLatestAppointmentForClient({
+        waId,
+        phone,
+        statuses: ['pending_stylist_confirmation', 'awaiting_payment'],
+      });
+      if (latestPendingStylist && (looksLikePaymentIntentOnly(text) || looksLikeProofAlreadySent(text) || mediaMeta)) {
+        const waitingMsg = latestPendingStylist.status === 'awaiting_payment'
+          ? buildAppointmentPaymentMessageFromRow(latestPendingStylist)
+          : `Todavía no le pedí la seña porque primero estoy esperando la confirmación de la estilista 😊
+
+Apenas ella me diga que puede, le paso por aquí los datos para la transferencia.`;
+        pushHistory(waId, 'assistant', waitingMsg);
+        await sendWhatsAppText(phone, waitingMsg);
+        updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+    }
+
+    if (pendingDraft && textRequestsSiestaAvailability(text) && normalizeAvailabilityMode(pendingDraft.availability_mode || 'commercial') !== 'siesta') {
+      const siestaDraft = {
+        ...pendingDraft,
+        availability_mode: 'siesta',
+        flow_step: pendingDraft?.fecha ? (pendingDraft?.hora ? inferDraftFlowStep({ ...pendingDraft, availability_mode: 'siesta' }) : 'awaiting_time') : 'awaiting_date',
+        last_intent: 'book_appointment',
+        last_service_name: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
+      };
+      await saveAppointmentDraft(waId, phone, siestaDraft);
+      pendingDraft = siestaDraft;
+      const siestaMsg = pendingDraft?.fecha
+        ? await buildDateAvailabilityMessage({
+            dateYMD: pendingDraft.fecha,
+            servicio: pendingDraft.servicio || pendingDraft.last_service_name || '',
+            durationMin: Number(pendingDraft.duracion_min || 60) || 60,
+            availabilityMode: 'siesta',
+          })
+        : await buildWeeklyAvailabilityMessage({
+            servicio: pendingDraft.servicio || pendingDraft.last_service_name || '',
+            durationMin: Number(pendingDraft.duracion_min || 60) || 60,
+            limitDays: 6,
+            availabilityMode: 'siesta',
+          });
+      pushHistory(waId, 'assistant', siestaMsg);
+      await sendWhatsAppText(phone, siestaMsg);
+      updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+      scheduleInactivityFollowUp(waId, phone);
+      return;
+    }
+
     const recentDbMessages = await getRecentDbMessages(phone, 12);
     const convForAI = mergeConversationForAI(recentDbMessages, ensureConv(waId).messages || []);
 
@@ -8610,6 +9123,7 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
 
     async function askForMissingTurnoData(base) {
       const servicioTxt = base?.servicio || base?.last_service_name || "";
+      const availabilityMode = normalizeAvailabilityMode(base?.availability_mode || 'commercial');
 
       if (!servicioTxt) {
         const msgFalt = `Perfecto 😊 vamos a coordinar su turno.
@@ -8626,6 +9140,7 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
           servicio: servicioTxt,
           durationMin: Number(base?.duracion_min || 60) || 60,
           limitDays: 6,
+          availabilityMode,
         });
         pushHistory(waId, "assistant", msgFalt);
         await sendWhatsAppText(phone, msgFalt);
@@ -8638,6 +9153,7 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
           servicio: servicioTxt,
           durationMin: Number(base?.duracion_min || 60) || 60,
           limitDays: 6,
+          availabilityMode,
         });
         pushHistory(waId, "assistant", msgFalt);
         await sendWhatsAppText(phone, msgFalt);
@@ -8650,6 +9166,7 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
           dateYMD: base.fecha,
           servicio: servicioTxt,
           durationMin: Number(base?.duracion_min || 60) || 60,
+          availabilityMode,
         });
         pushHistory(waId, "assistant", msgFalt);
         await sendWhatsAppText(phone, msgFalt);
@@ -8672,7 +9189,7 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
         return;
       }
 
-      if (base?.payment_status !== 'paid_verified') {
+      if (base?.appointment_id && base?.payment_status !== 'paid_verified') {
         await askForPayment(base);
         return;
       }
@@ -8722,6 +9239,15 @@ Ahora necesito este dato 😊
     }
 
     async function askForPayment(base) {
+      if (!base?.appointment_id) {
+        const msgBeforePayment = `Primero tengo que confirmar ese horario con la estilista. Apenas ella me diga que puede, ahí le paso los datos para la seña 😊`;
+        pushHistory(waId, "assistant", msgBeforePayment);
+        await sendWhatsAppText(phone, msgBeforePayment);
+        updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+
       await saveAppointmentDraft(waId, phone, { ...base, awaiting_contact: false, flow_step: 'awaiting_payment', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' });
       updateLastCloseContext(waId, { suppressInactivityPrompt: true });
       const diaOk = base.fecha ? weekdayEsFromYMD(base.fecha) : '';
@@ -8793,7 +9319,7 @@ Ahora necesito este dato 😊
 Lo estoy validando con los datos del turno. En cuanto quede confirmado, le aviso por aquí.`;
       }
 
-      if (base.payment_status !== 'paid_verified') {
+      if (base.appointment_id && base.payment_status !== 'paid_verified') {
         return buildPaymentPendingMessage();
       }
 
@@ -8806,6 +9332,32 @@ Lo estoy validando con los datos del turno. En cuanto quede confirmado, le aviso
         const msgBusy = await buildBusyTurnoMessage({ base });
         pushHistory(waId, "assistant", msgBusy);
         await sendWhatsAppText(phone, msgBusy);
+        scheduleInactivityFollowUp(waId, phone);
+        return true;
+      }
+      if (result.type === "invalid_hour") {
+        const modeTxt = normalizeAvailabilityMode(base?.availability_mode || 'commercial') === 'siesta'
+          ? 'el horario especial de siesta'
+          : 'los horarios comerciales';
+        const resetHourBase = {
+          ...base,
+          hora: '',
+          flow_step: 'awaiting_time',
+          last_intent: 'book_appointment',
+          last_service_name: base.servicio || base.last_service_name || '',
+        };
+        await saveAppointmentDraft(waId, phone, resetHourBase);
+        updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+        const msgInvalidHour = `Ese horario no entra dentro de ${modeTxt} 😊
+
+${await buildDateAvailabilityMessage({
+          dateYMD: base.fecha,
+          servicio: base?.servicio || base?.last_service_name || '',
+          durationMin: Number(base?.duracion_min || 60) || 60,
+          availabilityMode: normalizeAvailabilityMode(base?.availability_mode || 'commercial'),
+        })}`;
+        pushHistory(waId, 'assistant', msgInvalidHour);
+        await sendWhatsAppText(phone, msgInvalidHour);
         scheduleInactivityFollowUp(waId, phone);
         return true;
       }
@@ -8826,6 +9378,7 @@ ${await buildWeeklyAvailabilityMessage({
           servicio: base?.servicio || base?.last_service_name || '',
           durationMin: Number(base?.duracion_min || 60) || 60,
           limitDays: 6,
+          availabilityMode: normalizeAvailabilityMode(base?.availability_mode || 'commercial'),
         })}`;
         pushHistory(waId, "assistant", msgPast);
         await sendWhatsAppText(phone, msgPast);
@@ -8863,6 +9416,16 @@ Lo estoy validando con los datos del turno. En cuanto quede confirmado, le aviso
         await askForPayment(base);
         return true;
       }
+      if (result.type === "still_waiting_stylist") {
+        const msgWait = `Todavía estoy esperando la confirmación de la estilista 😊
+
+Apenas ella me diga que puede, ahí le paso los datos para la seña.`;
+        pushHistory(waId, 'assistant', msgWait);
+        await sendWhatsAppText(phone, msgWait);
+        updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+        scheduleInactivityFollowUp(waId, phone);
+        return true;
+      }
       if (result.type === "missing_core") {
         await askForMissingTurnoData(base);
         return true;
@@ -8878,9 +9441,7 @@ Servicio: ${base.servicio}
 👤 Cliente: ${base.cliente_full}
 📱 Teléfono: ${normalizePhone(base.telefono_contacto || '')}
 
-Seña recibida ✔
-
-Ahora consulto con la estilista ${TURNOS_STYLIST_NAME} y le confirmo por aquí.`.trim();
+Ahora consulto con la estilista ${TURNOS_STYLIST_NAME}. Si ella puede en ese horario, recién ahí le paso los datos para la seña.`.trim();
         pushHistory(waId, "assistant", msgPend);
         await sendWhatsAppText(phone, msgPend);
         scheduleInactivityFollowUp(waId, phone);
@@ -8919,6 +9480,10 @@ Seña recibida ✔`.trim();
       });
       let merged = {
         ...pendingDraft,
+        appointment_id: pendingDraft?.appointment_id || null,
+        availability_mode: textRequestsSiestaAvailability(text)
+          ? 'siesta'
+          : normalizeAvailabilityMode(pendingDraft?.availability_mode || 'commercial'),
         fecha: pendingDraft.fecha || relativeTurno?.fecha || "",
         hora: normalizeHourHM(pendingDraft.hora || relativeTurno?.hora || ""),
         servicio: reliablePendingTurnService || pendingDraft.servicio || pendingDraft.last_service_name || lastKnownService?.nombre || "",
@@ -9002,6 +9567,10 @@ Seña recibida ✔`.trim();
         });
 
         const merged = {
+          appointment_id: pendingDraft?.appointment_id || null,
+          availability_mode: textRequestsSiestaAvailability(text)
+            ? 'siesta'
+            : normalizeAvailabilityMode(pendingDraft?.availability_mode || 'commercial'),
           fecha: toYMD(turno?.fecha || pendingDraft?.fecha || relativeTurno?.fecha || ""),
           hora: normalizeHourHM(turno?.hora || pendingDraft?.hora || relativeTurno?.hora || ""),
           servicio: reliableTurnService || pendingDraft?.servicio || lastKnownService?.nombre || "",
@@ -9098,7 +9667,7 @@ Si después necesita algo, estoy acá ✨`;
     if (textAsksForServicesList(text)) {
       const services = await getServicesCatalog();
       const parts = formatServicesListAll(services, 8);
-      for (const part of parts.slice(0, 3)) {
+      for (const part of parts) {
         pushHistory(waId, "assistant", part);
         await sendWhatsAppText(phone, part);
       }
