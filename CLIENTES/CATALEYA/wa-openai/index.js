@@ -237,6 +237,89 @@ async function ensureAppointmentTables() {
 }
 
 
+async function ensureCourseEnrollmentTables() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS course_enrollment_drafts (
+      wa_id TEXT PRIMARY KEY,
+      wa_phone TEXT NOT NULL,
+      course_name TEXT,
+      course_category TEXT,
+      student_name TEXT,
+      contact_phone TEXT,
+      payment_status TEXT NOT NULL DEFAULT 'not_paid',
+      payment_amount NUMERIC(10,2),
+      payment_sender TEXT,
+      payment_receiver TEXT,
+      payment_proof_text TEXT,
+      payment_proof_media_id TEXT,
+      payment_proof_filename TEXT,
+      flow_step TEXT,
+      last_intent TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS course_category TEXT`);
+  await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS student_name TEXT`);
+  await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS contact_phone TEXT`);
+  await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS payment_status TEXT`);
+  await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS payment_amount NUMERIC(10,2)`);
+  await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS payment_sender TEXT`);
+  await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS payment_receiver TEXT`);
+  await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS payment_proof_text TEXT`);
+  await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS payment_proof_media_id TEXT`);
+  await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS payment_proof_filename TEXT`);
+  await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS flow_step TEXT`);
+  await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS last_intent TEXT`);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS course_enrollments (
+      id BIGSERIAL PRIMARY KEY,
+      wa_id TEXT NOT NULL,
+      wa_phone TEXT NOT NULL,
+      course_name TEXT NOT NULL,
+      course_category TEXT,
+      student_name TEXT,
+      contact_phone TEXT,
+      status TEXT NOT NULL DEFAULT 'reserved',
+      payment_status TEXT NOT NULL DEFAULT 'paid_verified',
+      payment_amount NUMERIC(10,2),
+      payment_sender TEXT,
+      payment_receiver TEXT,
+      payment_proof_text TEXT,
+      payment_proof_media_id TEXT,
+      payment_proof_filename TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS course_category TEXT`);
+  await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS student_name TEXT`);
+  await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS contact_phone TEXT`);
+  await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS status TEXT`);
+  await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS payment_status TEXT`);
+  await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS payment_amount NUMERIC(10,2)`);
+  await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS payment_sender TEXT`);
+  await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS payment_receiver TEXT`);
+  await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS payment_proof_text TEXT`);
+  await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS payment_proof_media_id TEXT`);
+  await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS payment_proof_filename TEXT`);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS course_enrollment_notifications (
+      id BIGSERIAL PRIMARY KEY,
+      enrollment_id BIGINT NOT NULL REFERENCES course_enrollments(id) ON DELETE CASCADE,
+      notification_type TEXT NOT NULL,
+      recipient_phone TEXT NOT NULL,
+      template_name TEXT,
+      wa_message_id TEXT,
+      payload JSONB,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
 
 async function ensureCommercialFollowupTables() {
   await db.query(`
@@ -787,6 +870,8 @@ const WHATSAPP_TEMPLATE_LANGUAGE = process.env.WHATSAPP_TEMPLATE_LANGUAGE || "es
 const TEMPLATE_NUEVO_TURNO_PELUQUERA = process.env.TEMPLATE_NUEVO_TURNO_PELUQUERA || "consulta_disponibilidad_peluquera";
 const TEMPLATE_TURNO_CONFIRMADO_PELUQUERA = process.env.TEMPLATE_TURNO_CONFIRMADO_PELUQUERA || "turno_confirmado_peluquera";
 const STYLIST_NOTIFY_PHONE_RAW = process.env.STYLIST_NOTIFY_PHONE || "3868 466370";
+const COURSE_NOTIFY_PHONE_RAW = process.env.COURSE_NOTIFY_PHONE || STYLIST_NOTIFY_PHONE_RAW;
+const TEMPLATE_CURSO_SENA_RECIBIDA = process.env.TEMPLATE_CURSO_SENA_RECIBIDA || "inscripcion_curso_sena_recibida";
 const APPOINTMENT_TEMPLATE_SCAN_MS = Number(process.env.APPOINTMENT_TEMPLATE_SCAN_MS || 60000);
 
 const ENABLE_COMMERCIAL_FOLLOWUPS = String(process.env.ENABLE_COMMERCIAL_FOLLOWUPS || "true").toLowerCase() === "true";
@@ -2159,6 +2244,13 @@ async function shouldSuppressInactivityFollowUp(waId) {
     console.error("Error verificando borrador de turno para inactividad:", e?.response?.data || e?.message || e);
   }
 
+  try {
+    const courseDraft = await getCourseEnrollmentDraft(waId);
+    if (courseDraft) return true;
+  } catch (e) {
+    console.error("Error verificando borrador de inscripción para inactividad:", e?.response?.data || e?.message || e);
+  }
+
   if (lastAssistantLooksLikeTurnoMessage(waId)) return true;
   return false;
 }
@@ -2761,6 +2853,8 @@ const TURNOS_HORARIOS_TXT = "Lunes a Sábados en horarios comerciales de 10, 11,
 const TURNOS_SENA_TXT = "$10.000";
 const TURNOS_ALIAS = "Cataleya178";
 const TURNOS_ALIAS_TITULAR = "Monica Pacheco";
+const COURSE_SENA_AMOUNT = 10000;
+const COURSE_SENA_TXT = "$10.000";
 const TURNOS_ALLOWED_BLOCKS_COMMERCIAL = [
   { label: "mañana", start: "10:00", end: "13:00" },
   { label: "tarde", start: "17:00", end: "21:00" },
@@ -3148,6 +3242,388 @@ async function saveAppointmentDraft(waId, waPhone, draft) {
 
 async function deleteAppointmentDraft(waId) {
   await db.query(`DELETE FROM appointment_drafts WHERE wa_id = $1`, [waId]);
+}
+
+function mapCourseEnrollmentDraftRow(row) {
+  if (!row) return null;
+  return {
+    curso_nombre: row.course_name || '',
+    curso_categoria: row.course_category || '',
+    alumno_nombre: row.student_name || '',
+    telefono_contacto: row.contact_phone || row.wa_phone || '',
+    payment_status: row.payment_status || 'not_paid',
+    payment_amount: row.payment_amount == null ? null : Number(row.payment_amount),
+    payment_sender: row.payment_sender || '',
+    payment_receiver: row.payment_receiver || '',
+    payment_proof_text: row.payment_proof_text || '',
+    payment_proof_media_id: row.payment_proof_media_id || '',
+    payment_proof_filename: row.payment_proof_filename || '',
+    flow_step: row.flow_step || '',
+    last_intent: row.last_intent || '',
+    wa_phone: row.wa_phone || '',
+  };
+}
+
+async function getCourseEnrollmentDraft(waId) {
+  const r = await db.query(`SELECT * FROM course_enrollment_drafts WHERE wa_id = $1 LIMIT 1`, [waId]);
+  return mapCourseEnrollmentDraftRow(r.rows[0]);
+}
+
+async function saveCourseEnrollmentDraft(waId, waPhone, draft) {
+  const d = draft || {};
+  await db.query(
+    `INSERT INTO course_enrollment_drafts (
+      wa_id, wa_phone, course_name, course_category, student_name, contact_phone,
+      payment_status, payment_amount, payment_sender, payment_receiver,
+      payment_proof_text, payment_proof_media_id, payment_proof_filename,
+      flow_step, last_intent, updated_at
+    ) VALUES (
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW()
+    )
+    ON CONFLICT (wa_id) DO UPDATE SET
+      wa_phone = EXCLUDED.wa_phone,
+      course_name = EXCLUDED.course_name,
+      course_category = EXCLUDED.course_category,
+      student_name = EXCLUDED.student_name,
+      contact_phone = EXCLUDED.contact_phone,
+      payment_status = EXCLUDED.payment_status,
+      payment_amount = EXCLUDED.payment_amount,
+      payment_sender = EXCLUDED.payment_sender,
+      payment_receiver = EXCLUDED.payment_receiver,
+      payment_proof_text = EXCLUDED.payment_proof_text,
+      payment_proof_media_id = EXCLUDED.payment_proof_media_id,
+      payment_proof_filename = EXCLUDED.payment_proof_filename,
+      flow_step = EXCLUDED.flow_step,
+      last_intent = EXCLUDED.last_intent,
+      updated_at = NOW()`,
+    [
+      waId,
+      normalizePhone(waPhone || d.telefono_contacto || ''),
+      d.curso_nombre || null,
+      d.curso_categoria || null,
+      d.alumno_nombre || null,
+      normalizePhone(d.telefono_contacto || waPhone || '') || null,
+      d.payment_status || 'not_paid',
+      d.payment_amount == null ? null : Number(d.payment_amount),
+      d.payment_sender || null,
+      d.payment_receiver || null,
+      d.payment_proof_text || null,
+      d.payment_proof_media_id || null,
+      d.payment_proof_filename || null,
+      d.flow_step || null,
+      d.last_intent || null,
+    ]
+  );
+}
+
+async function deleteCourseEnrollmentDraft(waId) {
+  await db.query(`DELETE FROM course_enrollment_drafts WHERE wa_id = $1`, [waId]);
+}
+
+function inferCourseEnrollmentFlowStep(base = {}) {
+  if (!String(base?.curso_nombre || '').trim()) return 'awaiting_course';
+  if (!String(base?.alumno_nombre || '').trim()) return 'awaiting_name';
+  if (!String(base?.telefono_contacto || '').trim()) return 'awaiting_phone';
+  if (base?.payment_status === 'payment_review') return 'payment_review';
+  if (base?.payment_status !== 'paid_verified') return 'awaiting_payment';
+  return 'reserved';
+}
+
+function mergeContactIntoCourseEnrollment({ draft, text, waPhone, explicitName = '' }) {
+  const out = { ...(draft || {}) };
+  const info = extractContactInfo(text || '');
+  const candidateName = cleanNameCandidate(explicitName || info?.nombre || '');
+  const nameParts = splitNameParts(candidateName);
+  if (!out.alumno_nombre && nameParts.fullName && nameParts.lastName) {
+    out.alumno_nombre = nameParts.fullName;
+  }
+  if (!out.telefono_contacto) {
+    out.telefono_contacto = normalizePhone(info?.telefono || waPhone || '');
+  }
+  return out;
+}
+
+function buildCourseEnrollmentMissingCourseMessage(courses = []) {
+  const rows = Array.isArray(courses) ? courses.filter((x) => x?.nombre).slice(0, 8) : [];
+  if (!rows.length) {
+    return `Para inscribirle necesito que me diga a qué curso quiere anotarse 😊`;
+  }
+  const opts = rows.map((c) => `🎓 ${c.nombre}`).join('\n');
+  return `Para reservarle el lugar necesito que me diga cuál es el curso 😊
+
+Opciones cargadas:
+${opts}`;
+}
+
+function buildCourseEnrollmentNeedNameMessage(courseName = '') {
+  const courseTxt = courseName ? ` en *${courseName}*` : '';
+  return `Perfecto 😊 Para reservarle el lugar${courseTxt}, necesito el *nombre y apellido* del estudiante.`;
+}
+
+function buildCourseEnrollmentNeedPhoneMessage() {
+  return `Perfecto 😊 Voy a dejar este mismo número de WhatsApp como contacto.
+
+Si prefiere otro número, me lo puede pasar ahora.`;
+}
+
+function buildCourseEnrollmentPaymentMessage(base = {}) {
+  const courseName = String(base?.curso_nombre || '').trim();
+  return [
+    `Perfecto 😊 Ya tengo los datos para la inscripción${courseName ? ` de *${courseName}*` : ''}.`,
+    '',
+    `*PARA RESERVAR EL LUGAR SE SOLICITA UNA SEÑA DE ${COURSE_SENA_TXT}*`,
+    '',
+    '💳 Datos para la transferencia',
+    '',
+    'Alias:',
+    TURNOS_ALIAS,
+    '',
+    'Titular:',
+    TURNOS_ALIAS_TITULAR,
+    '',
+    'Cuando haga la transferencia, envíe por aquí el comprobante 📩',
+  ].join('\n').trim();
+}
+
+function buildCourseEnrollmentReviewMessage(base = {}) {
+  const courseName = String(base?.curso_nombre || '').trim();
+  return courseName
+    ? `Ya me quedó cargado el comprobante de *${courseName}* 😊
+
+Si quiere, puede enviarme una captura donde se vea bien el monto de ${COURSE_SENA_TXT} y el titular *${TURNOS_ALIAS_TITULAR}* para terminar de validarlo.`
+    : `Ya me quedó cargado el comprobante 😊
+
+Si quiere, puede enviarme una captura donde se vea bien el monto de ${COURSE_SENA_TXT} y el titular *${TURNOS_ALIAS_TITULAR}* para terminar de validarlo.`;
+}
+
+async function tryApplyPaymentToCourseEnrollmentDraft(base, { text, mediaMeta } = {}) {
+  const next = { ...(base || {}) };
+  const rawText = String(text || '').trim();
+  const previousProofText = String(next.payment_proof_text || '').trim();
+  const previousProofExists = !!(next.payment_proof_media_id || previousProofText);
+  const userSaysProofWasSent = looksLikeProofAlreadySent(rawText);
+  const maybeProof = !!mediaMeta || detectSenaPaid({ text: rawText }) || looksLikePaymentProofText(rawText) || userSaysProofWasSent;
+  if (!maybeProof) return next;
+
+  next.payment_proof_text = rawText || next.payment_proof_text || '';
+  next.payment_proof_media_id = mediaMeta?.id || next.payment_proof_media_id || '';
+  next.payment_proof_filename = mediaMeta?.filename || mediaMeta?.file_name || next.payment_proof_filename || '';
+
+  const analysisText = [rawText, previousProofText].filter(Boolean).join('\n').slice(0, 7000);
+  const aiPago = await extractPagoInfoWithAI(analysisText);
+  const aiMonto = extractMoneyAmountFromText(aiPago?.monto || '') || null;
+  const heuristicAmount = extractMoneyAmountFromText(analysisText) || null;
+  const receiverDetected = detectTitularMonicaPacheco(analysisText) || isExpectedReceiver(aiPago?.receptor || '');
+  const amountLooksRight = aiMonto == COURSE_SENA_AMOUNT || heuristicAmount == COURSE_SENA_AMOUNT || detectMonto10000(analysisText);
+  const aiLooksLikeProof = !!aiPago?.es_comprobante;
+  const canVerifyWithConfidence = (receiverDetected && amountLooksRight) || (aiLooksLikeProof && receiverDetected && amountLooksRight);
+
+  if (canVerifyWithConfidence) {
+    next.payment_status = 'paid_verified';
+    next.payment_amount = COURSE_SENA_AMOUNT;
+    next.payment_receiver = TURNOS_ALIAS_TITULAR;
+    if (aiPago?.pagador && !next.payment_sender) next.payment_sender = aiPago.pagador;
+    return next;
+  }
+
+  if ((mediaMeta || userSaysProofWasSent || previousProofExists) && !paymentMessageIsTooWeakToVerify(rawText)) {
+    next.payment_status = next.payment_status === 'paid_verified' ? 'paid_verified' : 'payment_review';
+    if (next.payment_status !== 'paid_verified') {
+      next.payment_amount = aiMonto || heuristicAmount || next.payment_amount || null;
+      next.payment_receiver = receiverDetected ? TURNOS_ALIAS_TITULAR : (next.payment_receiver || '');
+      if (aiPago?.pagador && !next.payment_sender) next.payment_sender = aiPago.pagador;
+    }
+    return next;
+  }
+
+  return next;
+}
+
+async function createCourseEnrollmentRecord({ waId, waPhone, draft }) {
+  const d = draft || {};
+  if (d.payment_proof_media_id) {
+    const existing = await db.query(
+      `SELECT *
+         FROM course_enrollments
+        WHERE wa_id = $1
+          AND course_name = $2
+          AND payment_proof_media_id = $3
+        LIMIT 1`,
+      [waId, d.curso_nombre || '', d.payment_proof_media_id]
+    );
+    if (existing.rows?.[0]) return existing.rows[0];
+  }
+
+  const r = await db.query(
+    `INSERT INTO course_enrollments (
+      wa_id, wa_phone, course_name, course_category, student_name, contact_phone,
+      status, payment_status, payment_amount, payment_sender, payment_receiver,
+      payment_proof_text, payment_proof_media_id, payment_proof_filename,
+      created_at, updated_at
+    ) VALUES (
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW()
+    ) RETURNING *`,
+    [
+      waId,
+      normalizePhone(waPhone || d.telefono_contacto || ''),
+      d.curso_nombre || '',
+      d.curso_categoria || null,
+      d.alumno_nombre || null,
+      normalizePhone(d.telefono_contacto || waPhone || '') || null,
+      'reserved',
+      d.payment_status || 'paid_verified',
+      d.payment_amount == null ? COURSE_SENA_AMOUNT : Number(d.payment_amount),
+      d.payment_sender || null,
+      d.payment_receiver || TURNOS_ALIAS_TITULAR,
+      d.payment_proof_text || null,
+      d.payment_proof_media_id || null,
+      d.payment_proof_filename || null,
+    ]
+  );
+  return r.rows?.[0] || null;
+}
+
+async function finalizeCourseEnrollmentFlow({ waId, phone, draft }) {
+  const base = { ...(draft || {}) };
+  base.flow_step = inferCourseEnrollmentFlowStep(base);
+  if (!base.curso_nombre) return { type: 'need_course' };
+  if (!base.alumno_nombre) return { type: 'need_name' };
+  if (!base.telefono_contacto) return { type: 'need_phone' };
+  if (base.payment_status === 'payment_review') return { type: 'payment_review' };
+  if (base.payment_status !== 'paid_verified') return { type: 'need_payment' };
+  const created = await createCourseEnrollmentRecord({ waId, waPhone: phone, draft: base });
+
+  let managerNotification = null;
+  try {
+    managerNotification = await notifyCourseManagerEnrollmentPaid(created || {
+      id: null,
+      student_name: base.alumno_nombre || '',
+      course_name: base.curso_nombre || '',
+      wa_phone: normalizePhone(phone || ''),
+      contact_phone: normalizePhone(base.telefono_contacto || phone || ''),
+      payment_proof_filename: base.payment_proof_filename || '',
+    });
+  } catch (e) {
+    console.error('❌ Error notificando inscripción de curso a responsable:', e?.response?.data || e?.message || e);
+  }
+
+  await deleteCourseEnrollmentDraft(waId);
+  return { type: 'reserved', enrollmentId: created?.id || null, enrollmentRow: created || null, managerNotification };
+}
+
+function buildCourseEnrollmentReservedMessage(base = {}) {
+  const courseName = String(base?.curso_nombre || '').trim();
+  const studentName = String(base?.alumno_nombre || '').trim();
+  const saludo = studentName ? `${studentName}, ` : '';
+  return [
+    `Perfecto 😊 ${saludo}ya quedó *reservado el lugar*${courseName ? ` en *${courseName}*` : ''}.`,
+    '',
+    `Se registró la seña de ${COURSE_SENA_TXT}.`,
+    '',
+    `Si necesita más información del curso, me escribe por aquí ✨`,
+  ].join('\n').trim();
+}
+
+function looksLikeCourseEnrollmentPause(text = '') {
+  const t = normalizeShortReply(text || '');
+  if (!t) return false;
+  return /^(no quiero seguir|no quiero inscribirme|ya no quiero|despues sigo|después sigo|lo dejo ahi|lo dejo ahí|frenemos|frenalo|pause|pausa|cancelar|cancelalo|cancelalo por ahora|dejalo por ahora|dejalo por ahora)$/.test(t);
+}
+
+async function extractCourseEnrollmentIntentWithAI(text, context = {}) {
+  const raw = String(text || '').trim();
+  const t = normalize(raw);
+  if (!raw) return { action: 'NONE', course_query: '' };
+
+  if (looksLikeCourseEnrollmentPause(raw)) return { action: 'PAUSE', course_query: '' };
+  if (detectSenaPaid({ text: raw }) || looksLikePaymentProofText(raw) || looksLikeProofAlreadySent(raw)) {
+    return { action: 'PAYMENT', course_query: '' };
+  }
+  if (/(inscrib|inscripción|inscripcion|anot|reserv(ar|o)? lugar|quiero ese curso|quiero ese|me quiero sumar|quiero entrar|quiero reservar mi lugar|seña|sena)/i.test(t)) {
+    return { action: 'START_SIGNUP', course_query: '' };
+  }
+  if (context?.hasDraft) return { action: 'CONTINUE_SIGNUP', course_query: '' };
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Analizá mensajes sobre cursos de un salón y devolvé SOLO JSON válido con:
+- action: START_SIGNUP | CONTINUE_SIGNUP | PAYMENT | PAUSE | NONE
+- course_query: string
+
+Reglas:
+- START_SIGNUP si la persona quiere inscribirse, anotarse, reservar lugar o señar.
+- CONTINUE_SIGNUP si ya hay flujo activo y el mensaje sigue aportando datos.
+- PAYMENT si manda o menciona comprobante, transferencia, seña o pago.
+- PAUSE si quiere frenar o cancelar por ahora.
+- NONE si solo consulta info.
+- course_query solo si el mensaje menciona claramente el curso.`
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje: raw,
+            curso_actual: context.currentCourseName || '',
+            hay_borrador_activo: !!context.hasDraft,
+            historial: context.historySnippet || '',
+          })
+        }
+      ],
+      response_format: { type: 'json_object' },
+    });
+    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    return {
+      action: String(obj.action || 'NONE').trim().toUpperCase(),
+      course_query: String(obj.course_query || '').trim(),
+    };
+  } catch {
+    return { action: 'NONE', course_query: '' };
+  }
+}
+
+async function askForMissingCourseEnrollmentData({ waId, phone, base, courseOptions = [] } = {}) {
+  const draft = { ...(base || {}) };
+  draft.flow_step = inferCourseEnrollmentFlowStep(draft);
+  draft.last_intent = draft.last_intent || 'course_signup';
+  await saveCourseEnrollmentDraft(waId, phone, draft);
+
+  if (!draft.curso_nombre) {
+    const msg = buildCourseEnrollmentMissingCourseMessage(courseOptions);
+    pushHistory(waId, 'assistant', msg);
+    await sendWhatsAppText(phone, msg);
+    return { asked: 'course', draft };
+  }
+
+  if (!draft.alumno_nombre) {
+    const msg = buildCourseEnrollmentNeedNameMessage(draft.curso_nombre || '');
+    pushHistory(waId, 'assistant', msg);
+    await sendWhatsAppText(phone, msg);
+    return { asked: 'name', draft };
+  }
+
+  if (!draft.telefono_contacto) {
+    const msg = buildCourseEnrollmentNeedPhoneMessage();
+    pushHistory(waId, 'assistant', msg);
+    await sendWhatsAppText(phone, msg);
+    return { asked: 'phone', draft };
+  }
+
+  if (draft.payment_status === 'payment_review') {
+    const msg = buildCourseEnrollmentReviewMessage(draft);
+    pushHistory(waId, 'assistant', msg);
+    await sendWhatsAppText(phone, msg);
+    return { asked: 'payment_review', draft };
+  }
+
+  const msg = buildCourseEnrollmentPaymentMessage(draft);
+  pushHistory(waId, 'assistant', msg);
+  await sendWhatsAppText(phone, msg);
+  return { asked: 'payment', draft };
 }
 
 function buildPaymentPendingMessage() {
@@ -7774,6 +8250,7 @@ Reglas de negocio:
 - PRODUCT incluye productos, insumos, stock, muebles, espejos, camillas, sillones, equipamiento y máquinas. Si menciona muebles/equipamiento, mantené PRODUCT pero pensalo como submundo MUEBLES.
 - SERVICE incluye servicios del salón y consultas para reservar/agendar turno.
 - COURSE incluye cursos, clases, capacitaciones, talleres, masterclass, workshop, seminarios y preguntas sobre cupos, inscripción, modalidad, horarios, inicio, precio o requisitos de cursos.
+- Si el cliente quiere anotarse, inscribirse, reservar lugar o señar para un curso, también sigue siendo COURSE.
 - Si una palabra puede ser producto o servicio y el cliente no lo aclaró, devolvé OTHER.
 - Si el mensaje es genérico y pide opciones, lista, qué tienen o si hay disponible, mode=LIST.
 - Si nombra algo puntual o sigue una conversación ya abierta sobre ese tema, mode=DETAIL.
@@ -8026,6 +8503,149 @@ async function sendAppointmentTemplateAndLog({ appointmentId, recipientPhone, te
 
   if (markField) await markAppointmentNotificationField(appointmentId, markField);
   return response;
+}
+
+async function insertCourseEnrollmentNotificationLog({ enrollmentId, notificationType, recipientPhone, templateName, waMessageId, payload }) {
+  await db.query(
+    `INSERT INTO course_enrollment_notifications (enrollment_id, notification_type, recipient_phone, template_name, wa_message_id, payload)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [
+      enrollmentId,
+      notificationType,
+      normalizePhone(recipientPhone || ''),
+      templateName || null,
+      waMessageId || null,
+      payload || {},
+    ]
+  );
+}
+
+async function hasCourseEnrollmentNotification({ enrollmentId, notificationType }) {
+  const r = await db.query(
+    `SELECT id FROM course_enrollment_notifications WHERE enrollment_id = $1 AND notification_type = $2 LIMIT 1`,
+    [enrollmentId, notificationType]
+  );
+  return !!r.rows?.length;
+}
+
+async function sendCourseEnrollmentTemplateAndLog({ enrollmentId, recipientPhone, templateName, notificationType, vars }) {
+  const response = await sendWhatsAppTemplate(recipientPhone, templateName, vars, {
+    enrollment_id: enrollmentId,
+    notification_type: notificationType,
+  });
+
+  await insertCourseEnrollmentNotificationLog({
+    enrollmentId,
+    notificationType,
+    recipientPhone,
+    templateName,
+    waMessageId: response?.wa_msg_id || response?.messages?.[0]?.id || null,
+    payload: { vars },
+  });
+
+  return response;
+}
+
+function buildCourseEnrollmentTemplateVars(enrollment = {}) {
+  return [
+    String(enrollment.student_name || '').trim() || 'Alumno/a',
+    String(enrollment.course_name || '').trim() || 'Curso',
+    normalizePhone(enrollment.contact_phone || enrollment.wa_phone || '') || '-',
+    COURSE_SENA_TXT,
+    'comprobante recibido',
+  ];
+}
+
+function buildCourseProofCaption(enrollment = {}) {
+  return [
+    'Comprobante enviado por alumno ✨',
+    `Alumno: ${String(enrollment.student_name || '').trim() || 'Alumno/a'}`,
+    `Curso: ${String(enrollment.course_name || '').trim() || 'Curso'}`,
+    `WhatsApp: ${normalizePhone(enrollment.contact_phone || enrollment.wa_phone || '') || '-'}`,
+    `Importe: ${COURSE_SENA_TXT}`,
+  ].join('\n');
+}
+
+function guessMimeTypeFromFilename(filename = '') {
+  const lower = String(filename || '').trim().toLowerCase();
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.pdf')) return 'application/pdf';
+  return 'application/octet-stream';
+}
+
+async function sendWhatsAppDocumentById(to, mediaId, filename, caption) {
+  await axios.post(
+    `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'document',
+      document: { id: mediaId, ...(filename ? { filename } : {}), ...(caption ? { caption } : {}) },
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+  await dbInsertMessage({
+    direction: 'out',
+    wa_peer: to,
+    name: null,
+    text: caption || '',
+    msg_type: 'document',
+    wa_msg_id: mediaId || null,
+    raw: { sent: true, media: { id: mediaId, filename: filename || `out-${mediaId}` } },
+  });
+}
+
+async function forwardCourseProofToManager(enrollment = {}) {
+  const recipient = normalizeWhatsAppRecipient(COURSE_NOTIFY_PHONE_RAW);
+  const savedName = String(enrollment.payment_proof_filename || '').trim();
+  if (!recipient || !savedName) return false;
+
+  const filePath = path.join(MEDIA_DIR, savedName);
+  if (!fs.existsSync(filePath)) return false;
+
+  const mimeType = guessMimeTypeFromFilename(savedName);
+  const mediaId = await uploadMediaToWhatsApp(filePath, mimeType);
+  const caption = buildCourseProofCaption(enrollment);
+  if (mimeType.startsWith('image/')) {
+    await sendWhatsAppImageById(recipient, mediaId, caption);
+  } else {
+    await sendWhatsAppDocumentById(recipient, mediaId, savedName, caption);
+  }
+  return true;
+}
+
+async function notifyCourseManagerEnrollmentPaid(enrollment = {}) {
+  const enrollmentId = Number(enrollment?.id || 0);
+  const recipient = normalizeWhatsAppRecipient(COURSE_NOTIFY_PHONE_RAW);
+  if (!enrollmentId || !recipient || !TEMPLATE_CURSO_SENA_RECIBIDA) return { ok: false, skipped: true };
+
+  const alreadySent = await hasCourseEnrollmentNotification({
+    enrollmentId,
+    notificationType: 'course_payment_received',
+  });
+  if (alreadySent) return { ok: true, deduped: true };
+
+  await sendCourseEnrollmentTemplateAndLog({
+    enrollmentId,
+    recipientPhone: recipient,
+    templateName: TEMPLATE_CURSO_SENA_RECIBIDA,
+    notificationType: 'course_payment_received',
+    vars: buildCourseEnrollmentTemplateVars(enrollment),
+  });
+
+  const proofForwarded = await forwardCourseProofToManager(enrollment).catch((e) => {
+    console.error('❌ Error reenviando comprobante de curso a responsable:', e?.response?.data || e?.message || e);
+    return false;
+  });
+
+  return { ok: true, proofForwarded };
 }
 
 async function sendNewAppointmentTemplateToStylist(appt) {
@@ -8779,6 +9399,7 @@ lastCloseContext.set(waId, {
       const wrapUpControl = await classifyConversationWrapUpWithAI(text, {
         lastAssistantMessage: getLastAssistantMessage(waId)?.content || '',
         pendingAppointment: !!(await getAppointmentDraft(waId)),
+        pendingCourseEnrollment: !!(await getCourseEnrollmentDraft(waId)),
         hasProductContext: !!getLastProductContext(waId),
         hasBeautyContext: !!getLastResolvedBeauty(waId) || !!getPendingAmbiguousBeauty(waId) || !!getLastKnownService(waId, null),
         hasCourseContext: !!getLastCourseContext(waId),
@@ -8793,6 +9414,7 @@ lastCloseContext.set(waId, {
         lastServiceByUser.delete(waId);
 
         try { await deleteAppointmentDraft(waId); } catch {}
+        try { await deleteCourseEnrollmentDraft(waId); } catch {}
         if (inactivityTimers.has(waId)) {
           clearTimeout(inactivityTimers.get(waId));
           inactivityTimers.delete(waId);
@@ -8958,6 +9580,7 @@ updateLastCloseContext(waId, {
 
     // ===================== ✅ TURNOS (Calendar + Railway Postgres) =====================
     let pendingDraft = await getAppointmentDraft(waId);
+    let pendingCourseDraft = await getCourseEnrollmentDraft(waId);
     let pendingStylistSuggestion = getPendingStylistSuggestion(waId);
 
     if (!pendingDraft && pendingStylistSuggestion) {
@@ -9048,6 +9671,90 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
 
     const recentDbMessages = await getRecentDbMessages(phone, 12);
     const convForAI = mergeConversationForAI(recentDbMessages, ensureConv(waId).messages || []);
+
+    if (pendingCourseDraft) {
+      const courseDraftIntent = await extractCourseEnrollmentIntentWithAI(text, {
+        hasDraft: true,
+        currentCourseName: pendingCourseDraft?.curso_nombre || '',
+        historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1200),
+      });
+
+      if (courseDraftIntent.action === 'PAUSE') {
+        await deleteCourseEnrollmentDraft(waId);
+        pendingCourseDraft = null;
+        const msgPauseCourse = `Perfecto 😊
+
+Frené la inscripción al curso por ahora.
+
+Cuando quiera retomarla, me escribe y seguimos desde ahí.`;
+        pushHistory(waId, 'assistant', msgPauseCourse);
+        await sendWhatsAppText(phone, msgPauseCourse);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+
+      if (!looksLikeAppointmentIntent(text, { pendingDraft, lastService: getLastKnownService(waId, pendingDraft) }) && !isExplicitProductIntent(text) && !isExplicitServiceIntent(text)) {
+        const courses = await getCoursesCatalog();
+        const courseCtxForDraft = {
+          ...(getLastCourseContext(waId) || {}),
+          selectedName: pendingCourseDraft?.curso_nombre || getLastCourseContext(waId)?.selectedName || '',
+          currentCourseName: pendingCourseDraft?.curso_nombre || getLastCourseContext(waId)?.currentCourseName || '',
+        };
+        const referencedCourse = resolveCourseFromConversationContext(courses, text, courseCtxForDraft)
+          || findCourseByContextName(courses, pendingCourseDraft?.curso_nombre || '');
+
+        let mergedCourseDraft = {
+          ...pendingCourseDraft,
+          curso_nombre: pendingCourseDraft?.curso_nombre || referencedCourse?.nombre || '',
+          curso_categoria: pendingCourseDraft?.curso_categoria || referencedCourse?.categoria || '',
+          telefono_contacto: normalizePhone(pendingCourseDraft?.telefono_contacto || phone || ''),
+          last_intent: 'course_signup',
+        };
+
+        const knownFullName = splitNameParts(knownIdentity?.bestName || '');
+        if (!mergedCourseDraft.alumno_nombre && knownFullName.fullName && knownFullName.lastName) {
+          mergedCourseDraft.alumno_nombre = knownFullName.fullName;
+        }
+        mergedCourseDraft = mergeContactIntoCourseEnrollment({
+          draft: mergedCourseDraft,
+          text,
+          waPhone: phone,
+          explicitName: explicitNameAnswer || contactInfoFromText?.nombre || '',
+        });
+        mergedCourseDraft = await tryApplyPaymentToCourseEnrollmentDraft(mergedCourseDraft, { text, mediaMeta });
+        mergedCourseDraft.flow_step = inferCourseEnrollmentFlowStep(mergedCourseDraft);
+
+        if (mergedCourseDraft.payment_status === 'paid_verified') {
+          const resultCourse = await finalizeCourseEnrollmentFlow({ waId, phone, draft: mergedCourseDraft });
+          if (resultCourse.type === 'reserved') {
+            const msgReserved = buildCourseEnrollmentReservedMessage(mergedCourseDraft);
+            pushHistory(waId, 'assistant', msgReserved);
+            await sendWhatsAppText(phone, msgReserved);
+            updateLastCloseContext(waId, {
+              intentType: 'COURSE',
+              interest: buildHubSpotCourseInterestLabel(mergedCourseDraft.curso_nombre || ''),
+              suppressInactivityPrompt: false,
+            });
+            scheduleInactivityFollowUp(waId, phone);
+            return;
+          }
+        }
+
+        await askForMissingCourseEnrollmentData({
+          waId,
+          phone,
+          base: mergedCourseDraft,
+          courseOptions: courses,
+        });
+        updateLastCloseContext(waId, {
+          intentType: 'COURSE',
+          interest: buildHubSpotCourseInterestLabel(mergedCourseDraft.curso_nombre || ''),
+          suppressInactivityPrompt: true,
+        });
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+    }
 
     if (pendingDraft) {
       const draftControl = await classifyAppointmentDraftControl(text, {
@@ -10406,6 +11113,97 @@ ${some}
       const isOnlyFollowupGoal = !cleanedDirectFollowupText && !!followupGoal;
       const isDirectCurrentCourseFollowup = !!activeCourse && isOnlyFollowupGoal;
       const isExplicitReferencedCourseFollowup = !!referencedCourse && !!followupGoal;
+      const courseEnrollmentIntent = await extractCourseEnrollmentIntentWithAI(text, {
+        hasDraft: !!pendingCourseDraft,
+        currentCourseName: activeCourse?.nombre || referencedCourse?.nombre || lastCourseContext?.selectedName || '',
+        historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1200),
+      });
+      const wantsCourseSignup = followupGoal === 'SIGNUP' || ['START_SIGNUP', 'CONTINUE_SIGNUP', 'PAYMENT'].includes(courseEnrollmentIntent.action || '');
+
+      if (wantsCourseSignup) {
+        const signupQuery = courseEnrollmentIntent.course_query || activeCourse?.nombre || referencedCourse?.nombre || lastCourseContext?.selectedName || text;
+        const signupMatches = signupQuery ? findCourses(courses, signupQuery, 'DETAIL') : [];
+        const signupCourse = activeCourse || referencedCourse || signupMatches[0] || findCourseByContextName(courses, courseEnrollmentIntent.course_query || '') || null;
+        const knownFullName = splitNameParts(knownIdentity?.bestName || '');
+        let baseCourseDraft = {
+          ...(pendingCourseDraft || {}),
+          curso_nombre: pendingCourseDraft?.curso_nombre || signupCourse?.nombre || '',
+          curso_categoria: pendingCourseDraft?.curso_categoria || signupCourse?.categoria || '',
+          alumno_nombre: pendingCourseDraft?.alumno_nombre || ((knownFullName.fullName && knownFullName.lastName) ? knownFullName.fullName : ''),
+          telefono_contacto: normalizePhone(pendingCourseDraft?.telefono_contacto || phone || ''),
+          payment_status: pendingCourseDraft?.payment_status || 'not_paid',
+          payment_amount: pendingCourseDraft?.payment_amount ?? null,
+          payment_sender: pendingCourseDraft?.payment_sender || '',
+          payment_receiver: pendingCourseDraft?.payment_receiver || '',
+          payment_proof_text: pendingCourseDraft?.payment_proof_text || '',
+          payment_proof_media_id: pendingCourseDraft?.payment_proof_media_id || '',
+          payment_proof_filename: pendingCourseDraft?.payment_proof_filename || '',
+          last_intent: 'course_signup',
+        };
+        baseCourseDraft = mergeContactIntoCourseEnrollment({
+          draft: baseCourseDraft,
+          text,
+          waPhone: phone,
+          explicitName: explicitNameAnswer || contactInfoFromText?.nombre || '',
+        });
+        baseCourseDraft = await tryApplyPaymentToCourseEnrollmentDraft(baseCourseDraft, { text, mediaMeta });
+        baseCourseDraft.flow_step = inferCourseEnrollmentFlowStep(baseCourseDraft);
+
+        if (!baseCourseDraft.curso_nombre) {
+          const suggestedCourses = activeCourse ? [activeCourse] : (signupMatches.length ? signupMatches : courses);
+          await askForMissingCourseEnrollmentData({
+            waId,
+            phone,
+            base: baseCourseDraft,
+            courseOptions: suggestedCourses,
+          });
+          updateLastCloseContext(waId, {
+            intentType: 'COURSE',
+            interest: buildHubSpotCourseInterestLabel(courseEnrollmentIntent.course_query || text),
+            suppressInactivityPrompt: true,
+          });
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
+
+        if (baseCourseDraft.payment_status === 'paid_verified') {
+          const resultCourse = await finalizeCourseEnrollmentFlow({ waId, phone, draft: baseCourseDraft });
+          if (resultCourse.type === 'reserved') {
+            const msgReserved = buildCourseEnrollmentReservedMessage(baseCourseDraft);
+            pushHistory(waId, 'assistant', msgReserved);
+            await sendWhatsAppText(phone, msgReserved);
+            updateLastCloseContext(waId, {
+              intentType: 'COURSE',
+              interest: buildHubSpotCourseInterestLabel(baseCourseDraft.curso_nombre || ''),
+              suppressInactivityPrompt: false,
+            });
+            scheduleInactivityFollowUp(waId, phone);
+            return;
+          }
+        }
+
+        await askForMissingCourseEnrollmentData({
+          waId,
+          phone,
+          base: baseCourseDraft,
+          courseOptions: signupCourse ? [signupCourse] : signupMatches,
+        });
+        setLastCourseContext(waId, {
+          query: signupCourse?.nombre || lastCourseContext?.query || 'cursos',
+          selectedName: signupCourse?.nombre || '',
+          currentCourseName: signupCourse?.nombre || '',
+          lastOptions: mergeCourseContextRows(signupCourse ? [signupCourse] : signupMatches, previousRecentCourses).map((c) => c.nombre).filter(Boolean).slice(0, 10),
+          recentCourses: mergeCourseContextRows(signupCourse ? [signupCourse] : signupMatches, previousRecentCourses),
+          requestedInterest: buildHubSpotCourseInterestLabel(signupCourse?.nombre || courseEnrollmentIntent.course_query || text),
+        });
+        updateLastCloseContext(waId, {
+          intentType: 'COURSE',
+          interest: buildHubSpotCourseInterestLabel(baseCourseDraft.curso_nombre || courseEnrollmentIntent.course_query || text),
+          suppressInactivityPrompt: true,
+        });
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
 
       if (isDirectCurrentCourseFollowup || isExplicitReferencedCourseFollowup) {
         const naturalCourseReply = formatNaturalCourseFollowupReply(activeCourse, followupGoal || 'DETAIL');
@@ -10637,6 +11435,7 @@ const PORT = process.env.PORT || 3000;
 (async () => {
   await ensureDb();
   await ensureAppointmentTables();
+  await ensureCourseEnrollmentTables();
   await ensureCommercialFollowupTables();
   console.log(hasHubSpotEnabled()
     ? "✅ HubSpot CRM habilitado para seguimiento al cierre de charla"
