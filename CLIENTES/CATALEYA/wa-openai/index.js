@@ -2793,24 +2793,47 @@ function textRequestsSiestaAvailability(text = '') {
   return /(ninguno de esos horarios|ninguno me sirve|no me sirve ninguno|no me sirven esos horarios|no puedo en esos horarios|no puedo ni a la manana ni a la tarde|no puedo ni a la mañana ni a la tarde|tenes a la siesta|tenes horario de siesta|tienen horario de siesta|siesta|14 hs|15 hs|16 hs|a las 14|a las 15|a las 16)/i.test(t);
 }
 
+function looksLikeAlternativeTurnoRequest(text = '') {
+  const t = normalize(text || '');
+  if (!t) return false;
+  return /(no me sirve ninguno|ninguno me sirve|ninguno de esos horarios|no me sirve ningun horario|no me sirve ningún horario|no me sirven esos horarios|otro horario|otra hora|otro dia|otro día|otras opciones|revis[áa] otras opciones|quiero a las 14|quiero a las 15|quiero a las 16|sera posible|será posible|podra ser|podrá ser|tenes algo a las 14|tenes algo a las 15|tenes algo a las 16|puede ser a las 14|puede ser a las 15|puede ser a las 16|siesta)/i.test(t);
+}
+
 function buildCommercialHoursBridge() {
   return 'Primero trabajo con los horarios comerciales de 10, 11, 12, 17, 18, 19 y 20 hs. Si ninguno de esos le sirve, también puedo revisar una franja especial de siesta a las 14, 15 o 16 hs 😊';
+}
+
+function dateValueToYMD(value) {
+  if (!value) return '';
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return formatYMDHMInTZ(value).ymd;
+
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  const direct = toYMD(raw);
+  if (direct) return direct;
+
+  const first10 = raw.slice(0, 10);
+  const fromFirst10 = toYMD(first10);
+  if (fromFirst10) return fromFirst10;
+
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime())) return formatYMDHMInTZ(parsed).ymd;
+
+  return '';
+}
+
+function formatDateEsLong(value, { includeWeekday = true } = {}) {
+  const ymd = dateValueToYMD(value);
+  if (!ymd) return String(value || '').trim();
+  return formatAppointmentDateForTemplate(ymd, { includeWeekday });
 }
 
 function buildAllowedSlotsPreviewForDate(dateYMD, availabilityMode = 'commercial') {
   const safeDate = toYMD(dateYMD);
   if (!safeDate || isSundayYMD(safeDate) || safeDate < todayYMDInTZ()) return [];
 
-  const nowLocal = formatYMDHMInTZ(new Date());
-  const nowMinutes = safeDate === nowLocal.ymd ? hmToMinutes(nowLocal.hm) : -1;
-
   return getTurnoAllowedStartTimes(availabilityMode)
-    .filter((hm) => {
-      const slotMinutes = hmToMinutes(hm);
-      if (Number.isNaN(slotMinutes)) return false;
-      if (safeDate === nowLocal.ymd && nowMinutes >= 0 && slotMinutes <= nowMinutes) return false;
-      return true;
-    })
     .map((hm) => {
       const block = getTurnoAllowedBlocks(availabilityMode).find((item) => {
         const start = hmToMinutes(item.start);
@@ -2826,7 +2849,7 @@ function buildAllowedSlotsPreviewForDate(dateYMD, availabilityMode = 'commercial
 function formatMultiplePendingAppointmentsForStylist(rows = []) {
   return (Array.isArray(rows) ? rows : [])
     .map((row, index) => {
-      const safeDate = normalizeDateValueToYMD(row?.appointment_date || '');
+      const safeDate = dateValueToYMD(row?.appointment_date || '');
       const safeTime = normalizeHourHM(row?.appointment_time || '');
       const when = safeDate ? `${capitalizeEs(weekdayEsFromYMD(safeDate))} ${ymdToDM(safeDate)}` : 'Sin fecha';
       return `${index + 1}) ${when} - ${safeTime || 'Sin hora'} - ${row?.service_name || 'Servicio'} - ${row?.client_name || 'Cliente'}`;
@@ -2847,7 +2870,7 @@ function matchStylistTextToPendingAppointment(text = '', rows = []) {
   let tied = false;
 
   for (const row of list) {
-    const rowDate = normalizeDateValueToYMD(row?.appointment_date || '');
+    const rowDate = dateValueToYMD(row?.appointment_date || '');
     const rowTime = normalizeHourHM(row?.appointment_time || '');
     const serviceName = normalize(row?.service_name || '');
     const clientFull = normalize(row?.client_name || '');
@@ -2968,24 +2991,13 @@ function extractLikelyHourFromText(text) {
   const raw = String(text || '').trim();
   if (!raw) return '';
 
-  const compactOnly = raw.replace(/\s+/g, '').trim();
-  if (/^\d{1,2}(?:[:\.]\d{1,2})?\s*(?:hs|hora|horas)?$/i.test(raw) || /^\d{1,2}(?:[:\.]\d{1,2})?$/.test(compactOnly)) {
-    const explicit = normalizeHourHM(raw);
-    if (explicit) return explicit;
-  }
+  const explicit = normalizeHourHM(raw);
+  if (explicit) return explicit;
 
   const t = normalize(raw);
 
-  let m = t.match(/(?:a las|alas|tipo|para las|desde las|horario|hora)\s*(\d{1,2})(?:[:\.](\d{1,2}))?\s*(?:hs|hora|horas)?\b/);
-  if (m) {
-    const hh = Number(m[1]);
-    const mm = Number(m[2] || 0);
-    if (hh >= 7 && hh <= 22 && mm >= 0 && mm <= 59) {
-      return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
-    }
-  }
-
-  m = t.match(/\b(\d{1,2})(?:[:\.](\d{1,2}))?\s*(hs|hora|horas)\b/);
+  let m = raw.match(/(?:a\s*las|alas|tipo|para\s*las|desde\s*las)\s*(\d{1,2})(?:[:\.h](\d{1,2}))?\s*(?:hs?|hora|horas)?\b/i);
+  if (!m) m = raw.match(/\b(\d{1,2})(?:[:\.h](\d{1,2}))?\s*(hs?|hora|horas)\b/i);
   if (m) {
     const hh = Number(m[1]);
     const mm = Number(m[2] || 0);
@@ -3151,7 +3163,7 @@ function mapDraftRowToTurno(row) {
   if (!row) return null;
   return {
     appointment_id: row.appointment_id == null ? null : Number(row.appointment_id),
-    fecha: normalizeDateValueToYMD(row.appointment_date || ''),
+    fecha: dateValueToYMD(row.appointment_date || ''),
     hora: row.appointment_time ? String(row.appointment_time).slice(0, 5) : "",
     servicio: row.service_name || "",
     duracion_min: Number(row.duration_min || 60) || 60,
@@ -3425,7 +3437,7 @@ function mapAppointmentRowToDraft(row) {
   if (!row) return null;
   return {
     appointment_id: row.id == null ? null : Number(row.id),
-    fecha: normalizeDateValueToYMD(row.appointment_date || ''),
+    fecha: dateValueToYMD(row.appointment_date || ''),
     hora: row.appointment_time ? String(row.appointment_time).slice(0, 5) : '',
     servicio: row.service_name || '',
     duracion_min: Number(row.duration_min || 60) || 60,
@@ -3544,15 +3556,14 @@ async function updateAppointmentStatus(appointmentId, patch = {}) {
 
 function buildAppointmentPaymentMessageFromRow(row) {
   const appt = row || {};
-  const dateYMD = normalizeDateValueToYMD(appt.appointment_date || '');
-  const diaOk = dateYMD ? weekdayEsFromYMD(dateYMD) : '';
-  const fechaTxt = dateYMD ? ymdToDMY(dateYMD) : '';
+  const dateYMD = dateValueToYMD(appt.appointment_date || '');
+  const fechaHumana = dateYMD ? formatAppointmentDateForTemplate(dateYMD) : '';
   const horaTxt = normalizeHourHM(appt.appointment_time || '') || String(appt.appointment_time || '').slice(0, 5);
   return [
     `Perfecto 😊 ${TURNOS_STYLIST_NAME} ya confirmó que puede tomar ese turno.`,
     '',
     `Servicio: ${appt.service_name || ''}`,
-    `📅 Día: ${diaOk ? `${diaOk} ` : ''}${fechaTxt}`.trim(),
+    `📅 Día: ${fechaHumana}`.trim(),
     `🕐 Hora: ${horaTxt}`,
     '',
     `*PARA TERMINAR DE CONFIRMAR EL TURNO SE SOLICITA UNA SEÑA DE ${TURNOS_SENA_TXT}*`,
@@ -3567,98 +3578,6 @@ function buildAppointmentPaymentMessageFromRow(row) {
     '',
     'Cuando haga la transferencia, envíe por aquí el comprobante 📩',
   ].join('\n').trim();
-}
-
-async function interpretStylistReplyWithAI({ msg = {}, text = '', appointment = null, replyCtx = null } = {}) {
-  const raw = String(text || '').trim();
-  const heuristicAction = parseStylistDecisionAction(msg, raw);
-  const heuristicDate = extractLikelyDateFromText(raw);
-  const heuristicTime = extractLikelyHourFromText(raw);
-  const originalDate = normalizeDateValueToYMD(appointment?.appointment_date || '');
-  const originalTime = normalizeHourHM(appointment?.appointment_time || '') || '';
-
-  if (!raw) {
-    return {
-      action: heuristicAction || '',
-      suggestedDateYMD: heuristicDate || originalDate || '',
-      suggestedTimeHM: heuristicTime || '',
-      cleanNote: '',
-      needsDetails: true,
-      source: 'empty',
-    };
-  }
-
-  try {
-    const completion = await openai.chat.completions.create({
-      model: PRIMARY_MODEL,
-      temperature: 0,
-      messages: [
-        {
-          role: 'system',
-          content:
-`Interpretá mensajes de una estilista que responde sobre un turno de WhatsApp.
-Devolvé SOLO JSON válido con estas claves:
-- action: "accept", "decline", "suggest" o "unknown"
-- suggested_date_ymd: string en formato YYYY-MM-DD o vacío
-- suggested_time_hm: string en formato HH:MM o vacío
-- needs_details: boolean
-- clean_note: string breve
-
-Reglas críticas:
-- Si el mensaje propone otro horario, action debe ser "suggest".
-- No confundas el número del día con la hora. Ejemplo: "martes 14 de abril a las 17" => fecha 2026-04-14 y hora 17:00, NO 14:00.
-- Si escribe mal el día de la semana pero la fecha numérica es clara, usá la fecha numérica.
-- Si solo da la hora, mantené la fecha vacía.
-- Si solo toca el botón "Sugerir otro" sin detallar día/hora, needs_details=true.
-- Si el mensaje es "sí, puedo", action="accept".
-- Si el mensaje es "no puedo", action="decline".
-- No inventes datos.`
-        },
-        {
-          role: 'user',
-          content: JSON.stringify({
-            mensaje: raw,
-            turno_original: {
-              fecha: originalDate,
-              hora: originalTime,
-              servicio: appointment?.service_name || '',
-              cliente: appointment?.client_name || '',
-            },
-            contexto_esperando_detalle: !!replyCtx?.awaiting_suggestion_details,
-            boton: msg?.button?.text || msg?.interactive?.button_reply?.title || '',
-          })
-        }
-      ],
-      response_format: { type: 'json_object' },
-    });
-
-    const parsed = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
-    const action = ['accept', 'decline', 'suggest', 'unknown'].includes(String(parsed?.action || '').trim())
-      ? String(parsed.action).trim()
-      : '';
-    const aiDate = normalizeDateValueToYMD(parsed?.suggested_date_ymd || '');
-    const aiTime = normalizeHourHM(parsed?.suggested_time_hm || '');
-    const note = String(parsed?.clean_note || raw).trim();
-    const needsDetails = !!parsed?.needs_details;
-
-    return {
-      action: action || heuristicAction || '',
-      suggestedDateYMD: aiDate || heuristicDate || originalDate || '',
-      suggestedTimeHM: aiTime || heuristicTime || '',
-      cleanNote: note,
-      needsDetails,
-      source: 'ai',
-    };
-  } catch {
-    return {
-      action: heuristicAction || '',
-      suggestedDateYMD: heuristicDate || originalDate || '',
-      suggestedTimeHM: heuristicTime || '',
-      cleanNote: raw,
-      needsDetails: !heuristicDate && !heuristicTime,
-      source: 'heuristic',
-    };
-  }
 }
 
 function parseStylistDecisionAction(msg = {}, text = '') {
@@ -3724,6 +3643,61 @@ async function notifyStylistTurnConfirmed(apptRow) {
   return true;
 }
 
+async function parseStylistAlternativeWithAI({ text, appointment = {} } = {}) {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return { action: '', suggested_date: '', suggested_time: '', note: '', ok: false, source: 'empty' };
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content: `Analizá el mensaje de una estilista respondiendo por WhatsApp sobre un turno. Devolvé SOLO JSON válido con:
+- action: "accept" | "decline" | "suggest" | "unknown"
+- suggested_date: "YYYY-MM-DD" o ""
+- suggested_time: "HH:MM" o ""
+- note: string
+
+Reglas:
+- Si propone un horario alternativo, action debe ser "suggest".
+- No confundas el día del mes con la hora. Ejemplo: "martes 14 de abril a las 17" => suggested_time "17:00".
+- Si solo dice una hora nueva, dejá suggested_date vacío.
+- Si solo toca el botón de aceptar/rechazar sin proponer horario, no inventes fecha ni hora.
+- Respondé con JSON estricto, sin texto extra.`
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje: raw,
+            turno_actual: {
+              fecha: dateValueToYMD(appointment?.appointment_date || ''),
+              hora: normalizeHourHM(appointment?.appointment_time || ''),
+              servicio: String(appointment?.service_name || '').trim(),
+              cliente: String(appointment?.client_name || '').trim(),
+            },
+          })
+        }
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const parsed = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const action = String(parsed?.action || '').trim().toLowerCase();
+    return {
+      action: ['accept', 'decline', 'suggest', 'unknown'].includes(action) ? action : '',
+      suggested_date: dateValueToYMD(parsed?.suggested_date || ''),
+      suggested_time: normalizeHourHM(parsed?.suggested_time || ''),
+      note: String(parsed?.note || '').trim(),
+      ok: true,
+      source: 'ai',
+    };
+  } catch (e) {
+    return { action: '', suggested_date: '', suggested_time: '', note: '', ok: false, source: 'fallback' };
+  }
+}
+
 async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
   const stylistPhone = normalizePhone(STYLIST_NOTIFY_PHONE_RAW);
   const inboundPhone = normalizePhone(phoneRaw || phone || '');
@@ -3776,10 +3750,16 @@ Respondeme sobre el mensaje puntual del turno correcto o escribime el día y la 
     return true;
   }
 
-  const stylistAi = await interpretStylistReplyWithAI({ msg, text, appointment: appt, replyCtx });
-  const suggestionDate = stylistAi.suggestedDateYMD || extractLikelyDateFromText(text) || '';
-  const suggestionTime = stylistAi.suggestedTimeHM || extractLikelyHourFromText(text) || '';
-  let action = stylistAi.action || parseStylistDecisionAction(msg, text);
+  let action = parseStylistDecisionAction(msg, text);
+  const shouldUseStylistAI = !!(String(text || '').trim() && (replyCtx?.awaiting_suggestion_details || action === 'suggest' || !action));
+  const aiStylist = shouldUseStylistAI ? await parseStylistAlternativeWithAI({ text, appointment: appt }) : null;
+
+  const suggestionDate = aiStylist?.suggested_date || extractLikelyDateFromText(text);
+  const suggestionTime = aiStylist?.suggested_time || extractLikelyHourFromText(text);
+
+  if ((!action || action === '') && aiStylist?.action && aiStylist.action !== 'unknown') {
+    action = aiStylist.action;
+  }
   if (!action && replyCtx?.awaiting_suggestion_details && (suggestionDate || suggestionTime)) {
     action = 'suggest';
   }
@@ -3793,7 +3773,7 @@ Respondeme sobre el mensaje puntual del turno correcto o escribime el día y la 
     const updated = await updateAppointmentStatus(appt.id, {
       status: 'awaiting_payment',
       payment_status: 'not_paid',
-      stylist_decision_note: stylistAi.cleanNote || String(text || '').trim() || 'Aceptado por estilista',
+      stylist_decision_note: String(text || '').trim() || 'Aceptado por estilista',
       mark_stylist_decision_at: true,
     });
     await saveAppointmentDraft(appt.wa_id, appt.wa_phone, mapAppointmentRowToDraft(updated || appt));
@@ -3807,7 +3787,7 @@ Respondeme sobre el mensaje puntual del turno correcto o escribime el día y la 
   }
 
   if (action === 'decline' || action === 'suggest') {
-    if (action === 'suggest' && (stylistSuggestionNeedsDetails(msg, text) || stylistAi.needsDetails) && !suggestionDate && !suggestionTime) {
+    if (action === 'suggest' && stylistSuggestionNeedsDetails(msg, text)) {
       setStylistReplyContext(inboundPhone, {
         appointment_id: Number(appt.id),
         awaiting_suggestion_details: true,
@@ -3820,7 +3800,7 @@ Respondeme sobre el mensaje puntual del turno correcto o escribime el día y la 
     await deleteAppointmentDraft(appt.wa_id);
     clearPendingStylistSuggestion(appt.wa_id);
 
-    const suggestedDateYMD = suggestionDate || (normalizeDateValueToYMD(appt.appointment_date || ''));
+    const suggestedDateYMD = suggestionDate || dateValueToYMD(appt.appointment_date || '');
     const suggestedTimeHM = normalizeHourHM(suggestionTime || '');
     const suggestedMode = suggestedTimeHM && isHourAllowedForAvailabilityMode(suggestedTimeHM, 'siesta') ? 'siesta' : 'commercial';
 
@@ -3835,7 +3815,7 @@ Respondeme sobre el mensaje puntual del turno correcto o escribime el día y la 
 
     await updateAppointmentStatus(appt.id, {
       status: action === 'suggest' && suggestionText ? 'stylist_suggested' : 'stylist_rejected',
-      stylist_decision_note: stylistAi.cleanNote || String(text || '').trim() || (action === 'suggest' ? 'La estilista propuso otro horario' : 'La estilista no puede en ese horario'),
+      stylist_decision_note: String(aiStylist?.note || text || '').trim() || (action === 'suggest' ? 'La estilista propuso otro horario' : 'La estilista no puede en ese horario'),
       mark_stylist_decision_at: true,
     });
 
@@ -3850,12 +3830,12 @@ Respondeme sobre el mensaje puntual del turno correcto o escribime el día y la 
         telefono_contacto: normalizePhone(appt.contact_phone || appt.wa_phone || ''),
         wa_phone: normalizePhone(appt.wa_phone || ''),
         availability_mode: normalizeAvailabilityMode(suggestedMode),
-        stylist_note: stylistAi.cleanNote || String(text || '').trim(),
+        stylist_note: String(aiStylist?.note || text || '').trim(),
       });
     }
 
     const msgClient = action === 'suggest' && suggestionText
-      ? `La estilista no puede en ese horario, pero me ofrece *${suggestedDateYMD ? `${capitalizeEs(weekdayEsFromYMD(suggestedDateYMD))} ${ymdToDM(suggestedDateYMD)} ` : ''}${suggestedTimeHM}*.
+      ? `La estilista no puede en ese horario, pero me ofrece *${formatDateEsLong(suggestedDateYMD)} ${suggestedTimeHM}*.
 
 Si le sirve, respóndame *sí* y le paso la seña. Si no, dígame otro día u horario y le paso lo disponible 😊`
       : `La estilista no puede en ese horario.
@@ -4756,38 +4736,18 @@ function ymdToDMY(ymd) {
 }
 
 function ymdToDM(ymd) {
-  const s = String(ymd || "").trim();
-  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return s;
-  return `${m[3]}/${m[2]}`;
-}
+  const safeYMD = dateValueToYMD(ymd);
+  if (!safeYMD) return String(ymd || '').trim();
 
-function normalizeDateValueToYMD(value) {
-  if (!value) return '';
-
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    const yyyy = String(value.getUTCFullYear()).padStart(4, '0');
-    const mm = String(value.getUTCMonth() + 1).padStart(2, '0');
-    const dd = String(value.getUTCDate()).padStart(2, '0');
-    return `${yyyy}-${mm}-${dd}`;
+  try {
+    const d = new Date(`${safeYMD}T12:00:00-03:00`);
+    if (Number.isNaN(d.getTime())) return String(ymd || '').trim();
+    const day = new Intl.DateTimeFormat('es-AR', { day: 'numeric', timeZone: TIMEZONE }).format(d);
+    const month = new Intl.DateTimeFormat('es-AR', { month: 'long', timeZone: TIMEZONE }).format(d);
+    return `${day} de ${month}`.trim();
+  } catch {
+    return String(ymd || '').trim();
   }
-
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
-
-  const explicit = extractExplicitDateFromText(raw);
-  if (explicit) return explicit;
-
-  const parsed = new Date(raw);
-  if (!Number.isNaN(parsed.getTime())) {
-    const yyyy = String(parsed.getUTCFullYear()).padStart(4, '0');
-    const mm = String(parsed.getUTCMonth() + 1).padStart(2, '0');
-    const dd = String(parsed.getUTCDate()).padStart(2, '0');
-    return `${yyyy}-${mm}-${dd}`;
-  }
-
-  return toYMD(raw);
 }
 
 // Acepta "DD/MM/YYYY", "DD-MM-YYYY", "YYYY-MM-DD" y devuelve siempre "YYYY-MM-DD" (si puede).
@@ -6835,23 +6795,33 @@ function getServiceBaseFromName(name) {
     .trim();
 }
 
-function resolveImplicitServiceFollowupQuery(text, lastServiceName = '') {
+function resolveImplicitServiceFollowupQuery(text, lastServiceName = '', history = []) {
   const t = normalize(text || '');
   const last = normalize(lastServiceName || '');
-  if (!t || !last) return '';
+  if (!t) return '';
 
   const mentionsMale = detectMaleContext(text);
   const mentionsFemale = detectFemaleContext(text);
   const hasExplicitServiceTerm = /(corte|keratina|botox|alisado|nutricion|nutrición|mechit|balayage|color|emulsion|emulsión|reflejos|servicio)/i.test(t);
-  const isShortFollowUp = t.length <= 48 || /^(y\b|para\b|el\b|la\b)/i.test(t);
+  const isShortFollowUp = t.length <= 64 || /^(y\b|para\b|el\b|la\b)/i.test(t);
 
-  if ((mentionsMale || mentionsFemale) && !hasExplicitServiceTerm && isShortFollowUp) {
+  if (last && (mentionsMale || mentionsFemale) && !hasExplicitServiceTerm && isShortFollowUp) {
     const base = getServiceBaseFromName(last);
     if (base) return `${base} ${mentionsMale ? 'masculino' : 'femenino'}`.trim();
   }
 
-  if (/^(y ese\?|y ese cuanto sale\?|y ese cuánto sale\?|y ese cuanto demora\?|y ese cuánto demora\?)$/i.test(t)) {
+  if (last && /^(y ese\?|y ese cuanto sale\?|y ese cuánto sale\?|y ese cuanto demora\?|y ese cuánto demora\?)$/i.test(t)) {
     return cleanServiceName(lastServiceName);
+  }
+
+  if (recentConversationWasAboutServicePrice(history) && /\bturno\b/.test(t) && !/(hoy|mañana|manana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|a las|\b\d{1,2}[:\.]\d{1,2}\b|\b\d{1,2}\s*(hs|hora|horas)\b)/i.test(t)) {
+    const cleaned = String(text || '')
+      .replace(/\b(y\s+)?un\s+turno\s+de\s+/i, '')
+      .replace(/\b(turno|para|quiero|precio|cuanto sale|cuánto sale)\b/gi, ' ')
+      .replace(/[¿?!.]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (cleaned) return cleaned;
   }
 
   return '';
@@ -7716,7 +7686,7 @@ async function getLastBookedAppointmentForUser({ waId, waPhone }) {
   return rows.map((row) => ({
     client_name: row.client_name || "",
     service_name: row.service_name || "",
-    fecha: normalizeDateValueToYMD(row.appointment_date || ''),
+    fecha: dateValueToYMD(row.appointment_date || ''),
     hora: row.appointment_time ? String(row.appointment_time).slice(0, 5) : "",
     duracion_min: Number(row.duration_min || 60) || 60,
     created_at: row.created_at || null,
@@ -7760,12 +7730,20 @@ function looksLikeAppointmentContextFollowUp(text, { pendingDraft, lastService }
   if (isExplicitProductIntent(text)) return false;
 
   const t = normalize(text || '');
-  return /(?:\blunes\b|\bmartes\b|\bmiercoles\b|\bmiércoles\b|\bjueves\b|\bviernes\b|\bsabado\b|\bsábado\b|\bdomingo\b|\bhoy\b|\bmañana\b|\bpasado\s+mañana\b|\bproximo\b|\bpróximo\b|\bel\s+dia\b|\bel\s+día\b|\by\s+el\b|\bque\s+horarios\b|\bqué\s+horarios\b|\bque\s+disponibilidad\b|\bqué\s+disponibilidad\b|\btenes\s+lugar\b|\btenés\s+lugar\b|\bdisponible\b|\bdisponibilidad\b|\ba\s+la\s+mañana\b|\bpor\s+la\s+mañana\b|\ba\s+la\s+tarde\b|\bpor\s+la\s+tarde\b|\b\d{1,2}[:.]\d{2}\b|\b\d{1,2}\s*(?:hs|horas?)\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b)/i.test(t);
+  return /(?:lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|hoy|mañana|pasado\s+mañana|proximo|próximo|el\s+dia|el\s+día|y\s+el|que\s+horarios|qué\s+horarios|que\s+disponibilidad|qué\s+disponibilidad|tenes\s+lugar|tenés\s+lugar|disponible|disponibilidad|a\s+la\s+mañana|por\s+la\s+mañana|a\s+la\s+tarde|por\s+la\s+tarde|\d{1,2}[:.]\d{2}|\d{1,2}\s*(?:hs|horas?)|\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)/i.test(t);
 }
 
-function looksLikeAppointmentIntent(text, { pendingDraft, lastService } = {}) {
+function looksLikeAppointmentIntent(text, { pendingDraft, lastService, history } = {}) {
   const t = normalize(text || '');
+  const recentServicePrice = recentConversationWasAboutServicePrice(history || []);
+  const hasConcreteScheduleSignal = /(hoy|mañana|manana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|a las|\b\d{1,2}[:\.]\d{1,2}\b|\b\d{1,2}\s*(hs|hora|horas)\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b)/i.test(t);
+
   if (isExplicitServiceInfoQuestion(text) && !/(quiero reservar|quiero sacar turno|quiero agendar|reservame|agendame|agendar turno|sacar turno|quiero el turno|quiero turno para)/i.test(t)) return false;
+
+  if (!pendingDraft && recentServicePrice && /\bturno\b/.test(t) && !hasConcreteScheduleSignal && !/(quiero reservar|quiero sacar turno|quiero agendar|reservame|agendame|confirmar turno)/i.test(t)) {
+    return false;
+  }
+
   if (/(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b)/i.test(t)) return true;
   if (pendingDraft && /(si|sí|dale|ok|oka|quiero|quiero seguir|continuar|confirmar|bien|perfecto)/i.test(t)) return true;
   if (lastService && /(quiero( ese| el)? turno|bien,? quiero el turno|dale|ok|me gustaria sacar turno|me gustaria un turno|reservame|agendame)/i.test(t)) return true;
@@ -7854,6 +7832,7 @@ Importante:
 - "no gracias" puede ser PAUSE_APPOINTMENT si solo cierra el tema del turno.
 - Si manda fecha, hora, nombre, teléfono o comprobante, casi siempre es CONTINUE_APPOINTMENT.
 - Respuestas como "el lunes a las 17", "lunes 17 hs", "a las 17", "el martes" o similares son CONTINUE_APPOINTMENT.
+- "no me sirve ninguno", "ninguno me sirve", "quiero a las 15", "tenés algo a las 15", "otro horario", "será posible a las 15", "quiero horario de siesta" => CONTINUE_APPOINTMENT. Nunca pausan el turno por sí solas.
 
 Respondé SOLO JSON.`
         },
@@ -8171,8 +8150,8 @@ async function sendWhatsAppTemplate(to, templateName, bodyVars = [], meta = {}) 
   return { ...(resp?.data || {}), wa_msg_id };
 }
 
-function formatAppointmentDateForTemplate(dateYMD) {
-  const ymd = toYMD(dateYMD);
+function formatAppointmentDateForTemplate(dateYMD, options = {}) {
+  const ymd = dateValueToYMD(dateYMD);
   if (!ymd) return '';
 
   try {
@@ -8195,7 +8174,9 @@ function formatAppointmentDateForTemplate(dateYMD) {
     }).format(d);
 
     const weekdayCap = weekday ? weekday.charAt(0).toUpperCase() + weekday.slice(1) : '';
-    return `${weekdayCap} ${day} de ${month}`.trim();
+    return options?.includeWeekday === false
+      ? `${day} de ${month}`.trim()
+      : `${weekdayCap} ${day} de ${month}`.trim();
   } catch {
     return ymdToDMY(ymd);
   }
@@ -9089,7 +9070,7 @@ lastCloseContext.set(waId, {
 
     // ✅ Si el cliente frena, posterga o cambia de tema en medio del flujo, resolvemos eso antes de seguir.
     const pauseDraftEarly = await getAppointmentDraft(waId);
-    const shouldSkipDraftPauseCheckEarly = isExplicitServiceInfoQuestion(text);
+    const shouldSkipDraftPauseCheckEarly = isExplicitServiceInfoQuestion(text) || textRequestsSiestaAvailability(text) || looksLikeAlternativeTurnoRequest(text);
     if (pauseDraftEarly && !shouldSkipDraftPauseCheckEarly) {
       const draftControlEarly = await classifyAppointmentDraftControl(text, {
         serviceName: pauseDraftEarly?.servicio || pauseDraftEarly?.last_service_name || '',
@@ -9250,15 +9231,40 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
     }
 
     if (pendingDraft && textRequestsSiestaAvailability(text) && normalizeAvailabilityMode(pendingDraft.availability_mode || 'commercial') !== 'siesta') {
-      const siestaDraft = {
+      const siestaTurno = await extractTurnoFromText({ text, customerName: name, context: pendingDraft });
+      const siestaRelative = resolveRelativeTurnoReference(text, { pendingDraft, lastBooked: await getLastBookedAppointmentForUser({ waId, waPhone: phone }) });
+      let siestaDraft = {
         ...pendingDraft,
         availability_mode: 'siesta',
+        fecha: toYMD(pendingDraft?.fecha || siestaTurno?.fecha || siestaRelative?.fecha || ''),
+        hora: normalizeHourHM(pendingDraft?.hora || siestaTurno?.hora || siestaRelative?.hora || ''),
         flow_step: pendingDraft?.fecha ? (pendingDraft?.hora ? inferDraftFlowStep({ ...pendingDraft, availability_mode: 'siesta' }) : 'awaiting_time') : 'awaiting_date',
         last_intent: 'book_appointment',
         last_service_name: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
       };
+      siestaDraft = await applyCatalogServiceDataToTurno(siestaDraft);
       await saveAppointmentDraft(waId, phone, siestaDraft);
       pendingDraft = siestaDraft;
+
+      if (siestaDraft?.fecha && siestaDraft?.hora && isHourAllowedForAvailabilityMode(siestaDraft.hora, 'siesta')) {
+        updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+        await askForMissingTurnoData(siestaDraft);
+        return;
+      }
+
+      if (!siestaDraft?.fecha && siestaDraft?.hora) {
+        const msgAskSiestaDay = `Perfecto 😊
+
+Puedo revisar el horario especial de siesta a las *${normalizeHourHM(siestaDraft.hora)}*.
+
+Decime qué día le queda mejor y sigo con ese turno.`;
+        pushHistory(waId, 'assistant', msgAskSiestaDay);
+        await sendWhatsAppText(phone, msgAskSiestaDay);
+        updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+
       const siestaMsg = pendingDraft?.fecha
         ? await buildDateAvailabilityMessage({
             dateYMD: pendingDraft.fecha,
@@ -9282,7 +9288,7 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
     const recentDbMessages = await getRecentDbMessages(phone, 12);
     const convForAI = mergeConversationForAI(recentDbMessages, ensureConv(waId).messages || []);
 
-    if (pendingDraft && !isExplicitServiceInfoQuestion(text)) {
+    if (pendingDraft && !isExplicitServiceInfoQuestion(text) && !textRequestsSiestaAvailability(text) && !looksLikeAlternativeTurnoRequest(text)) {
       const draftControl = await classifyAppointmentDraftControl(text, {
         serviceName: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
         date: pendingDraft?.fecha || '',
@@ -9490,6 +9496,9 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
     async function askForMissingTurnoData(base) {
       const servicioTxt = base?.servicio || base?.last_service_name || "";
       const availabilityMode = normalizeAvailabilityMode(base?.availability_mode || 'commercial');
+      if (servicioTxt) {
+        lastServiceByUser.set(waId, { nombre: servicioTxt, ts: Date.now() });
+      }
 
       if (!servicioTxt) {
         const msgFalt = `Perfecto 😊 vamos a coordinar su turno.
@@ -9515,6 +9524,24 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
       }
 
       if (!base?.fecha) {
+        if (base?.hora) {
+          const horaTxt = normalizeHourHM(base.hora) || base.hora;
+          const msgAskDay = availabilityMode === 'siesta'
+            ? `Perfecto 😊
+
+Puedo revisar el horario especial de siesta a las *${horaTxt}*.
+
+Decime qué día le queda mejor y sigo con ese turno.`
+            : `Perfecto 😊
+
+Tengo anotado el horario de *${horaTxt}*.
+
+Ahora decime qué día le queda mejor y sigo con ese turno.`;
+          pushHistory(waId, "assistant", msgAskDay);
+          await sendWhatsAppText(phone, msgAskDay);
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
         const msgFalt = await buildWeeklyAvailabilityMessage({
           servicio: servicioTxt,
           durationMin: Number(base?.duracion_min || 60) || 60,
@@ -9616,12 +9643,11 @@ Ahora necesito este dato 😊
 
       await saveAppointmentDraft(waId, phone, { ...base, awaiting_contact: false, flow_step: 'awaiting_payment', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' });
       updateLastCloseContext(waId, { suppressInactivityPrompt: true });
-      const diaOk = base.fecha ? weekdayEsFromYMD(base.fecha) : '';
-      const fechaTxt = base.fecha ? ymdToDMY(base.fecha) : '';
+      const fechaHumana = base.fecha ? formatAppointmentDateForTemplate(base.fecha) : '';
       const lines = [
         '',
         `Servicio: ${base.servicio || base.last_service_name || ''}`,
-        `📅 Día: ${diaOk ? `${diaOk} ` : ''}${fechaTxt}`.trim(),
+        `📅 Día: ${fechaHumana}`.trim(),
         `🕐 Hora: ${normalizeHourHM(base.hora) || base.hora || ''}`,
         '',
         `*PARA TERMINAR DE CONFIRMAR EL TURNO SE SOLICITA UNA SEÑA DE ${TURNOS_SENA_TXT}*`,
@@ -9906,7 +9932,7 @@ Seña recibida ✔`.trim();
       if (handled) return;
     }
 
-    const looksLikeTurno = looksLikeAppointmentIntent(text, { pendingDraft, lastService: lastKnownService });
+    const looksLikeTurno = looksLikeAppointmentIntent(text, { pendingDraft, lastService: lastKnownService, history: ensureConv(waId)?.messages || [] });
     if (looksLikeTurno && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
       const turno = await extractTurnoFromText({
         text,
@@ -10141,7 +10167,7 @@ Si después necesita algo, estoy acá ✨`;
       }
     }
 
-    const implicitServiceFollowupQuery = resolveImplicitServiceFollowupQuery(text, pendingDraft?.servicio || lastKnownService?.nombre || '');
+    const implicitServiceFollowupQuery = resolveImplicitServiceFollowupQuery(text, pendingDraft?.servicio || lastKnownService?.nombre || '', ensureConv(waId)?.messages || []);
     if (!pendingDraft && implicitServiceFollowupQuery && !isExplicitProductIntent(text)) {
       const services = await getServicesCatalog();
       const implicitMatches = findServices(services, implicitServiceFollowupQuery, 'DETAIL');
