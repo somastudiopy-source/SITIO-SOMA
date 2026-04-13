@@ -2788,17 +2788,9 @@ function buildInitialCommercialTurnoMessage(servicio = '') {
 
 ${servicio ? `Servicio: ${servicio}
 
-` : ''}Primero trabajo con estos horarios comerciales de lunes a sábado:
+` : ''}Te paso los próximos turnos disponibles.
 
-• 10:00
-• 11:00
-• 12:00
-• 17:00
-• 18:00
-• 19:00
-• 20:00
-
-Decime qué día y cuál de esos horarios le queda mejor.
+Decime qué día y horario le queda mejor y lo presento primero a la estilista.
 Si ninguno le sirve, me avisa y ahí reviso otras opciones.`;
 }
 
@@ -4501,7 +4493,8 @@ ${slotLines}`;
 
   const footer = mode === 'siesta'
     ? `Decime qué día y horario especial de siesta le queda mejor y lo dejo presentado a la estilista.`
-    : `Decime qué día y horario le queda mejor y lo presento primero a la estilista.`;
+    : `Decime qué día y horario le queda mejor y lo presento primero a la estilista.
+Si ninguno le sirve, me avisa y ahí reviso otras opciones.`;
 
   return `Perfecto 😊
 
@@ -4531,7 +4524,8 @@ Si quiere, le paso las opciones disponibles de lunes a sábado.`;
   if (summary?.slots?.length) {
     const footer = mode === 'siesta'
       ? 'Decime cuál le queda mejor dentro del horario especial de siesta y lo presento a la estilista.'
-      : 'Decime cuál le queda mejor y lo presento a la estilista.';
+      : `Decime cuál le queda mejor y lo presento a la estilista.
+Si ninguno le sirve, me avisa y ahí reviso otras opciones.`;
     return `Te digo lo que nos queda disponible:
 
 ${servicio ? `Servicio: ${servicio}
@@ -9361,14 +9355,12 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
       }
 
       if (!base?.fecha && !base?.hora) {
-        const msgFalt = availabilityMode === 'commercial'
-          ? buildInitialCommercialTurnoMessage(servicioTxt)
-          : await buildWeeklyAvailabilityMessage({
-              servicio: servicioTxt,
-              durationMin: Number(base?.duracion_min || 60) || 60,
-              limitDays: 6,
-              availabilityMode,
-            });
+        const msgFalt = await buildWeeklyAvailabilityMessage({
+          servicio: servicioTxt,
+          durationMin: Number(base?.duracion_min || 60) || 60,
+          limitDays: 6,
+          availabilityMode,
+        });
         pushHistory(waId, "assistant", msgFalt);
         await sendWhatsAppText(phone, msgFalt);
         scheduleInactivityFollowUp(waId, phone);
