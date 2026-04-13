@@ -2764,6 +2764,8 @@ const TURNOS_ALLOWED_BLOCKS_SIESTA = [
 ];
 const TURNOS_ALLOWED_START_TIMES_COMMERCIAL = ["10:00", "11:00", "12:00", "17:00", "18:00", "19:00", "20:00"];
 const TURNOS_ALLOWED_START_TIMES_SIESTA = ["14:00", "15:00", "16:00"];
+const TURNOS_AVAILABILITY_SLOT_OCCUPANCY_MIN = 60; // mostrar horarios por slot real de agenda sin recortar por duración del servicio
+
 
 function normalizeAvailabilityMode(mode) {
   return String(mode || '').trim().toLowerCase() === 'siesta' ? 'siesta' : 'commercial';
@@ -4566,12 +4568,12 @@ function getUpcomingTurnoDays(limit = 6) {
 
 function getAvailableSlotsForDate({ dateYMD, durationMin, events = [], availabilityMode = 'commercial' }) {
   const safeDate = toYMD(dateYMD);
-  const safeDuration = Math.max(30, Number(durationMin) || 60);
   if (!safeDate || isSundayYMD(safeDate) || safeDate < todayYMDInTZ()) return [];
 
   const nowLocal = formatYMDHMInTZ(new Date());
   const nowMinutes = safeDate === nowLocal.ymd ? hmToMinutes(nowLocal.hm) : -1;
   const slots = [];
+  const conflictDurationMin = Math.max(30, Number(TURNOS_AVAILABILITY_SLOT_OCCUPANCY_MIN) || 60);
 
   for (const hm of getTurnoAllowedStartTimes(availabilityMode)) {
     const slotMinutes = hmToMinutes(hm);
@@ -4585,12 +4587,10 @@ function getAvailableSlotsForDate({ dateYMD, durationMin, events = [], availabil
     });
     if (!block) continue;
 
-    if ((slotMinutes + safeDuration) > hmToMinutes(block.end)) continue;
-
     const hasConflict = events.some((ev) => eventOverlapsSlot(ev, {
       dateYMD: safeDate,
       startHM: hm,
-      durationMin: safeDuration,
+      durationMin: conflictDurationMin,
     }));
 
     if (!hasConflict) {
