@@ -2805,7 +2805,14 @@ function buildCommercialHoursBridge() {
 
 function dateValueToYMD(value) {
   if (!value) return '';
-  if (value instanceof Date && !Number.isNaN(value.getTime())) return formatYMDHMInTZ(value).ymd;
+
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const yyyy = String(value.getUTCFullYear()).padStart(4, '0');
+    const mm = String(value.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(value.getUTCDate()).padStart(2, '0');
+    const utcYMD = `${yyyy}-${mm}-${dd}`;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(utcYMD)) return utcYMD;
+  }
 
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -2818,7 +2825,14 @@ function dateValueToYMD(value) {
   if (fromFirst10) return fromFirst10;
 
   const parsed = new Date(raw);
-  if (!Number.isNaN(parsed.getTime())) return formatYMDHMInTZ(parsed).ymd;
+  if (!Number.isNaN(parsed.getTime())) {
+    const yyyy = String(parsed.getUTCFullYear()).padStart(4, '0');
+    const mm = String(parsed.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(parsed.getUTCDate()).padStart(2, '0');
+    const utcYMD = `${yyyy}-${mm}-${dd}`;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(utcYMD)) return utcYMD;
+    return formatYMDHMInTZ(parsed).ymd;
+  }
 
   return '';
 }
@@ -3663,13 +3677,16 @@ async function parseStylistAlternativeWithAI({ text, appointment = {} } = {}) {
 Reglas:
 - Si propone un horario alternativo, action debe ser "suggest".
 - No confundas el día del mes con la hora. Ejemplo: "martes 14 de abril a las 17" => suggested_time "17:00".
-- Si solo dice una hora nueva, dejá suggested_date vacío.
+- Si escribe algo como "lunes a las 20", interpretalo como propuesta alternativa y devolvé el próximo lunes válido, o el mismo lunes del turno actual si coincide.
+- Si solo cambia la hora y no cambia el día, dejá suggested_date vacío.
 - Si solo toca el botón de aceptar/rechazar sin proponer horario, no inventes fecha ni hora.
 - Respondé con JSON estricto, sin texto extra.`
         },
         {
           role: 'user',
           content: JSON.stringify({
+            fecha_actual: todayYMDInTZ(),
+            zona_horaria: TIMEZONE,
             mensaje: raw,
             turno_actual: {
               fecha: dateValueToYMD(appointment?.appointment_date || ''),
@@ -3696,6 +3713,76 @@ Reglas:
   } catch (e) {
     return { action: '', suggested_date: '', suggested_time: '', note: '', ok: false, source: 'fallback' };
   }
+}
+
+function extractWeekdayNumberFromText(text = '') {
+  const t = normalize(text || '');
+  if (!t) return null;
+  const weekdays = [
+    ['domingo', 0],
+    ['lunes', 1],
+    ['martes', 2],
+    ['miercoles', 3],
+    ['miércoles', 3],
+    ['jueves', 4],
+    ['viernes', 5],
+    ['sabado', 6],
+    ['sábado', 6],
+  ];
+  for (const [name, number] of weekdays) {
+    if (new RegExp(`\\b${escapeRegex(name)}\\b`, 'i').test(t)) return number;
+  }
+  return null;
+}
+
+function weekdayNumberFromYMD(ymd = '') {
+  const safeYMD = dateValueToYMD(ymd);
+  if (!safeYMD) return null;
+  const weekdayNorm = normalize(weekdayEsFromYMD(safeYMD));
+  const map = {
+    domingo: 0,
+    lunes: 1,
+    martes: 2,
+    miercoles: 3,
+    jueves: 4,
+    viernes: 5,
+    sabado: 6,
+  };
+  return Object.prototype.hasOwnProperty.call(map, weekdayNorm) ? map[weekdayNorm] : null;
+}
+
+function resolveStylistSuggestionDetails({ text, appointment = {}, aiResult = null } = {}) {
+  const apptDate = dateValueToYMD(appointment?.appointment_date || '');
+  const apptTime = normalizeHourHM(appointment?.appointment_time || '');
+  const weekdayFromText = extractWeekdayNumberFromText(text);
+  const weekdayFromAppointment = weekdayNumberFromYMD(apptDate);
+
+  let suggestedDateYMD = dateValueToYMD(aiResult?.suggested_date || '') || extractLikelyDateFromText(text) || '';
+  let suggestedTimeHM = normalizeHourHM(aiResult?.suggested_time || '') || extractLikelyHourFromText(text) || '';
+
+  if (!suggestedDateYMD && suggestedTimeHM && apptDate) {
+    suggestedDateYMD = apptDate;
+  }
+
+  if (weekdayFromText != null && apptDate && weekdayFromAppointment === weekdayFromText) {
+    suggestedDateYMD = apptDate;
+  }
+
+  if (!suggestedDateYMD && weekdayFromText != null) {
+    suggestedDateYMD = nextDateForWeekday(weekdayFromText, { includeToday: true });
+  }
+
+  if (!suggestedTimeHM && !suggestedDateYMD && weekdayFromText == null && aiResult?.action === 'suggest') {
+    return { suggestedDateYMD: '', suggestedTimeHM: '', suggestedMode: 'commercial' };
+  }
+
+  const suggestedMode = suggestedTimeHM && isHourAllowedForAvailabilityMode(suggestedTimeHM, 'siesta') ? 'siesta' : 'commercial';
+
+  return {
+    suggestedDateYMD: dateValueToYMD(suggestedDateYMD || ''),
+    suggestedTimeHM: normalizeHourHM(suggestedTimeHM || ''),
+    suggestedMode: normalizeAvailabilityMode(suggestedMode),
+  };
 }
 
 async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
@@ -3754,12 +3841,18 @@ Respondeme sobre el mensaje puntual del turno correcto o escribime el día y la 
   const shouldUseStylistAI = !!(String(text || '').trim() && (replyCtx?.awaiting_suggestion_details || action === 'suggest' || !action));
   const aiStylist = shouldUseStylistAI ? await parseStylistAlternativeWithAI({ text, appointment: appt }) : null;
 
-  const suggestionDate = aiStylist?.suggested_date || extractLikelyDateFromText(text);
-  const suggestionTime = aiStylist?.suggested_time || extractLikelyHourFromText(text);
-
   if ((!action || action === '') && aiStylist?.action && aiStylist.action !== 'unknown') {
     action = aiStylist.action;
   }
+
+  const resolvedSuggestion = resolveStylistSuggestionDetails({
+    text,
+    appointment: appt,
+    aiResult: aiStylist,
+  });
+  const suggestionDate = resolvedSuggestion.suggestedDateYMD || '';
+  const suggestionTime = resolvedSuggestion.suggestedTimeHM || '';
+
   if (!action && replyCtx?.awaiting_suggestion_details && (suggestionDate || suggestionTime)) {
     action = 'suggest';
   }
@@ -3802,14 +3895,14 @@ Respondeme sobre el mensaje puntual del turno correcto o escribime el día y la 
 
     const suggestedDateYMD = suggestionDate || dateValueToYMD(appt.appointment_date || '');
     const suggestedTimeHM = normalizeHourHM(suggestionTime || '');
-    const suggestedMode = suggestedTimeHM && isHourAllowedForAvailabilityMode(suggestedTimeHM, 'siesta') ? 'siesta' : 'commercial';
+    const suggestedMode = normalizeAvailabilityMode(resolvedSuggestion?.suggestedMode || (suggestedTimeHM && isHourAllowedForAvailabilityMode(suggestedTimeHM, 'siesta') ? 'siesta' : 'commercial'));
 
     if (action === 'suggest' && (!suggestedDateYMD || !suggestedTimeHM || !isHourAllowedForAvailabilityMode(suggestedTimeHM, suggestedMode) || isSundayYMD(suggestedDateYMD) || isPastAppointmentDateTime(suggestedDateYMD, suggestedTimeHM))) {
       setStylistReplyContext(inboundPhone, {
         appointment_id: Number(appt.id),
         awaiting_suggestion_details: true,
       });
-      await sendWhatsAppText(phone, 'Necesito que me sugieras un día y horario válido dentro de los permitidos. Ejemplo: *jueves 17 de abril a las 18 hs* o *mañana 15 hs*.');
+      await sendWhatsAppText(phone, 'Necesito que me sugieras un día y horario válido dentro de los permitidos. Ejemplo: *lunes a las 20 hs*, *jueves 17 de abril a las 18 hs* o *mañana 15 hs*.');
       return true;
     }
 
@@ -8182,7 +8275,7 @@ function buildAppointmentData(row = {}) {
     contact_phone: normalizePhone(row.contact_phone || ''),
     client_name: String(row.client_name || '').trim(),
     service_name: String(row.service_name || '').trim(),
-    appointment_date: toYMD(row.appointment_date || ''),
+    appointment_date: dateValueToYMD(row.appointment_date || ''),
     appointment_time: formatAppointmentTimeForTemplate(row.appointment_time || ''),
     status: String(row.status || '').trim(),
     stylist_notified_at: row.stylist_notified_at || null,
