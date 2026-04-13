@@ -4570,16 +4570,10 @@ async function getAvailabilitySummaries({ daysYMD, durationMin, availabilityMode
   }));
 }
 
-async function buildWeeklyAvailabilityMessage({ servicio, durationMin, limitDays = 6, availabilityMode = 'commercial', respectCalendarConflicts = false }) {
+async function buildWeeklyAvailabilityMessage({ servicio, durationMin, limitDays = 6, availabilityMode = 'commercial', respectCalendarConflicts = true }) {
   const mode = normalizeAvailabilityMode(availabilityMode);
   const days = getUpcomingTurnoDays(limitDays);
-  const summaries = respectCalendarConflicts
-    ? await getAvailabilitySummaries({ daysYMD: days, durationMin, availabilityMode: mode })
-    : days.map((dateYMD) => ({
-        dateYMD,
-        weekday: weekdayEsFromYMD(dateYMD),
-        slots: buildAllowedSlotsPreviewForDate(dateYMD, mode),
-      }));
+  const summaries = await getAvailabilitySummaries({ daysYMD: days, durationMin, availabilityMode: mode });
   const available = summaries.filter((item) => Array.isArray(item?.slots) && item.slots.length > 0);
 
   if (!available.length) {
@@ -4611,7 +4605,7 @@ ${lines.join('\n\n')}
 ${footer}`;
 }
 
-async function buildDateAvailabilityMessage({ dateYMD, servicio, durationMin, availabilityMode = 'commercial', respectCalendarConflicts = false }) {
+async function buildDateAvailabilityMessage({ dateYMD, servicio, durationMin, availabilityMode = 'commercial', respectCalendarConflicts = true }) {
   const safeDate = toYMD(dateYMD);
   if (!safeDate) return '';
 
@@ -4622,13 +4616,7 @@ Si quiere, le paso las opciones disponibles de lunes a sábado.`;
   }
 
   const mode = normalizeAvailabilityMode(availabilityMode);
-  const summary = respectCalendarConflicts
-    ? (await getAvailabilitySummaries({ daysYMD: [safeDate], durationMin, availabilityMode: mode }))[0]
-    : {
-        dateYMD: safeDate,
-        weekday: weekdayEsFromYMD(safeDate),
-        slots: buildAllowedSlotsPreviewForDate(safeDate, mode),
-      };
+  const summary = (await getAvailabilitySummaries({ daysYMD: [safeDate], durationMin, availabilityMode: mode }))[0];
   const dayLabel = `${capitalizeEs(summary?.weekday || weekdayEsFromYMD(safeDate))} ${ymdToDM(safeDate)}`;
 
   if (summary?.slots?.length) {
@@ -4645,7 +4633,7 @@ ${formatSlotsByBlockMultiline(summary.slots, mode)}
 ${footer}`;
   }
 
-  const weekly = await buildWeeklyAvailabilityMessage({ servicio, durationMin, limitDays: 6, availabilityMode: mode, respectCalendarConflicts });
+  const weekly = await buildWeeklyAvailabilityMessage({ servicio, durationMin, limitDays: 6, availabilityMode: mode, respectCalendarConflicts: true });
   return `Ese día no me queda lugar disponible dentro de ${mode === 'siesta' ? 'ese horario especial de siesta' : 'los horarios comerciales'}.
 
 ${weekly}`;
@@ -4666,7 +4654,7 @@ async function buildBusyTurnoMessage({ base }) {
 ${sameDayMsg}`;
   }
 
-  return buildWeeklyAvailabilityMessage({ servicio, durationMin: safeDuration, limitDays: 6, availabilityMode });
+  return buildWeeklyAvailabilityMessage({ servicio, durationMin: safeDuration, limitDays: 6, availabilityMode, respectCalendarConflicts: true });
 }
 
 // ===================== FECHAS =====================
