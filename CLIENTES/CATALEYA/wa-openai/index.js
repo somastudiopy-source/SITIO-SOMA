@@ -871,6 +871,7 @@ const TEMPLATE_NUEVO_TURNO_PELUQUERA = process.env.TEMPLATE_NUEVO_TURNO_PELUQUER
 const TEMPLATE_TURNO_CONFIRMADO_PELUQUERA = process.env.TEMPLATE_TURNO_CONFIRMADO_PELUQUERA || "turno_confirmado_peluquera";
 const STYLIST_NOTIFY_PHONE_RAW = process.env.STYLIST_NOTIFY_PHONE || "3868 466370";
 const COURSE_NOTIFY_PHONE_RAW = process.env.COURSE_NOTIFY_PHONE || STYLIST_NOTIFY_PHONE_RAW;
+const APPOINTMENT_ACTIVE_CONFLICT_STATUSES = ['pending_stylist_confirmation', 'awaiting_payment'];
 const TEMPLATE_CURSO_SENA_RECIBIDA = process.env.TEMPLATE_CURSO_SENA_RECIBIDA || "inscripcion_curso_sena_recibida";
 const APPOINTMENT_TEMPLATE_SCAN_MS = Number(process.env.APPOINTMENT_TEMPLATE_SCAN_MS || 60000);
 
@@ -3357,7 +3358,7 @@ ${opts}`;
 
 function buildCourseEnrollmentNeedNameMessage(courseName = '') {
   const courseTxt = courseName ? ` en *${courseName}*` : '';
-  return `Perfecto 😊 Para reservarle el lugar${courseTxt}, necesito el *nombre y apellido* del estudiante.`;
+  return `Perfecto 😊 Para reservarle el lugar${courseTxt}, necesito el *nombre y apellido del alumno o alumna que va a asistir*.`;
 }
 
 function buildCourseEnrollmentNeedPhoneMessage() {
@@ -3527,7 +3528,7 @@ function buildCourseEnrollmentReservedMessage(base = {}) {
 function looksLikeCourseEnrollmentPause(text = '') {
   const t = normalizeShortReply(text || '');
   if (!t) return false;
-  return /^(no quiero seguir|no quiero inscribirme|ya no quiero|despues sigo|después sigo|lo dejo ahi|lo dejo ahí|frenemos|frenalo|pause|pausa|cancelar|cancelalo|cancelalo por ahora|dejalo por ahora|dejalo por ahora)$/.test(t);
+  return /^(no quiero seguir|no quiero inscribirme|ya no quiero|despues sigo|después sigo|lo dejo ahi|lo dejo ahí|frenemos|frenalo|pause|pausa|cancelar|cancelalo|cancelalo por ahora|dejalo por ahora|quiero cancelar eso|quiero cancelar esto|cancelar eso|cancelar esto|quiero frenar eso|quiero frenar esto|olvidate|olvídate)$/.test(t);
 }
 
 async function extractCourseEnrollmentIntentWithAI(text, context = {}) {
@@ -3862,6 +3863,82 @@ async function getLatestAppointmentForClient({ waId, phone, statuses = [] } = {}
 
   const r = await db.query(sql, values);
   return r.rows?.[0] || null;
+}
+
+async function listAppointmentsForClient({ waId, phone, statuses = [] } = {}) {
+  const filters = [];
+  const values = [];
+  let idx = 1;
+
+  if (waId) {
+    filters.push(`wa_id = $${idx++}`);
+    values.push(String(waId));
+  }
+
+  const phoneNorm = normalizePhone(phone || '');
+  if (phoneNorm) {
+    filters.push(`(wa_phone = $${idx} OR contact_phone = $${idx})`);
+    values.push(phoneNorm);
+    idx += 1;
+  }
+
+  if (!filters.length) return [];
+
+  let sql = `SELECT * FROM appointments WHERE (${filters.join(' OR ')})`;
+  if (Array.isArray(statuses) && statuses.length) {
+    const placeholders = statuses.map(() => `$${idx++}`);
+    sql += ` AND status IN (${placeholders.join(', ')})`;
+    values.push(...statuses.map((x) => String(x)));
+  }
+  sql += ` ORDER BY updated_at DESC, created_at DESC`;
+
+  const r = await db.query(sql, values);
+  return Array.isArray(r.rows) ? r.rows : [];
+}
+
+async function archiveConflictingAppointmentsForClient({ waId, phone, reason = '', keepAppointmentId = null } = {}) {
+  const rows = await listAppointmentsForClient({
+    waId,
+    phone,
+    statuses: APPOINTMENT_ACTIVE_CONFLICT_STATUSES,
+  });
+
+  const keepId = keepAppointmentId == null ? null : Number(keepAppointmentId);
+  const affected = [];
+  for (const row of rows) {
+    if (keepId && Number(row?.id || 0) === keepId) continue;
+    await updateAppointmentStatus(row.id, {
+      status: 'cancelled_replaced',
+      stylist_decision_note: String(reason || 'Solicitud previa cerrada automáticamente para evitar cruces de flujo.').slice(0, 500),
+    });
+    affected.push(row.id);
+  }
+  return affected;
+}
+
+async function clearAppointmentStateForCourseFlow({ waId, phone, reason = '' } = {}) {
+  const draft = waId ? await getAppointmentDraft(waId) : null;
+  if (draft) await deleteAppointmentDraft(waId);
+  clearPendingStylistSuggestion(waId);
+  const archivedIds = await archiveConflictingAppointmentsForClient({
+    waId,
+    phone,
+    reason: reason || 'Flujo de turno cancelado automáticamente por inicio de inscripción a curso.',
+  });
+  return {
+    clearedDraft: !!draft,
+    clearedSuggestion: true,
+    archivedAppointments: archivedIds,
+  };
+}
+
+function looksLikeCourseFlowSignal(text = '', { lastCourseContext = null, pendingCourseDraft = null } = {}) {
+  if (pendingCourseDraft) return true;
+  const t = normalize(text || '');
+  if (!t) return false;
+  if (/(masterclass|capacitacion|capacitación|seminario|workshop|taller|curso|cursos)/i.test(t)) return true;
+  if (lastCourseContext?.selectedName && /(inscrib|inscripción|inscripcion|anot|reserv(ar|o)? lugar|seña|sena|quiero ese|quiero inscribirme|quiero reservar mi lugar|ya te transferi|ya te transferí|te mande el comprobante|te mandé el comprobante|comprobante|pago|transferencia)/i.test(t)) return true;
+  return false;
 }
 
 async function findAppointmentByNotificationMessageId(messageId) {
@@ -9479,7 +9556,7 @@ lastCloseContext.set(waId, {
 
     // ✅ Si el cliente frena, posterga o cambia de tema en medio del flujo, resolvemos eso antes de seguir.
     const pauseDraftEarly = await getAppointmentDraft(waId);
-    if (pauseDraftEarly) {
+    if (pauseDraftEarly && !quickCourseFlow) {
       const draftControlEarly = await classifyAppointmentDraftControl(text, {
         serviceName: pauseDraftEarly?.servicio || pauseDraftEarly?.last_service_name || '',
         date: pauseDraftEarly?.fecha || '',
@@ -9582,8 +9659,12 @@ updateLastCloseContext(waId, {
     let pendingDraft = await getAppointmentDraft(waId);
     let pendingCourseDraft = await getCourseEnrollmentDraft(waId);
     let pendingStylistSuggestion = getPendingStylistSuggestion(waId);
+    const quickCourseFlow = looksLikeCourseFlowSignal(text, {
+      lastCourseContext: getLastCourseContext(waId),
+      pendingCourseDraft,
+    });
 
-    if (!pendingDraft && pendingStylistSuggestion) {
+    if (!pendingDraft && pendingStylistSuggestion && !quickCourseFlow) {
       if (isWarmAffirmativeReply(text)) {
         const updatedSuggestion = await updateAppointmentStatus(pendingStylistSuggestion.appointment_id, {
           status: 'awaiting_payment',
@@ -9619,7 +9700,7 @@ updateLastCloseContext(waId, {
       }
     }
 
-    if (!pendingDraft) {
+    if (!pendingDraft && !quickCourseFlow) {
       const latestPendingStylist = await getLatestAppointmentForClient({
         waId,
         phone,
@@ -9673,6 +9754,13 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
     const convForAI = mergeConversationForAI(recentDbMessages, ensureConv(waId).messages || []);
 
     if (pendingCourseDraft) {
+      await clearAppointmentStateForCourseFlow({
+        waId,
+        phone,
+        reason: 'Se mantuvo activo el flujo de inscripción a curso y se limpiaron estados de turnos pendientes.',
+      });
+      pendingDraft = null;
+      pendingStylistSuggestion = null;
       const courseDraftIntent = await extractCourseEnrollmentIntentWithAI(text, {
         hasDraft: true,
         currentCourseName: pendingCourseDraft?.curso_nombre || '',
@@ -9711,10 +9799,6 @@ Cuando quiera retomarla, me escribe y seguimos desde ahí.`;
           last_intent: 'course_signup',
         };
 
-        const knownFullName = splitNameParts(knownIdentity?.bestName || '');
-        if (!mergedCourseDraft.alumno_nombre && knownFullName.fullName && knownFullName.lastName) {
-          mergedCourseDraft.alumno_nombre = knownFullName.fullName;
-        }
         mergedCourseDraft = mergeContactIntoCourseEnrollment({
           draft: mergedCourseDraft,
           text,
@@ -10348,6 +10432,13 @@ Seña recibida ✔`.trim();
 
     const looksLikeTurno = looksLikeAppointmentIntent(text, { pendingDraft, lastService: lastKnownService });
     if (looksLikeTurno && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
+      if (!pendingDraft) {
+        await archiveConflictingAppointmentsForClient({
+          waId,
+          phone,
+          reason: 'La clienta inició una nueva solicitud de turno y se cerró la anterior para evitar superposiciones.',
+        });
+      }
       const turno = await extractTurnoFromText({
         text,
         customerName: name,
@@ -11121,23 +11212,31 @@ ${some}
       const wantsCourseSignup = followupGoal === 'SIGNUP' || ['START_SIGNUP', 'CONTINUE_SIGNUP', 'PAYMENT'].includes(courseEnrollmentIntent.action || '');
 
       if (wantsCourseSignup) {
+        await clearAppointmentStateForCourseFlow({
+          waId,
+          phone,
+          reason: 'Se inició una inscripción a curso y se cerraron estados de turnos pendientes para evitar cruces.',
+        });
+        pendingDraft = null;
+        pendingStylistSuggestion = null;
+
         const signupQuery = courseEnrollmentIntent.course_query || activeCourse?.nombre || referencedCourse?.nombre || lastCourseContext?.selectedName || text;
         const signupMatches = signupQuery ? findCourses(courses, signupQuery, 'DETAIL') : [];
         const signupCourse = activeCourse || referencedCourse || signupMatches[0] || findCourseByContextName(courses, courseEnrollmentIntent.course_query || '') || null;
-        const knownFullName = splitNameParts(knownIdentity?.bestName || '');
+        const isFreshCourseSignup = courseEnrollmentIntent.action === 'START_SIGNUP';
         let baseCourseDraft = {
           ...(pendingCourseDraft || {}),
-          curso_nombre: pendingCourseDraft?.curso_nombre || signupCourse?.nombre || '',
-          curso_categoria: pendingCourseDraft?.curso_categoria || signupCourse?.categoria || '',
-          alumno_nombre: pendingCourseDraft?.alumno_nombre || ((knownFullName.fullName && knownFullName.lastName) ? knownFullName.fullName : ''),
+          curso_nombre: signupCourse?.nombre || pendingCourseDraft?.curso_nombre || '',
+          curso_categoria: signupCourse?.categoria || pendingCourseDraft?.curso_categoria || '',
+          alumno_nombre: isFreshCourseSignup ? '' : (pendingCourseDraft?.alumno_nombre || ''),
           telefono_contacto: normalizePhone(pendingCourseDraft?.telefono_contacto || phone || ''),
-          payment_status: pendingCourseDraft?.payment_status || 'not_paid',
-          payment_amount: pendingCourseDraft?.payment_amount ?? null,
-          payment_sender: pendingCourseDraft?.payment_sender || '',
-          payment_receiver: pendingCourseDraft?.payment_receiver || '',
-          payment_proof_text: pendingCourseDraft?.payment_proof_text || '',
-          payment_proof_media_id: pendingCourseDraft?.payment_proof_media_id || '',
-          payment_proof_filename: pendingCourseDraft?.payment_proof_filename || '',
+          payment_status: isFreshCourseSignup ? 'not_paid' : (pendingCourseDraft?.payment_status || 'not_paid'),
+          payment_amount: isFreshCourseSignup ? null : (pendingCourseDraft?.payment_amount ?? null),
+          payment_sender: isFreshCourseSignup ? '' : (pendingCourseDraft?.payment_sender || ''),
+          payment_receiver: isFreshCourseSignup ? '' : (pendingCourseDraft?.payment_receiver || ''),
+          payment_proof_text: isFreshCourseSignup ? '' : (pendingCourseDraft?.payment_proof_text || ''),
+          payment_proof_media_id: isFreshCourseSignup ? '' : (pendingCourseDraft?.payment_proof_media_id || ''),
+          payment_proof_filename: isFreshCourseSignup ? '' : (pendingCourseDraft?.payment_proof_filename || ''),
           last_intent: 'course_signup',
         };
         baseCourseDraft = mergeContactIntoCourseEnrollment({
