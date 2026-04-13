@@ -2826,7 +2826,7 @@ function buildAllowedSlotsPreviewForDate(dateYMD, availabilityMode = 'commercial
 function formatMultiplePendingAppointmentsForStylist(rows = []) {
   return (Array.isArray(rows) ? rows : [])
     .map((row, index) => {
-      const safeDate = row?.appointment_date ? String(row.appointment_date).slice(0, 10) : '';
+      const safeDate = normalizeDateValueToYMD(row?.appointment_date || '');
       const safeTime = normalizeHourHM(row?.appointment_time || '');
       const when = safeDate ? `${capitalizeEs(weekdayEsFromYMD(safeDate))} ${ymdToDM(safeDate)}` : 'Sin fecha';
       return `${index + 1}) ${when} - ${safeTime || 'Sin hora'} - ${row?.service_name || 'Servicio'} - ${row?.client_name || 'Cliente'}`;
@@ -2847,7 +2847,7 @@ function matchStylistTextToPendingAppointment(text = '', rows = []) {
   let tied = false;
 
   for (const row of list) {
-    const rowDate = row?.appointment_date ? String(row.appointment_date).slice(0, 10) : '';
+    const rowDate = normalizeDateValueToYMD(row?.appointment_date || '');
     const rowTime = normalizeHourHM(row?.appointment_time || '');
     const serviceName = normalize(row?.service_name || '');
     const clientFull = normalize(row?.client_name || '');
@@ -2968,12 +2968,24 @@ function extractLikelyHourFromText(text) {
   const raw = String(text || '').trim();
   if (!raw) return '';
 
-  const explicit = normalizeHourHM(raw);
-  if (explicit) return explicit;
+  const compactOnly = raw.replace(/\s+/g, '').trim();
+  if (/^\d{1,2}(?:[:\.]\d{1,2})?\s*(?:hs|hora|horas)?$/i.test(raw) || /^\d{1,2}(?:[:\.]\d{1,2})?$/.test(compactOnly)) {
+    const explicit = normalizeHourHM(raw);
+    if (explicit) return explicit;
+  }
 
   const t = normalize(raw);
 
-  let m = t.match(/(?:a las|alas|tipo|para las|desde las)?\s*(\d{1,2})(?:[:\.](\d{1,2}))?\s*(?:hs|hora|horas)?\b/);
+  let m = t.match(/(?:a las|alas|tipo|para las|desde las|horario|hora)\s*(\d{1,2})(?:[:\.](\d{1,2}))?\s*(?:hs|hora|horas)?\b/);
+  if (m) {
+    const hh = Number(m[1]);
+    const mm = Number(m[2] || 0);
+    if (hh >= 7 && hh <= 22 && mm >= 0 && mm <= 59) {
+      return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    }
+  }
+
+  m = t.match(/\b(\d{1,2})(?:[:\.](\d{1,2}))?\s*(hs|hora|horas)\b/);
   if (m) {
     const hh = Number(m[1]);
     const mm = Number(m[2] || 0);
@@ -3139,7 +3151,7 @@ function mapDraftRowToTurno(row) {
   if (!row) return null;
   return {
     appointment_id: row.appointment_id == null ? null : Number(row.appointment_id),
-    fecha: row.appointment_date ? String(row.appointment_date).slice(0, 10) : "",
+    fecha: normalizeDateValueToYMD(row.appointment_date || ''),
     hora: row.appointment_time ? String(row.appointment_time).slice(0, 5) : "",
     servicio: row.service_name || "",
     duracion_min: Number(row.duration_min || 60) || 60,
@@ -3413,7 +3425,7 @@ function mapAppointmentRowToDraft(row) {
   if (!row) return null;
   return {
     appointment_id: row.id == null ? null : Number(row.id),
-    fecha: row.appointment_date ? String(row.appointment_date).slice(0, 10) : '',
+    fecha: normalizeDateValueToYMD(row.appointment_date || ''),
     hora: row.appointment_time ? String(row.appointment_time).slice(0, 5) : '',
     servicio: row.service_name || '',
     duracion_min: Number(row.duration_min || 60) || 60,
@@ -3532,7 +3544,7 @@ async function updateAppointmentStatus(appointmentId, patch = {}) {
 
 function buildAppointmentPaymentMessageFromRow(row) {
   const appt = row || {};
-  const dateYMD = appt.appointment_date ? String(appt.appointment_date).slice(0, 10) : '';
+  const dateYMD = normalizeDateValueToYMD(appt.appointment_date || '');
   const diaOk = dateYMD ? weekdayEsFromYMD(dateYMD) : '';
   const fechaTxt = dateYMD ? ymdToDMY(dateYMD) : '';
   const horaTxt = normalizeHourHM(appt.appointment_time || '') || String(appt.appointment_time || '').slice(0, 5);
@@ -3555,6 +3567,98 @@ function buildAppointmentPaymentMessageFromRow(row) {
     '',
     'Cuando haga la transferencia, envíe por aquí el comprobante 📩',
   ].join('\n').trim();
+}
+
+async function interpretStylistReplyWithAI({ msg = {}, text = '', appointment = null, replyCtx = null } = {}) {
+  const raw = String(text || '').trim();
+  const heuristicAction = parseStylistDecisionAction(msg, raw);
+  const heuristicDate = extractLikelyDateFromText(raw);
+  const heuristicTime = extractLikelyHourFromText(raw);
+  const originalDate = normalizeDateValueToYMD(appointment?.appointment_date || '');
+  const originalTime = normalizeHourHM(appointment?.appointment_time || '') || '';
+
+  if (!raw) {
+    return {
+      action: heuristicAction || '',
+      suggestedDateYMD: heuristicDate || originalDate || '',
+      suggestedTimeHM: heuristicTime || '',
+      cleanNote: '',
+      needsDetails: true,
+      source: 'empty',
+    };
+  }
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Interpretá mensajes de una estilista que responde sobre un turno de WhatsApp.
+Devolvé SOLO JSON válido con estas claves:
+- action: "accept", "decline", "suggest" o "unknown"
+- suggested_date_ymd: string en formato YYYY-MM-DD o vacío
+- suggested_time_hm: string en formato HH:MM o vacío
+- needs_details: boolean
+- clean_note: string breve
+
+Reglas críticas:
+- Si el mensaje propone otro horario, action debe ser "suggest".
+- No confundas el número del día con la hora. Ejemplo: "martes 14 de abril a las 17" => fecha 2026-04-14 y hora 17:00, NO 14:00.
+- Si escribe mal el día de la semana pero la fecha numérica es clara, usá la fecha numérica.
+- Si solo da la hora, mantené la fecha vacía.
+- Si solo toca el botón "Sugerir otro" sin detallar día/hora, needs_details=true.
+- Si el mensaje es "sí, puedo", action="accept".
+- Si el mensaje es "no puedo", action="decline".
+- No inventes datos.`
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje: raw,
+            turno_original: {
+              fecha: originalDate,
+              hora: originalTime,
+              servicio: appointment?.service_name || '',
+              cliente: appointment?.client_name || '',
+            },
+            contexto_esperando_detalle: !!replyCtx?.awaiting_suggestion_details,
+            boton: msg?.button?.text || msg?.interactive?.button_reply?.title || '',
+          })
+        }
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const parsed = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const action = ['accept', 'decline', 'suggest', 'unknown'].includes(String(parsed?.action || '').trim())
+      ? String(parsed.action).trim()
+      : '';
+    const aiDate = normalizeDateValueToYMD(parsed?.suggested_date_ymd || '');
+    const aiTime = normalizeHourHM(parsed?.suggested_time_hm || '');
+    const note = String(parsed?.clean_note || raw).trim();
+    const needsDetails = !!parsed?.needs_details;
+
+    return {
+      action: action || heuristicAction || '',
+      suggestedDateYMD: aiDate || heuristicDate || originalDate || '',
+      suggestedTimeHM: aiTime || heuristicTime || '',
+      cleanNote: note,
+      needsDetails,
+      source: 'ai',
+    };
+  } catch {
+    return {
+      action: heuristicAction || '',
+      suggestedDateYMD: heuristicDate || originalDate || '',
+      suggestedTimeHM: heuristicTime || '',
+      cleanNote: raw,
+      needsDetails: !heuristicDate && !heuristicTime,
+      source: 'heuristic',
+    };
+  }
 }
 
 function parseStylistDecisionAction(msg = {}, text = '') {
@@ -3672,9 +3776,10 @@ Respondeme sobre el mensaje puntual del turno correcto o escribime el día y la 
     return true;
   }
 
-  const suggestionDate = extractLikelyDateFromText(text);
-  const suggestionTime = extractLikelyHourFromText(text);
-  let action = parseStylistDecisionAction(msg, text);
+  const stylistAi = await interpretStylistReplyWithAI({ msg, text, appointment: appt, replyCtx });
+  const suggestionDate = stylistAi.suggestedDateYMD || extractLikelyDateFromText(text) || '';
+  const suggestionTime = stylistAi.suggestedTimeHM || extractLikelyHourFromText(text) || '';
+  let action = stylistAi.action || parseStylistDecisionAction(msg, text);
   if (!action && replyCtx?.awaiting_suggestion_details && (suggestionDate || suggestionTime)) {
     action = 'suggest';
   }
@@ -3688,7 +3793,7 @@ Respondeme sobre el mensaje puntual del turno correcto o escribime el día y la 
     const updated = await updateAppointmentStatus(appt.id, {
       status: 'awaiting_payment',
       payment_status: 'not_paid',
-      stylist_decision_note: String(text || '').trim() || 'Aceptado por estilista',
+      stylist_decision_note: stylistAi.cleanNote || String(text || '').trim() || 'Aceptado por estilista',
       mark_stylist_decision_at: true,
     });
     await saveAppointmentDraft(appt.wa_id, appt.wa_phone, mapAppointmentRowToDraft(updated || appt));
@@ -3702,7 +3807,7 @@ Respondeme sobre el mensaje puntual del turno correcto o escribime el día y la 
   }
 
   if (action === 'decline' || action === 'suggest') {
-    if (action === 'suggest' && stylistSuggestionNeedsDetails(msg, text)) {
+    if (action === 'suggest' && (stylistSuggestionNeedsDetails(msg, text) || stylistAi.needsDetails) && !suggestionDate && !suggestionTime) {
       setStylistReplyContext(inboundPhone, {
         appointment_id: Number(appt.id),
         awaiting_suggestion_details: true,
@@ -3715,7 +3820,7 @@ Respondeme sobre el mensaje puntual del turno correcto o escribime el día y la 
     await deleteAppointmentDraft(appt.wa_id);
     clearPendingStylistSuggestion(appt.wa_id);
 
-    const suggestedDateYMD = suggestionDate || (appt.appointment_date ? String(appt.appointment_date).slice(0, 10) : '');
+    const suggestedDateYMD = suggestionDate || (normalizeDateValueToYMD(appt.appointment_date || ''));
     const suggestedTimeHM = normalizeHourHM(suggestionTime || '');
     const suggestedMode = suggestedTimeHM && isHourAllowedForAvailabilityMode(suggestedTimeHM, 'siesta') ? 'siesta' : 'commercial';
 
@@ -3730,7 +3835,7 @@ Respondeme sobre el mensaje puntual del turno correcto o escribime el día y la 
 
     await updateAppointmentStatus(appt.id, {
       status: action === 'suggest' && suggestionText ? 'stylist_suggested' : 'stylist_rejected',
-      stylist_decision_note: String(text || '').trim() || (action === 'suggest' ? 'La estilista propuso otro horario' : 'La estilista no puede en ese horario'),
+      stylist_decision_note: stylistAi.cleanNote || String(text || '').trim() || (action === 'suggest' ? 'La estilista propuso otro horario' : 'La estilista no puede en ese horario'),
       mark_stylist_decision_at: true,
     });
 
@@ -3745,7 +3850,7 @@ Respondeme sobre el mensaje puntual del turno correcto o escribime el día y la 
         telefono_contacto: normalizePhone(appt.contact_phone || appt.wa_phone || ''),
         wa_phone: normalizePhone(appt.wa_phone || ''),
         availability_mode: normalizeAvailabilityMode(suggestedMode),
-        stylist_note: String(text || '').trim(),
+        stylist_note: stylistAi.cleanNote || String(text || '').trim(),
       });
     }
 
@@ -4655,6 +4760,34 @@ function ymdToDM(ymd) {
   const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return s;
   return `${m[3]}/${m[2]}`;
+}
+
+function normalizeDateValueToYMD(value) {
+  if (!value) return '';
+
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const yyyy = String(value.getUTCFullYear()).padStart(4, '0');
+    const mm = String(value.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(value.getUTCDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+
+  const explicit = extractExplicitDateFromText(raw);
+  if (explicit) return explicit;
+
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime())) {
+    const yyyy = String(parsed.getUTCFullYear()).padStart(4, '0');
+    const mm = String(parsed.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(parsed.getUTCDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  return toYMD(raw);
 }
 
 // Acepta "DD/MM/YYYY", "DD-MM-YYYY", "YYYY-MM-DD" y devuelve siempre "YYYY-MM-DD" (si puede).
@@ -7583,7 +7716,7 @@ async function getLastBookedAppointmentForUser({ waId, waPhone }) {
   return rows.map((row) => ({
     client_name: row.client_name || "",
     service_name: row.service_name || "",
-    fecha: row.appointment_date ? String(row.appointment_date).slice(0, 10) : "",
+    fecha: normalizeDateValueToYMD(row.appointment_date || ''),
     hora: row.appointment_time ? String(row.appointment_time).slice(0, 5) : "",
     duracion_min: Number(row.duration_min || 60) || 60,
     created_at: row.created_at || null,
@@ -7627,7 +7760,7 @@ function looksLikeAppointmentContextFollowUp(text, { pendingDraft, lastService }
   if (isExplicitProductIntent(text)) return false;
 
   const t = normalize(text || '');
-  return /(?:lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|hoy|mañana|pasado\s+mañana|proximo|próximo|el\s+dia|el\s+día|y\s+el|que\s+horarios|qué\s+horarios|que\s+disponibilidad|qué\s+disponibilidad|tenes\s+lugar|tenés\s+lugar|disponible|disponibilidad|a\s+la\s+mañana|por\s+la\s+mañana|a\s+la\s+tarde|por\s+la\s+tarde|\d{1,2}[:.]\d{2}|\d{1,2}\s*(?:hs|horas?)|\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)/i.test(t);
+  return /(?:\blunes\b|\bmartes\b|\bmiercoles\b|\bmiércoles\b|\bjueves\b|\bviernes\b|\bsabado\b|\bsábado\b|\bdomingo\b|\bhoy\b|\bmañana\b|\bpasado\s+mañana\b|\bproximo\b|\bpróximo\b|\bel\s+dia\b|\bel\s+día\b|\by\s+el\b|\bque\s+horarios\b|\bqué\s+horarios\b|\bque\s+disponibilidad\b|\bqué\s+disponibilidad\b|\btenes\s+lugar\b|\btenés\s+lugar\b|\bdisponible\b|\bdisponibilidad\b|\ba\s+la\s+mañana\b|\bpor\s+la\s+mañana\b|\ba\s+la\s+tarde\b|\bpor\s+la\s+tarde\b|\b\d{1,2}[:.]\d{2}\b|\b\d{1,2}\s*(?:hs|horas?)\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b)/i.test(t);
 }
 
 function looksLikeAppointmentIntent(text, { pendingDraft, lastService } = {}) {
