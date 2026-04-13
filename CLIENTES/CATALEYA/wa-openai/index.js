@@ -602,26 +602,34 @@ function chooseBestHubSpotMatch(results, phoneRaw) {
   return scored.find((x) => x.exact)?.row || rows[0] || null;
 }
 
-async function buildHubSpotContactProperties(ctx, existingContact, { isClient = false } = {}) {
+async function buildHubSpotContactProperties(ctx, existingContact, { includeConversationSummary = true } = {}) {
   const existing = existingContact?.properties || {};
-  const conversationSnippet = getConversationSnippetForClose(ctx?.waId || '');
-  const focusText = [ctx.interest, ctx.lastUserText].filter(Boolean).join(' | ');
+  const conversationSnippet = includeConversationSummary ? getConversationSnippetForClose(ctx?.waId || '') : '';
+  const focusText = includeConversationSummary ? [ctx.interest, ctx.lastUserText].filter(Boolean).join(' | ') : '';
   const combinedText = [conversationSnippet, focusText].filter(Boolean).join(' | ');
-  const categoriasFound = pickCategorias({ intentType: ctx.intentType || 'OTHER', text: combinedText });
-  const primaryProduct = pickPrimaryProducto(focusText || conversationSnippet || '');
+  const categoriasFound = includeConversationSummary
+    ? pickCategorias({ intentType: ctx.intentType || 'OTHER', text: combinedText })
+    : [];
+  const primaryProduct = includeConversationSummary ? pickPrimaryProducto(focusText || conversationSnippet || '') : '';
   const productosFound = primaryProduct ? [primaryProduct] : [];
-  const aiAnalysis = await analyzeCloseSummaryWithOpenAI({ ctx, conversationSnippet, productos: productosFound, categorias: categoriasFound });
+  const aiAnalysis = includeConversationSummary
+    ? await analyzeCloseSummaryWithOpenAI({ ctx, conversationSnippet, productos: productosFound, categorias: categoriasFound })
+    : null;
   const finalPrimaryProduct = cleanProductLabel(aiAnalysis?.productoPrincipal || '') || primaryProduct;
   const finalProductos = finalPrimaryProduct ? [finalPrimaryProduct] : [];
-  const observacionLine = aiAnalysis?.observacion || buildMiniObservacion({ text: combinedText, productos: finalProductos, categorias: categoriasFound });
-  const observacion = mergeObservationHistory(existing?.[HUBSPOT_PROPERTY.observacion] || '', observacionLine);
+  const observacionLine = includeConversationSummary
+    ? (aiAnalysis?.observacion || buildMiniObservacion({ text: combinedText, productos: finalProductos, categorias: categoriasFound }))
+    : '';
+  const observacion = includeConversationSummary
+    ? mergeObservationHistory(existing?.[HUBSPOT_PROPERTY.observacion] || '', observacionLine)
+    : (existing?.[HUBSPOT_PROPERTY.observacion] || '');
 
-  const explicitFromSnippet = extractExplicitNameFromSnippet(conversationSnippet);
+  const explicitFromSnippet = includeConversationSummary ? extractExplicitNameFromSnippet(conversationSnippet) : '';
   const forcedExplicitName = cleanNameCandidate(ctx.forceContactName || ctx.explicitName || '') || '';
   const chosenName = chooseBestContactName({
     existingName: existing?.[HUBSPOT_PROPERTY.firstname] || '',
     existingLastName: existing?.[HUBSPOT_PROPERTY.lastname] || '',
-    explicitName: forcedExplicitName || aiAnalysis?.explicitName || explicitFromSnippet || '',
+    explicitName: forcedExplicitName || (includeConversationSummary ? (aiAnalysis?.explicitName || explicitFromSnippet || '') : ''),
     profileName: ctx.profileName || ctx.name || '',
   });
 
@@ -629,8 +637,12 @@ async function buildHubSpotContactProperties(ctx, existingContact, { isClient = 
   const rawPhone = String(ctx.phoneRaw || ctx.phone || '').trim();
   const now = new Date();
 
-  const mergedCategoria = mergeHubSpotMulti(existing?.[HUBSPOT_PROPERTY.categoria] || '', categoriasFound);
-  const mergedProducto = mergeSlashText(existing?.[HUBSPOT_PROPERTY.producto] || '', finalProductos, 8);
+  const mergedCategoria = includeConversationSummary
+    ? mergeHubSpotMulti(existing?.[HUBSPOT_PROPERTY.categoria] || '', categoriasFound)
+    : (existing?.[HUBSPOT_PROPERTY.categoria] || '');
+  const mergedProducto = includeConversationSummary
+    ? mergeSlashText(existing?.[HUBSPOT_PROPERTY.producto] || '', finalProductos, 8)
+    : (existing?.[HUBSPOT_PROPERTY.producto] || '');
   const existingFullName = [existing?.[HUBSPOT_PROPERTY.firstname], existing?.[HUBSPOT_PROPERTY.lastname]].filter(Boolean).join(' ').trim();
   const existingIsGeneric = isLikelyGenericContactName(existingFullName);
   const shouldForceContactName = !!forcedExplicitName && !!chosenName.fullName;
@@ -638,9 +650,6 @@ async function buildHubSpotContactProperties(ctx, existingContact, { isClient = 
 
   const properties = {
     [HUBSPOT_PROPERTY.phone]: normalizedPhone || rawPhone || existing?.[HUBSPOT_PROPERTY.phone] || '',
-    [HUBSPOT_PROPERTY.observacion]: observacion,
-    [HUBSPOT_PROPERTY.producto]: mergedProducto || existing?.[HUBSPOT_PROPERTY.producto] || '',
-    [HUBSPOT_PROPERTY.categoria]: mergedCategoria || existing?.[HUBSPOT_PROPERTY.categoria] || '',
     [HUBSPOT_PROPERTY.ultimoContacto]: hubspotDateValue(now),
     [HUBSPOT_PROPERTY.empresa]: existing?.[HUBSPOT_PROPERTY.empresa] || HUBSPOT_OPTION.empresaCataleya,
     [HUBSPOT_PROPERTY.whatsappContact]: 'true',
@@ -649,6 +658,12 @@ async function buildHubSpotContactProperties(ctx, existingContact, { isClient = 
     [HUBSPOT_PROPERTY.whatsappPhoneNormalized]: normalizedPhone || existing?.[HUBSPOT_PROPERTY.whatsappPhoneNormalized] || '',
     [HUBSPOT_PROPERTY.whatsappProfileName]: cleanNameCandidate(ctx.profileName || ctx.name || '') || existing?.[HUBSPOT_PROPERTY.whatsappProfileName] || '',
   };
+
+  if (includeConversationSummary) {
+    properties[HUBSPOT_PROPERTY.observacion] = observacion;
+    properties[HUBSPOT_PROPERTY.producto] = mergedProducto || existing?.[HUBSPOT_PROPERTY.producto] || '';
+    properties[HUBSPOT_PROPERTY.categoria] = mergedCategoria || existing?.[HUBSPOT_PROPERTY.categoria] || '';
+  }
 
   if (chosenName.firstName && (shouldForceContactName || chosenName.source === 'chat_explicit' || chosenName.source === 'whatsapp_profile' || shouldOverwriteExistingName)) {
     properties[HUBSPOT_PROPERTY.firstname] = chosenName.firstName;
@@ -661,10 +676,6 @@ async function buildHubSpotContactProperties(ctx, existingContact, { isClient = 
 
   if (!existing?.[HUBSPOT_PROPERTY.fechaIngresoBase]) {
     properties[HUBSPOT_PROPERTY.fechaIngresoBase] = hubspotDateValue(now);
-  }
-
-  if (isClient) {
-    properties[HUBSPOT_PROPERTY.cliente] = HUBSPOT_OPTION.clienteSi;
   }
 
   return Object.fromEntries(Object.entries(properties).filter(([, value]) => value !== undefined && value !== null));
@@ -701,8 +712,7 @@ async function upsertHubSpotContactFromClose(ctx) {
     contact = chooseBestHubSpotMatch(phoneMatches, phoneRaw);
   }
 
-  const isClient = await hasAnyAppointmentForHubSpotContact({ waId, phoneRaw });
-  const properties = await buildHubSpotContactProperties(ctx, contact, { isClient });
+  const properties = await buildHubSpotContactProperties(ctx, contact, { includeConversationSummary: true });
 
   try {
     if (contact?.id) {
@@ -714,6 +724,36 @@ async function upsertHubSpotContactFromClose(ctx) {
     return { action: 'created', id: created?.id || '' };
   } catch (e) {
     console.error('❌ Error creando/actualizando contacto en HubSpot:', e?.response?.data || e?.message || e);
+    throw e;
+  }
+}
+
+async function upsertHubSpotContactIdentityOnly(ctx) {
+  if (!hasHubSpotEnabled()) return null;
+
+  const phoneRaw = String(ctx?.phoneRaw || ctx?.phone || '').trim();
+  const waId = String(ctx?.waId || '').trim();
+  if (!phoneRaw && !waId) return null;
+
+  let contact = null;
+  if (waId) contact = await findHubSpotContactByWaId(waId);
+  if (!contact && phoneRaw) {
+    const phoneMatches = await findHubSpotContactsByPhone(phoneRaw);
+    contact = chooseBestHubSpotMatch(phoneMatches, phoneRaw);
+  }
+
+  const properties = await buildHubSpotContactProperties(ctx, contact, { includeConversationSummary: false });
+
+  try {
+    if (contact?.id) {
+      await hubspotRequest('patch', `/crm/v3/objects/contacts/${contact.id}`, { properties });
+      return { action: 'updated', id: contact.id };
+    }
+
+    const created = await hubspotRequest('post', '/crm/v3/objects/contacts', { properties });
+    return { action: 'created', id: created?.id || '' };
+  } catch (e) {
+    console.error('❌ Error sincronizando identidad en HubSpot:', e?.response?.data || e?.message || e);
     throw e;
   }
 }
@@ -1498,7 +1538,7 @@ async function syncIdentityEverywhere({ waId, phoneRaw, profileName = '', explic
 
   let hubspotResult = null;
   try {
-    hubspotResult = await upsertHubSpotContactFromClose({
+    hubspotResult = await upsertHubSpotContactIdentityOnly({
       waId,
       phone: normalizePhone(phoneRaw),
       phoneRaw,
@@ -1628,12 +1668,6 @@ function getFriendlyFirstName(ctx = {}, contact = null) {
 }
 
 async function getHubSpotContactForFollowup(ctx = {}) {
-  try {
-    await upsertHubSpotContactFromClose(ctx);
-  } catch (e) {
-    console.error("❌ Error sincronizando HubSpot antes del follow-up:", e?.response?.data || e?.message || e);
-  }
-
   let contact = null;
   if (ctx?.waId) contact = await findHubSpotContactByWaId(ctx.waId);
   if (!contact && (ctx?.phoneRaw || ctx?.phone)) {
@@ -2103,8 +2137,8 @@ function updateLastCloseContext(waId, patch = {}) {
   return next;
 }
 
-const INACTIVITY_MS = Number(process.env.INACTIVITY_FOLLOWUP_MS || 10 * 60 * 1000); // 10 minutos por defecto (mensaje de cierre)
-const CLOSE_LOG_MS = Number(process.env.CLOSE_LOG_MS || 10 * 60 * 1000);  // 10 minutos más por defecto (si no responde, se registra)
+const INACTIVITY_MS = Number(process.env.INACTIVITY_FOLLOWUP_MS || 15 * 60 * 1000); // 15 minutos por defecto (mensaje de cierre)
+const CLOSE_LOG_MS = Number(process.env.CLOSE_LOG_MS || 0);  // 0 por defecto: se registra al cumplirse la inactividad
 
 async function logConversationClose(waId) {
   const ctx = lastCloseContext.get(waId);
@@ -2152,8 +2186,7 @@ function scheduleInactivityFollowUp(waId, phone) {
       return;
     }
 
-    // Si NO respondió luego del mensaje de cierre, registramos el seguimiento
-    const timer2 = setTimeout(async () => {
+    const runCloseLog = async () => {
       try {
         const suppress = await shouldSuppressInactivityFollowUp(waId);
         if (suppress) return;
@@ -2161,9 +2194,14 @@ function scheduleInactivityFollowUp(waId, phone) {
       } catch (e) {
         console.error("Error guardando seguimiento por cierre:", e?.response?.data || e?.message || e);
       }
-    }, CLOSE_LOG_MS);
+    };
 
-    closeTimers.set(waId, timer2);
+    if (CLOSE_LOG_MS > 0) {
+      const timer2 = setTimeout(runCloseLog, CLOSE_LOG_MS);
+      closeTimers.set(waId, timer2);
+    } else {
+      await runCloseLog();
+    }
   }, INACTIVITY_MS);
 
   inactivityTimers.set(waId, timer);
@@ -8755,11 +8793,20 @@ lastCloseContext.set(waId, {
         lastServiceByUser.delete(waId);
 
         try { await deleteAppointmentDraft(waId); } catch {}
+        if (inactivityTimers.has(waId)) {
+          clearTimeout(inactivityTimers.get(waId));
+          inactivityTimers.delete(waId);
+        }
+        if (closeTimers.has(waId)) {
+          clearTimeout(closeTimers.get(waId));
+          closeTimers.delete(waId);
+        }
 
         const msgWrapUp = buildPoliteConversationCloseMessage(wrapUpControl);
         pushHistory(waId, "assistant", msgWrapUp);
         await sendWhatsAppText(phone, msgWrapUp);
-        updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+        updateLastCloseContext(waId, { lastUserText: text, suppressInactivityPrompt: true });
+        await logConversationClose(waId);
         return;
       }
     }
