@@ -4179,6 +4179,7 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
   const stylistPhone = normalizePhone(STYLIST_NOTIFY_PHONE_RAW);
   const inboundPhone = normalizePhone(phoneRaw || phone || '');
   if (!stylistPhone || inboundPhone !== stylistPhone) return false;
+  if (parseCourseManagerApprovalAction(msg, text) === 'approve') return false;
 
   const contextMsgId = msg?.context?.id || '';
   let appt = await findAppointmentByNotificationMessageId(contextMsgId);
@@ -9545,11 +9546,11 @@ lastCloseContext.set(waId, {
     });
 
 
-    const stylistHandled = await handleStylistWorkflowInbound({ msg, text, phone, phoneRaw });
-    if (stylistHandled) return;
-
     const courseManagerHandled = await handleCourseManagerApprovalInbound({ msg, text, phone, phoneRaw });
     if (courseManagerHandled) return;
+
+    const stylistHandled = await handleStylistWorkflowInbound({ msg, text, phone, phoneRaw });
+    if (stylistHandled) return;
 
     const pendingNameReq = getPendingContactNameRequest(waId);
     const inboundName = await resolveInboundExplicitName(text, {
@@ -9953,6 +9954,34 @@ Cuando quiera retomarla, me escribe y seguimos desde ahí.`;
         };
         const referencedCourse = resolveCourseFromConversationContext(courses, text, courseCtxForDraft)
           || findCourseByContextName(courses, pendingCourseDraft?.curso_nombre || '');
+        const draftFollowupGoal = detectCourseFollowupGoal(text);
+        const draftLooksLikeNormalCourseQuestion = !!referencedCourse
+          && !!draftFollowupGoal
+          && !['START_SIGNUP', 'CONTINUE_SIGNUP', 'PAYMENT'].includes(courseDraftIntent.action || '');
+        if (draftLooksLikeNormalCourseQuestion) {
+          const naturalCourseReply = formatNaturalCourseFollowupReply(referencedCourse, draftFollowupGoal || 'DETAIL');
+          if (naturalCourseReply) {
+            const rememberedCourses = mergeCourseContextRows([referencedCourse], Array.isArray(courseCtxForDraft?.recentCourses) ? courseCtxForDraft.recentCourses : []);
+            setLastCourseContext(waId, {
+              query: courseCtxForDraft?.query || referencedCourse?.nombre || 'cursos',
+              selectedName: referencedCourse?.nombre || '',
+              currentCourseName: referencedCourse?.nombre || '',
+              lastOptions: rememberedCourses.map((c) => c.nombre).filter(Boolean).slice(0, 10),
+              recentCourses: rememberedCourses,
+              requestedInterest: buildHubSpotCourseInterestLabel(referencedCourse?.nombre || referencedCourse?.categoria || ''),
+            });
+            updateLastCloseContext(waId, {
+              intentType: 'COURSE',
+              interest: buildHubSpotCourseInterestLabel(referencedCourse?.nombre || referencedCourse?.categoria || ''),
+              lastUserText: text,
+              suppressInactivityPrompt: true,
+            });
+            pushHistory(waId, 'assistant', naturalCourseReply);
+            await sendWhatsAppText(phone, naturalCourseReply);
+            scheduleInactivityFollowUp(waId, phone);
+            return;
+          }
+        }
 
         let mergedCourseDraft = {
           ...pendingCourseDraft,
@@ -9990,6 +10019,15 @@ Cuando quiera retomarla, me escribe y seguimos desde ahí.`;
           const resultCourse = await finalizeCourseEnrollmentFlow({ waId, phone, draft: mergedCourseDraft });
           if (resultCourse.type === 'reserved') {
             const msgReserved = buildCourseEnrollmentReservedMessage(mergedCourseDraft);
+            const rememberedReservedCourses = mergeCourseContextRows([{ nombre: mergedCourseDraft.curso_nombre || '', categoria: mergedCourseDraft.curso_categoria || '' }], previousRecentCourses);
+            setLastCourseContext(waId, {
+              query: mergedCourseDraft.curso_nombre || lastCourseContext?.query || 'cursos',
+              selectedName: mergedCourseDraft.curso_nombre || '',
+              currentCourseName: mergedCourseDraft.curso_nombre || '',
+              lastOptions: rememberedReservedCourses.map((c) => c.nombre).filter(Boolean).slice(0, 10),
+              recentCourses: rememberedReservedCourses,
+              requestedInterest: buildHubSpotCourseInterestLabel(mergedCourseDraft.curso_nombre || ''),
+            });
             pushHistory(waId, 'assistant', msgReserved);
             await sendWhatsAppText(phone, msgReserved);
             updateLastCloseContext(waId, {
@@ -11389,7 +11427,9 @@ ${some}
         historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1200),
       });
       const isGenericCourseCatalogAsk = isLikelyGenericCourseListQuery(text) || /(otros cursos|que otros cursos|qué otros cursos|que cursos hay|qué cursos hay|que cursos estan dictando|qué cursos están dictando|que cursos tenes|qué cursos tenés|que cursos tienen|qué cursos tienen)/i.test(text || '');
-      const wantsCourseSignup = !isGenericCourseCatalogAsk && (followupGoal === 'SIGNUP' || ['START_SIGNUP', 'CONTINUE_SIGNUP', 'PAYMENT'].includes(courseEnrollmentIntent.action || ''));
+      const hasExplicitCourseSignupSignal = followupGoal === 'SIGNUP' || courseEnrollmentIntent.action === 'START_SIGNUP';
+      const continuesExistingCourseSignup = !!pendingCourseDraft && ['CONTINUE_SIGNUP', 'PAYMENT'].includes(courseEnrollmentIntent.action || '');
+      const wantsCourseSignup = !isGenericCourseCatalogAsk && (hasExplicitCourseSignupSignal || continuesExistingCourseSignup);
 
       if (wantsCourseSignup) {
         await clearAppointmentStateForCourseFlow({
@@ -11465,6 +11505,15 @@ ${some}
           const resultCourse = await finalizeCourseEnrollmentFlow({ waId, phone, draft: baseCourseDraft });
           if (resultCourse.type === 'reserved') {
             const msgReserved = buildCourseEnrollmentReservedMessage(baseCourseDraft);
+            const rememberedReservedCourses = mergeCourseContextRows([{ nombre: baseCourseDraft.curso_nombre || '', categoria: baseCourseDraft.curso_categoria || '' }], previousRecentCourses);
+            setLastCourseContext(waId, {
+              query: baseCourseDraft.curso_nombre || lastCourseContext?.query || 'cursos',
+              selectedName: baseCourseDraft.curso_nombre || '',
+              currentCourseName: baseCourseDraft.curso_nombre || '',
+              lastOptions: rememberedReservedCourses.map((c) => c.nombre).filter(Boolean).slice(0, 10),
+              recentCourses: rememberedReservedCourses,
+              requestedInterest: buildHubSpotCourseInterestLabel(baseCourseDraft.curso_nombre || ''),
+            });
             pushHistory(waId, 'assistant', msgReserved);
             await sendWhatsAppText(phone, msgReserved);
             updateLastCloseContext(waId, {
