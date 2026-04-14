@@ -245,6 +245,7 @@ async function ensureCourseEnrollmentTables() {
       course_name TEXT,
       course_category TEXT,
       student_name TEXT,
+      student_dni TEXT,
       contact_phone TEXT,
       payment_status TEXT NOT NULL DEFAULT 'not_paid',
       payment_amount NUMERIC(10,2),
@@ -261,6 +262,7 @@ async function ensureCourseEnrollmentTables() {
 
   await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS course_category TEXT`);
   await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS student_name TEXT`);
+  await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS student_dni TEXT`);
   await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS contact_phone TEXT`);
   await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS payment_status TEXT`);
   await db.query(`ALTER TABLE course_enrollment_drafts ADD COLUMN IF NOT EXISTS payment_amount NUMERIC(10,2)`);
@@ -280,6 +282,7 @@ async function ensureCourseEnrollmentTables() {
       course_name TEXT NOT NULL,
       course_category TEXT,
       student_name TEXT,
+      student_dni TEXT,
       contact_phone TEXT,
       status TEXT NOT NULL DEFAULT 'reserved',
       payment_status TEXT NOT NULL DEFAULT 'paid_verified',
@@ -296,6 +299,7 @@ async function ensureCourseEnrollmentTables() {
 
   await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS course_category TEXT`);
   await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS student_name TEXT`);
+  await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS student_dni TEXT`);
   await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS contact_phone TEXT`);
   await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS status TEXT`);
   await db.query(`ALTER TABLE course_enrollments ADD COLUMN IF NOT EXISTS payment_status TEXT`);
@@ -3251,6 +3255,7 @@ function mapCourseEnrollmentDraftRow(row) {
     curso_nombre: row.course_name || '',
     curso_categoria: row.course_category || '',
     alumno_nombre: row.student_name || '',
+    alumno_dni: row.student_dni || '',
     telefono_contacto: row.contact_phone || row.wa_phone || '',
     payment_status: row.payment_status || 'not_paid',
     payment_amount: row.payment_amount == null ? null : Number(row.payment_amount),
@@ -3274,18 +3279,19 @@ async function saveCourseEnrollmentDraft(waId, waPhone, draft) {
   const d = draft || {};
   await db.query(
     `INSERT INTO course_enrollment_drafts (
-      wa_id, wa_phone, course_name, course_category, student_name, contact_phone,
+      wa_id, wa_phone, course_name, course_category, student_name, student_dni, contact_phone,
       payment_status, payment_amount, payment_sender, payment_receiver,
       payment_proof_text, payment_proof_media_id, payment_proof_filename,
       flow_step, last_intent, updated_at
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW()
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW()
     )
     ON CONFLICT (wa_id) DO UPDATE SET
       wa_phone = EXCLUDED.wa_phone,
       course_name = EXCLUDED.course_name,
       course_category = EXCLUDED.course_category,
       student_name = EXCLUDED.student_name,
+      student_dni = EXCLUDED.student_dni,
       contact_phone = EXCLUDED.contact_phone,
       payment_status = EXCLUDED.payment_status,
       payment_amount = EXCLUDED.payment_amount,
@@ -3303,6 +3309,7 @@ async function saveCourseEnrollmentDraft(waId, waPhone, draft) {
       d.curso_nombre || null,
       d.curso_categoria || null,
       d.alumno_nombre || null,
+      d.alumno_dni || null,
       normalizePhone(d.telefono_contacto || waPhone || '') || null,
       d.payment_status || 'not_paid',
       d.payment_amount == null ? null : Number(d.payment_amount),
@@ -3324,23 +3331,55 @@ async function deleteCourseEnrollmentDraft(waId) {
 function inferCourseEnrollmentFlowStep(base = {}) {
   if (!String(base?.curso_nombre || '').trim()) return 'awaiting_course';
   if (!String(base?.alumno_nombre || '').trim()) return 'awaiting_name';
-  if (!String(base?.telefono_contacto || '').trim()) return 'awaiting_phone';
+  if (!String(base?.alumno_dni || '').trim()) return 'awaiting_dni';
   if (base?.payment_status === 'payment_review') return 'payment_review';
+  if (base?.payment_status === 'awaiting_salon_payment') return 'awaiting_salon_payment';
   if (base?.payment_status !== 'paid_verified') return 'awaiting_payment';
   return 'reserved';
 }
 
-function mergeContactIntoCourseEnrollment({ draft, text, waPhone, explicitName = '' }) {
+function normalizeStudentDni(raw = '') {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (digits.length < 7 || digits.length > 8) return '';
+  return digits;
+}
+
+function extractStudentDni(text = '') {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+  const m = raw.match(/(?:dni|documento)?\s*[:#-]?\s*(\d{1,2}(?:\.\d{3}){2}|\d{7,8})\b/i);
+  return normalizeStudentDni(m?.[1] || '');
+}
+
+function stripStudentDni(text = '') {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+  return raw
+    .replace(/(?:dni|documento)?\s*[:#-]?\s*(\d{1,2}(?:\.\d{3}){2}|\d{7,8})\b/ig, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractStudentFullName(text = '') {
+  const cleaned = cleanNameCandidate(stripStudentDni(text));
+  const parts = splitNameParts(cleaned);
+  return parts.fullName && parts.lastName ? parts.fullName : '';
+}
+
+function mergeStudentIntoCourseEnrollment({ draft, text, waPhone }) {
   const out = { ...(draft || {}) };
-  const info = extractContactInfo(text || '');
-  const candidateName = cleanNameCandidate(explicitName || info?.nombre || '');
-  const nameParts = splitNameParts(candidateName);
-  if (!out.alumno_nombre && nameParts.fullName && nameParts.lastName) {
-    out.alumno_nombre = nameParts.fullName;
+  const raw = String(text || '').trim();
+  if (!raw) {
+    out.telefono_contacto = normalizePhone(out.telefono_contacto || waPhone || '');
+    return out;
   }
-  if (!out.telefono_contacto) {
-    out.telefono_contacto = normalizePhone(info?.telefono || waPhone || '');
-  }
+
+  const maybeName = extractStudentFullName(raw);
+  const maybeDni = extractStudentDni(raw);
+
+  if (!out.alumno_nombre && maybeName) out.alumno_nombre = maybeName;
+  if (!out.alumno_dni && maybeDni) out.alumno_dni = maybeDni;
+  out.telefono_contacto = normalizePhone(out.telefono_contacto || waPhone || '');
   return out;
 }
 
@@ -3358,21 +3397,28 @@ ${opts}`;
 
 function buildCourseEnrollmentNeedNameMessage(courseName = '') {
   const courseTxt = courseName ? ` en *${courseName}*` : '';
-  return `Perfecto 😊 Para reservarle el lugar${courseTxt}, necesito el *nombre y apellido del alumno o alumna que va a asistir*.`;
+  return `Perfecto 😊 Para reservarle el lugar${courseTxt}, necesito estos datos del *alumno o alumna que va a asistir*:
+
+• *Nombre y apellido*
+• *DNI*`;
 }
 
-function buildCourseEnrollmentNeedPhoneMessage() {
-  return `Perfecto 😊 Voy a dejar este mismo número de WhatsApp como contacto.
+function buildCourseEnrollmentNeedDniMessage(courseName = '') {
+  const courseTxt = courseName ? ` para *${courseName}*` : '';
+  return `Perfecto 😊 Ya me quedó el nombre${courseTxt}.
 
-Si prefiere otro número, me lo puede pasar ahora.`;
+Ahora necesito el *DNI del alumno o alumna* para completar los datos.`;
 }
 
 function buildCourseEnrollmentPaymentMessage(base = {}) {
   const courseName = String(base?.curso_nombre || '').trim();
   return [
-    `Perfecto 😊 Ya tengo los datos para la inscripción${courseName ? ` de *${courseName}*` : ''}.`,
+    `Perfecto 😊 Ya registré los datos del alumno${courseName ? ` para *${courseName}*` : ''}.`,
     '',
-    `*PARA RESERVAR EL LUGAR SE SOLICITA UNA SEÑA DE ${COURSE_SENA_TXT}*`,
+    '*PARA TERMINAR DE CONFIRMAR LOS DATOS DEL ALUMNO TIENE 2 OPCIONES:*',
+    '',
+    `1) *Señar la inscripción* con ${COURSE_SENA_TXT} por transferencia`,
+    '2) *Acercarse a pagar directamente al salón en su horario comercial* y traer una *fotocopia del documento del alumno o alumna*',
     '',
     '💳 Datos para la transferencia',
     '',
@@ -3382,7 +3428,8 @@ function buildCourseEnrollmentPaymentMessage(base = {}) {
     'Titular:',
     TURNOS_ALIAS_TITULAR,
     '',
-    'Cuando haga la transferencia, envíe por aquí el comprobante 📩',
+    'Si hace la transferencia, envíe por aquí el comprobante 📩',
+    'Si prefiere acercarse al salón, avíseme por este medio y lo dejo asentado 😊',
   ].join('\n').trim();
 }
 
@@ -3457,12 +3504,12 @@ async function createCourseEnrollmentRecord({ waId, waPhone, draft }) {
 
   const r = await db.query(
     `INSERT INTO course_enrollments (
-      wa_id, wa_phone, course_name, course_category, student_name, contact_phone,
+      wa_id, wa_phone, course_name, course_category, student_name, student_dni, contact_phone,
       status, payment_status, payment_amount, payment_sender, payment_receiver,
       payment_proof_text, payment_proof_media_id, payment_proof_filename,
       created_at, updated_at
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW()
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW(),NOW()
     ) RETURNING *`,
     [
       waId,
@@ -3470,10 +3517,11 @@ async function createCourseEnrollmentRecord({ waId, waPhone, draft }) {
       d.curso_nombre || '',
       d.curso_categoria || null,
       d.alumno_nombre || null,
+      d.alumno_dni || null,
       normalizePhone(d.telefono_contacto || waPhone || '') || null,
-      'reserved',
+      d.status || 'reserved',
       d.payment_status || 'paid_verified',
-      d.payment_amount == null ? COURSE_SENA_AMOUNT : Number(d.payment_amount),
+      d.payment_amount == null ? (d.payment_status === 'paid_verified' ? COURSE_SENA_AMOUNT : null) : Number(d.payment_amount),
       d.payment_sender || null,
       d.payment_receiver || TURNOS_ALIAS_TITULAR,
       d.payment_proof_text || null,
@@ -3489,16 +3537,17 @@ async function finalizeCourseEnrollmentFlow({ waId, phone, draft }) {
   base.flow_step = inferCourseEnrollmentFlowStep(base);
   if (!base.curso_nombre) return { type: 'need_course' };
   if (!base.alumno_nombre) return { type: 'need_name' };
-  if (!base.telefono_contacto) return { type: 'need_phone' };
+  if (!base.alumno_dni) return { type: 'need_dni' };
   if (base.payment_status === 'payment_review') return { type: 'payment_review' };
   if (base.payment_status !== 'paid_verified') return { type: 'need_payment' };
-  const created = await createCourseEnrollmentRecord({ waId, waPhone: phone, draft: base });
+  const created = await createCourseEnrollmentRecord({ waId, waPhone: phone, draft: { ...base, status: 'reserved', payment_status: 'paid_verified' } });
 
   let managerNotification = null;
   try {
     managerNotification = await notifyCourseManagerEnrollmentPaid(created || {
       id: null,
       student_name: base.alumno_nombre || '',
+      student_dni: base.alumno_dni || '',
       course_name: base.curso_nombre || '',
       wa_phone: normalizePhone(phone || ''),
       contact_phone: normalizePhone(base.telefono_contacto || phone || ''),
@@ -3510,6 +3559,41 @@ async function finalizeCourseEnrollmentFlow({ waId, phone, draft }) {
 
   await deleteCourseEnrollmentDraft(waId);
   return { type: 'reserved', enrollmentId: created?.id || null, enrollmentRow: created || null, managerNotification };
+}
+
+async function finalizeCourseEnrollmentOnsiteFlow({ waId, phone, draft }) {
+  const base = { ...(draft || {}) };
+  base.flow_step = inferCourseEnrollmentFlowStep(base);
+  if (!base.curso_nombre) return { type: 'need_course' };
+  if (!base.alumno_nombre) return { type: 'need_name' };
+  if (!base.alumno_dni) return { type: 'need_dni' };
+
+  const created = await createCourseEnrollmentRecord({
+    waId,
+    waPhone: phone,
+    draft: {
+      ...base,
+      status: 'pending_salon_payment',
+      payment_status: 'awaiting_salon_payment',
+      payment_amount: null,
+    },
+  });
+
+  await deleteCourseEnrollmentDraft(waId);
+  return { type: 'onsite_pending', enrollmentId: created?.id || null, enrollmentRow: created || null };
+}
+
+function buildCourseEnrollmentOnsitePendingMessage(base = {}) {
+  const courseName = String(base?.curso_nombre || '').trim();
+  const studentName = String(base?.alumno_nombre || '').trim();
+  const saludo = studentName ? `${studentName}, ` : '';
+  return [
+    `Perfecto 😊 ${saludo}ya dejé cargados los datos del alumno${courseName ? ` para *${courseName}*` : ''}.`,
+    '',
+    'Para terminar la inscripción, puede *acercarse directamente al salón en su horario comercial* y traer una *fotocopia del documento del alumno o alumna*.',
+    '',
+    `Si prefiere, también puede reservar por transferencia con una seña de ${COURSE_SENA_TXT} y enviarme el comprobante por aquí.`,
+  ].join('\n').trim();
 }
 
 function buildCourseEnrollmentReservedMessage(base = {}) {
@@ -3529,6 +3613,12 @@ function looksLikeCourseEnrollmentPause(text = '') {
   const t = normalizeShortReply(text || '');
   if (!t) return false;
   return /^(no quiero seguir|no quiero inscribirme|ya no quiero|despues sigo|después sigo|lo dejo ahi|lo dejo ahí|frenemos|frenalo|pause|pausa|cancelar|cancelalo|cancelalo por ahora|dejalo por ahora|quiero cancelar eso|quiero cancelar esto|cancelar eso|cancelar esto|quiero frenar eso|quiero frenar esto|olvidate|olvídate)$/.test(t);
+}
+
+function looksLikeCourseOnsitePaymentIntent(text = '') {
+  const t = normalize(text || '');
+  if (!t) return false;
+  return /(me acerco|voy al salon|voy al salón|paso por el salon|paso por el salón|lo pago en el salon|lo pago en el salón|pago en el salon|pago en el salón|abono en el salon|abono en el salón|voy a pagar al salon|voy a pagar al salón|prefiero pagar en el salon|prefiero pagar en el salón|quiero pagar en el salon|quiero pagar en el salón|pago directo en el salon|pago directo en el salón|voy directamente al salon|voy directamente al salón)/i.test(t);
 }
 
 async function extractCourseEnrollmentIntentWithAI(text, context = {}) {
@@ -3607,11 +3697,11 @@ async function askForMissingCourseEnrollmentData({ waId, phone, base, courseOpti
     return { asked: 'name', draft };
   }
 
-  if (!draft.telefono_contacto) {
-    const msg = buildCourseEnrollmentNeedPhoneMessage();
+  if (!draft.alumno_dni) {
+    const msg = buildCourseEnrollmentNeedDniMessage(draft.curso_nombre || '');
     pushHistory(waId, 'assistant', msg);
     await sendWhatsAppText(phone, msg);
-    return { asked: 'phone', draft };
+    return { asked: 'dni', draft };
   }
 
   if (draft.payment_status === 'payment_review') {
@@ -8073,7 +8163,7 @@ function looksLikeAppointmentContextFollowUp(text, { pendingDraft, lastService }
   if (isExplicitProductIntent(text)) return false;
 
   const t = normalize(text || '');
-  return /(?:lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|hoy|mañana|pasado\s+mañana|proximo|próximo|el\s+dia|el\s+día|y\s+el|que\s+horarios|qué\s+horarios|que\s+disponibilidad|qué\s+disponibilidad|tenes\s+lugar|tenés\s+lugar|disponible|disponibilidad|a\s+la\s+mañana|por\s+la\s+mañana|a\s+la\s+tarde|por\s+la\s+tarde|\d{1,2}[:.]\d{2}|\d{1,2}\s*(?:hs|horas?)|\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)/i.test(t);
+  return /(?:\blunes\b|\bmartes\b|\bmiercoles\b|\bmiércoles\b|\bjueves\b|\bviernes\b|\bsabado\b|\bsábado\b|\bdomingo\b|\bhoy\b|\bmañana\b|\bpasado\s+mañana\b|\bproximo\b|\bpróximo\b|\bel\s+dia\b|\bel\s+día\b|\by\s+el\b|\bque\s+horarios\b|\bqué\s+horarios\b|\bque\s+disponibilidad\b|\bqué\s+disponibilidad\b|\btenes\s+lugar\b|\btenés\s+lugar\b|\bdisponible\b|\bdisponibilidad\b|\ba\s+la\s+mañana\b|\bpor\s+la\s+mañana\b|\ba\s+la\s+tarde\b|\bpor\s+la\s+tarde\b|\b\d{1,2}[:.]\d{2}\b|\b\d{1,2}\s*(?:hs|horas?)\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b)/i.test(t);
 }
 
 function looksLikeAppointmentIntent(text, { pendingDraft, lastService } = {}) {
@@ -8637,6 +8727,7 @@ function buildCourseProofCaption(enrollment = {}) {
   return [
     'Comprobante enviado por alumno ✨',
     `Alumno: ${String(enrollment.student_name || '').trim() || 'Alumno/a'}`,
+    `DNI: ${String(enrollment.student_dni || '').trim() || '-'}`,
     `Curso: ${String(enrollment.course_name || '').trim() || 'Curso'}`,
     `WhatsApp: ${normalizePhone(enrollment.contact_phone || enrollment.wa_phone || '') || '-'}`,
     `Importe: ${COURSE_SENA_TXT}`,
@@ -9799,14 +9890,29 @@ Cuando quiera retomarla, me escribe y seguimos desde ahí.`;
           last_intent: 'course_signup',
         };
 
-        mergedCourseDraft = mergeContactIntoCourseEnrollment({
+        mergedCourseDraft = mergeStudentIntoCourseEnrollment({
           draft: mergedCourseDraft,
           text,
           waPhone: phone,
-          explicitName: explicitNameAnswer || contactInfoFromText?.nombre || '',
         });
         mergedCourseDraft = await tryApplyPaymentToCourseEnrollmentDraft(mergedCourseDraft, { text, mediaMeta });
         mergedCourseDraft.flow_step = inferCourseEnrollmentFlowStep(mergedCourseDraft);
+
+        if (looksLikeCourseOnsitePaymentIntent(text) && mergedCourseDraft.alumno_nombre && mergedCourseDraft.alumno_dni) {
+          const resultOnsiteCourse = await finalizeCourseEnrollmentOnsiteFlow({ waId, phone, draft: mergedCourseDraft });
+          if (resultOnsiteCourse.type === 'onsite_pending') {
+            const msgOnsite = buildCourseEnrollmentOnsitePendingMessage(mergedCourseDraft);
+            pushHistory(waId, 'assistant', msgOnsite);
+            await sendWhatsAppText(phone, msgOnsite);
+            updateLastCloseContext(waId, {
+              intentType: 'COURSE',
+              interest: buildHubSpotCourseInterestLabel(mergedCourseDraft.curso_nombre || ''),
+              suppressInactivityPrompt: false,
+            });
+            scheduleInactivityFollowUp(waId, phone);
+            return;
+          }
+        }
 
         if (mergedCourseDraft.payment_status === 'paid_verified') {
           const resultCourse = await finalizeCourseEnrollmentFlow({ waId, phone, draft: mergedCourseDraft });
@@ -11229,7 +11335,8 @@ ${some}
           curso_nombre: signupCourse?.nombre || pendingCourseDraft?.curso_nombre || '',
           curso_categoria: signupCourse?.categoria || pendingCourseDraft?.curso_categoria || '',
           alumno_nombre: isFreshCourseSignup ? '' : (pendingCourseDraft?.alumno_nombre || ''),
-          telefono_contacto: normalizePhone(pendingCourseDraft?.telefono_contacto || phone || ''),
+          alumno_dni: isFreshCourseSignup ? '' : (pendingCourseDraft?.alumno_dni || ''),
+          telefono_contacto: normalizePhone(phone || pendingCourseDraft?.telefono_contacto || ''),
           payment_status: isFreshCourseSignup ? 'not_paid' : (pendingCourseDraft?.payment_status || 'not_paid'),
           payment_amount: isFreshCourseSignup ? null : (pendingCourseDraft?.payment_amount ?? null),
           payment_sender: isFreshCourseSignup ? '' : (pendingCourseDraft?.payment_sender || ''),
@@ -11239,11 +11346,10 @@ ${some}
           payment_proof_filename: isFreshCourseSignup ? '' : (pendingCourseDraft?.payment_proof_filename || ''),
           last_intent: 'course_signup',
         };
-        baseCourseDraft = mergeContactIntoCourseEnrollment({
+        baseCourseDraft = mergeStudentIntoCourseEnrollment({
           draft: baseCourseDraft,
           text,
           waPhone: phone,
-          explicitName: explicitNameAnswer || contactInfoFromText?.nombre || '',
         });
         baseCourseDraft = await tryApplyPaymentToCourseEnrollmentDraft(baseCourseDraft, { text, mediaMeta });
         baseCourseDraft.flow_step = inferCourseEnrollmentFlowStep(baseCourseDraft);
@@ -11263,6 +11369,22 @@ ${some}
           });
           scheduleInactivityFollowUp(waId, phone);
           return;
+        }
+
+        if (looksLikeCourseOnsitePaymentIntent(text) && baseCourseDraft.alumno_nombre && baseCourseDraft.alumno_dni) {
+          const resultOnsiteCourse = await finalizeCourseEnrollmentOnsiteFlow({ waId, phone, draft: baseCourseDraft });
+          if (resultOnsiteCourse.type === 'onsite_pending') {
+            const msgOnsite = buildCourseEnrollmentOnsitePendingMessage(baseCourseDraft);
+            pushHistory(waId, 'assistant', msgOnsite);
+            await sendWhatsAppText(phone, msgOnsite);
+            updateLastCloseContext(waId, {
+              intentType: 'COURSE',
+              interest: buildHubSpotCourseInterestLabel(baseCourseDraft.curso_nombre || ''),
+              suppressInactivityPrompt: false,
+            });
+            scheduleInactivityFollowUp(waId, phone);
+            return;
+          }
         }
 
         if (baseCourseDraft.payment_status === 'paid_verified') {
