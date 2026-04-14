@@ -319,9 +319,16 @@ async function ensureCourseEnrollmentTables() {
       template_name TEXT,
       wa_message_id TEXT,
       payload JSONB,
-      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      approved_at TIMESTAMPTZ,
+      approved_by_phone TEXT,
+      approval_text TEXT
     )
   `);
+
+  await db.query(`ALTER TABLE course_enrollment_notifications ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ`);
+  await db.query(`ALTER TABLE course_enrollment_notifications ADD COLUMN IF NOT EXISTS approved_by_phone TEXT`);
+  await db.query(`ALTER TABLE course_enrollment_notifications ADD COLUMN IF NOT EXISTS approval_text TEXT`);
 }
 
 
@@ -3568,19 +3575,8 @@ async function finalizeCourseEnrollmentOnsiteFlow({ waId, phone, draft }) {
   if (!base.alumno_nombre) return { type: 'need_name' };
   if (!base.alumno_dni) return { type: 'need_dni' };
 
-  const created = await createCourseEnrollmentRecord({
-    waId,
-    waPhone: phone,
-    draft: {
-      ...base,
-      status: 'pending_salon_payment',
-      payment_status: 'awaiting_salon_payment',
-      payment_amount: null,
-    },
-  });
-
   await deleteCourseEnrollmentDraft(waId);
-  return { type: 'onsite_pending', enrollmentId: created?.id || null, enrollmentRow: created || null };
+  return { type: 'onsite_cancelled' };
 }
 
 function buildCourseEnrollmentOnsitePendingMessage(base = {}) {
@@ -3588,11 +3584,12 @@ function buildCourseEnrollmentOnsitePendingMessage(base = {}) {
   const studentName = String(base?.alumno_nombre || '').trim();
   const saludo = studentName ? `${studentName}, ` : '';
   return [
-    `Perfecto 😊 ${saludo}ya dejé cargados los datos del alumno${courseName ? ` para *${courseName}*` : ''}.`,
+    `Perfecto 😊 ${saludo}dejé *cerrado el flujo de inscripción por chat*${courseName ? ` para *${courseName}*` : ''}.`,
     '',
-    'Para terminar la inscripción, puede *acercarse directamente al salón en su horario comercial* y traer una *fotocopia del documento del alumno o alumna*.',
+    'Puede *acercarse directamente al salón en su horario comercial* para completar todo de forma presencial.',
+    'Recuerde llevar una *fotocopia del documento del alumno o alumna*.',
     '',
-    `Si prefiere, también puede reservar por transferencia con una seña de ${COURSE_SENA_TXT} y enviarme el comprobante por aquí.`,
+    `Si más adelante prefiere retomar por WhatsApp, me escribe y seguimos con la reserva por transferencia de ${COURSE_SENA_TXT}.`,
   ].join('\n').trim();
 }
 
@@ -8724,14 +8721,7 @@ function buildCourseEnrollmentTemplateVars(enrollment = {}) {
 }
 
 function buildCourseProofCaption(enrollment = {}) {
-  return [
-    'Comprobante enviado por alumno ✨',
-    `Alumno: ${String(enrollment.student_name || '').trim() || 'Alumno/a'}`,
-    `DNI: ${String(enrollment.student_dni || '').trim() || '-'}`,
-    `Curso: ${String(enrollment.course_name || '').trim() || 'Curso'}`,
-    `WhatsApp: ${normalizePhone(enrollment.contact_phone || enrollment.wa_phone || '') || '-'}`,
-    `Importe: ${COURSE_SENA_TXT}`,
-  ].join('\n');
+  return 'Comprobante enviado';
 }
 
 function guessMimeTypeFromFilename(filename = '') {
@@ -8789,6 +8779,79 @@ async function forwardCourseProofToManager(enrollment = {}) {
   return true;
 }
 
+function parseCourseManagerApprovalAction(msg = {}, text = '') {
+  const payload = normalize(msg?.button?.payload || msg?.interactive?.button_reply?.id || '');
+  const title = normalize(msg?.button?.text || msg?.interactive?.button_reply?.title || text || '');
+  const hay = `${payload} | ${title}`.trim();
+  if (/(?:^|\b)(aprobar|aprobado|approve|approved|ok visto|visto|revisado|confirmado)(?:\b|$)/i.test(hay)) return 'approve';
+  return '';
+}
+
+async function findCourseEnrollmentNotificationByMessageId(waMessageId = '') {
+  const msgId = String(waMessageId || '').trim();
+  if (!msgId) return null;
+  const r = await db.query(`SELECT * FROM course_enrollment_notifications WHERE wa_message_id = $1 LIMIT 1`, [msgId]);
+  return r.rows?.[0] || null;
+}
+
+async function markCourseEnrollmentNotificationApproved(notificationId, { approvedByPhone = '', approvalText = '' } = {}) {
+  const r = await db.query(
+    `UPDATE course_enrollment_notifications
+        SET approved_at = COALESCE(approved_at, NOW()),
+            approved_by_phone = COALESCE(NULLIF(approved_by_phone, ''), $2),
+            approval_text = CASE WHEN approved_at IS NULL THEN $3 ELSE COALESCE(approval_text, $3) END
+      WHERE id = $1
+      RETURNING *`,
+    [Number(notificationId || 0), normalizePhone(approvedByPhone || ''), String(approvalText || '').trim() || null]
+  );
+  return r.rows?.[0] || null;
+}
+
+async function findLatestPendingCourseEnrollmentNotification(recipientPhone = '') {
+  const r = await db.query(
+    `SELECT *
+       FROM course_enrollment_notifications
+      WHERE recipient_phone = $1
+        AND notification_type = 'course_payment_received'
+        AND approved_at IS NULL
+      ORDER BY sent_at DESC, id DESC
+      LIMIT 1`,
+    [normalizePhone(recipientPhone || '')]
+  );
+  return r.rows?.[0] || null;
+}
+
+async function handleCourseManagerApprovalInbound({ msg, text, phone, phoneRaw }) {
+  const managerPhone = normalizePhone(COURSE_NOTIFY_PHONE_RAW);
+  const inboundPhone = normalizePhone(phoneRaw || phone || '');
+  if (!managerPhone || inboundPhone !== managerPhone) return false;
+
+  const action = parseCourseManagerApprovalAction(msg, text);
+  if (action !== 'approve') return false;
+
+  const contextMsgId = msg?.context?.id || '';
+  let notif = await findCourseEnrollmentNotificationByMessageId(contextMsgId);
+  if (!notif) notif = await findLatestPendingCourseEnrollmentNotification(inboundPhone);
+
+  if (!notif) {
+    await sendWhatsAppText(phone, 'No encontré una inscripción pendiente para marcar como aprobada.');
+    return true;
+  }
+
+  if (notif.approved_at) {
+    await sendWhatsAppText(phone, 'Esa inscripción ya estaba marcada como aprobada.');
+    return true;
+  }
+
+  await markCourseEnrollmentNotificationApproved(notif.id, {
+    approvedByPhone: inboundPhone,
+    approvalText: String(text || '').trim() || 'Aprobado por responsable',
+  });
+
+  await sendWhatsAppText(phone, 'Perfecto 😊 Ya quedó marcada como revisada.');
+  return true;
+}
+
 async function notifyCourseManagerEnrollmentPaid(enrollment = {}) {
   const enrollmentId = Number(enrollment?.id || 0);
   const recipient = normalizeWhatsAppRecipient(COURSE_NOTIFY_PHONE_RAW);
@@ -8807,6 +8870,8 @@ async function notifyCourseManagerEnrollmentPaid(enrollment = {}) {
     notificationType: 'course_payment_received',
     vars: buildCourseEnrollmentTemplateVars(enrollment),
   });
+
+  await sleep(700);
 
   const proofForwarded = await forwardCourseProofToManager(enrollment).catch((e) => {
     console.error('❌ Error reenviando comprobante de curso a responsable:', e?.response?.data || e?.message || e);
@@ -9483,6 +9548,9 @@ lastCloseContext.set(waId, {
     const stylistHandled = await handleStylistWorkflowInbound({ msg, text, phone, phoneRaw });
     if (stylistHandled) return;
 
+    const courseManagerHandled = await handleCourseManagerApprovalInbound({ msg, text, phone, phoneRaw });
+    if (courseManagerHandled) return;
+
     const pendingNameReq = getPendingContactNameRequest(waId);
     const inboundName = await resolveInboundExplicitName(text, {
       pendingNameRequest: pendingNameReq,
@@ -9873,6 +9941,10 @@ Cuando quiera retomarla, me escribe y seguimos desde ahí.`;
       }
 
       if (!looksLikeAppointmentIntent(text, { pendingDraft, lastService: getLastKnownService(waId, pendingDraft) }) && !isExplicitProductIntent(text) && !isExplicitServiceIntent(text)) {
+        if (isLikelyGenericCourseListQuery(text) || /(otros cursos|que otros cursos|qué otros cursos|que cursos hay|qué cursos hay|que cursos estan dictando|qué cursos están dictando|que cursos tenes|qué cursos tenés|que cursos tienen|qué cursos tienen)/i.test(text || '')) {
+          await deleteCourseEnrollmentDraft(waId);
+          pendingCourseDraft = null;
+        } else {
         const courses = await getCoursesCatalog();
         const courseCtxForDraft = {
           ...(getLastCourseContext(waId) || {}),
@@ -9900,7 +9972,7 @@ Cuando quiera retomarla, me escribe y seguimos desde ahí.`;
 
         if (looksLikeCourseOnsitePaymentIntent(text) && mergedCourseDraft.alumno_nombre && mergedCourseDraft.alumno_dni) {
           const resultOnsiteCourse = await finalizeCourseEnrollmentOnsiteFlow({ waId, phone, draft: mergedCourseDraft });
-          if (resultOnsiteCourse.type === 'onsite_pending') {
+          if (resultOnsiteCourse.type === 'onsite_cancelled') {
             const msgOnsite = buildCourseEnrollmentOnsitePendingMessage(mergedCourseDraft);
             pushHistory(waId, 'assistant', msgOnsite);
             await sendWhatsAppText(phone, msgOnsite);
@@ -9943,6 +10015,7 @@ Cuando quiera retomarla, me escribe y seguimos desde ahí.`;
         });
         scheduleInactivityFollowUp(waId, phone);
         return;
+        }
       }
     }
 
@@ -11315,7 +11388,8 @@ ${some}
         currentCourseName: activeCourse?.nombre || referencedCourse?.nombre || lastCourseContext?.selectedName || '',
         historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1200),
       });
-      const wantsCourseSignup = followupGoal === 'SIGNUP' || ['START_SIGNUP', 'CONTINUE_SIGNUP', 'PAYMENT'].includes(courseEnrollmentIntent.action || '');
+      const isGenericCourseCatalogAsk = isLikelyGenericCourseListQuery(text) || /(otros cursos|que otros cursos|qué otros cursos|que cursos hay|qué cursos hay|que cursos estan dictando|qué cursos están dictando|que cursos tenes|qué cursos tenés|que cursos tienen|qué cursos tienen)/i.test(text || '');
+      const wantsCourseSignup = !isGenericCourseCatalogAsk && (followupGoal === 'SIGNUP' || ['START_SIGNUP', 'CONTINUE_SIGNUP', 'PAYMENT'].includes(courseEnrollmentIntent.action || ''));
 
       if (wantsCourseSignup) {
         await clearAppointmentStateForCourseFlow({
@@ -11373,7 +11447,7 @@ ${some}
 
         if (looksLikeCourseOnsitePaymentIntent(text) && baseCourseDraft.alumno_nombre && baseCourseDraft.alumno_dni) {
           const resultOnsiteCourse = await finalizeCourseEnrollmentOnsiteFlow({ waId, phone, draft: baseCourseDraft });
-          if (resultOnsiteCourse.type === 'onsite_pending') {
+          if (resultOnsiteCourse.type === 'onsite_cancelled') {
             const msgOnsite = buildCourseEnrollmentOnsitePendingMessage(baseCourseDraft);
             pushHistory(waId, 'assistant', msgOnsite);
             await sendWhatsAppText(phone, msgOnsite);
