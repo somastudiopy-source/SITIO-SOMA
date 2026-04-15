@@ -329,6 +329,7 @@ async function ensureCourseEnrollmentTables() {
   await db.query(`ALTER TABLE course_enrollment_notifications ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ`);
   await db.query(`ALTER TABLE course_enrollment_notifications ADD COLUMN IF NOT EXISTS approved_by_phone TEXT`);
   await db.query(`ALTER TABLE course_enrollment_notifications ADD COLUMN IF NOT EXISTS approval_text TEXT`);
+  await db.query(`ALTER TABLE course_enrollment_notifications ADD COLUMN IF NOT EXISTS approved_student_notified_at TIMESTAMPTZ`);
 }
 
 
@@ -8124,36 +8125,63 @@ function findServiceByContext(rows, query, lastServiceName) {
   return [];
 }
 
-function formatCoursesReply(matches, mode) {
-  if (!matches.length) return null;
+function formatCourseReplyBlock(course = {}) {
+  if (!course?.nombre) return "";
+
+  const lines = [
+    `🎓 *${course.nombre}*`,
+    course.categoria ? `• Categoría: ${course.categoria}` : "",
+    course.modalidad ? `• Modalidad: ${course.modalidad}` : "",
+    course.duracionTotal ? `• Duración: ${course.duracionTotal}` : "",
+    course.fechaInicio ? `• Inicio: ${course.fechaInicio}` : "",
+    course.fechaFin ? `• Finalización: ${course.fechaFin}` : "",
+    course.diasHorarios ? `• Días y horarios: ${course.diasHorarios}` : "",
+    course.precio ? `• Precio: *${moneyOrConsult(course.precio)}*` : "",
+    course.sena ? `• Seña / inscripción: ${course.sena}` : "",
+    course.cupos ? `• Cupos: ${course.cupos}` : "",
+    course.requisitos ? `• Requisitos: ${course.requisitos}` : "",
+    course.estado ? `• Estado: ${course.estado}` : "",
+    course.info ? `• Info: ${course.info}` : "",
+  ].filter(Boolean);
+
+  return lines.join("\n");
+}
+
+function formatCoursesReplySequence(matches, mode) {
+  if (!matches.length) return [];
 
   const limited = mode === "LIST" ? matches.slice(0, 10) : matches.slice(0, 3);
-
-  const blocks = limited.map(c => {
-    const lines = [
-      `🎓 *${c.nombre}*`,
-      c.categoria ? `• Categoría: ${c.categoria}` : "",
-      c.modalidad ? `• Modalidad: ${c.modalidad}` : "",
-      c.duracionTotal ? `• Duración: ${c.duracionTotal}` : "",
-      c.fechaInicio ? `• Inicio: ${c.fechaInicio}` : "",
-      c.fechaFin ? `• Finalización: ${c.fechaFin}` : "",
-      c.diasHorarios ? `• Días y horarios: ${c.diasHorarios}` : "",
-      c.precio ? `• Precio: *${moneyOrConsult(c.precio)}*` : "",
-      c.sena ? `• Seña / inscripción: ${c.sena}` : "",
-      c.cupos ? `• Cupos: ${c.cupos}` : "",
-      c.requisitos ? `• Requisitos: ${c.requisitos}` : "",
-      c.estado ? `• Estado: ${c.estado}` : "",
-      c.info ? `• Info: ${c.info}` : "",
-    ].filter(Boolean);
-
-    return lines.join("\n");
-  });
-
+  const blocks = limited.map((c) => formatCourseReplyBlock(c)).filter(Boolean);
   const header = mode === "LIST"
     ? "🎓 Estos son los cursos disponibles:"
     : "🎓 Este es el curso que encontré:";
 
-  return `${header}\n\n${blocks.join("\n\n— — —\n\n")}\n\nSi quiere, también le paso la foto del curso 😊`.trim();
+  if (mode === "LIST" && blocks.length > 1) {
+    return [
+      header,
+      ...blocks,
+      'Si quiere, también le paso el material del curso que le interese 😊',
+    ].filter(Boolean);
+  }
+
+  return [`${header}\n\n${blocks.join("\n\n— — —\n\n")}\n\nSi quiere, también le paso el material del curso 😊`.trim()];
+}
+
+async function sendCourseCatalogResponses(phone, waId, matches, mode) {
+  const parts = formatCoursesReplySequence(matches, mode);
+  if (!parts.length) return false;
+
+  for (const part of parts) {
+    pushHistory(waId, "assistant", part);
+    await sendWhatsAppText(phone, part);
+    await sleep(250);
+  }
+  return true;
+}
+
+function formatCoursesReply(matches, mode) {
+  const parts = formatCoursesReplySequence(matches, mode);
+  return parts.length ? parts[0] : null;
 }
 
 async function getRecentDbMessages(waPeer, limit = 12) {
@@ -8900,6 +8928,36 @@ async function markCourseEnrollmentNotificationApproved(notificationId, { approv
   return r.rows?.[0] || null;
 }
 
+async function markCourseEnrollmentNotificationStudentNotified(notificationId) {
+  const r = await db.query(
+    `UPDATE course_enrollment_notifications
+        SET approved_student_notified_at = COALESCE(approved_student_notified_at, NOW())
+      WHERE id = $1
+      RETURNING *`,
+    [Number(notificationId || 0)]
+  );
+  return r.rows?.[0] || null;
+}
+
+async function findCourseEnrollmentById(enrollmentId) {
+  const r = await db.query(`SELECT * FROM course_enrollments WHERE id = $1 LIMIT 1`, [Number(enrollmentId || 0)]);
+  return r.rows?.[0] || null;
+}
+
+function buildCourseEnrollmentApprovedStudentMessage(enrollment = {}) {
+  const studentName = String(enrollment?.student_name || '').trim();
+  const courseName = String(enrollment?.course_name || '').trim();
+  const saludo = studentName ? `${studentName}, ` : '';
+  return [
+    `Perfecto 😊 ${saludo}ya quedó *todo registrado correctamente*${courseName ? ` para *${courseName}*` : ''}.`,
+    '',
+    'El resto de la inscripción puede abonarlo *el primer día / al comienzo de la primera clase*.',
+    'Si lo prefiere, también puede *acercarse al local* para completar ese pago.',
+    '',
+    'Cualquier cosa, me escribe por aquí ✨',
+  ].join("\n").trim();
+}
+
 async function findLatestPendingCourseEnrollmentNotification(recipientPhone = '') {
   const r = await db.query(
     `SELECT *
@@ -8936,12 +8994,26 @@ async function handleCourseManagerApprovalInbound({ msg, text, phone, phoneRaw }
     return true;
   }
 
-  await markCourseEnrollmentNotificationApproved(notif.id, {
+  const approvedNotif = await markCourseEnrollmentNotificationApproved(notif.id, {
     approvedByPhone: inboundPhone,
     approvalText: String(text || '').trim() || 'Aprobado por responsable',
   });
 
   await sendWhatsAppText(phone, 'Perfecto 😊 Ya quedó marcada como revisada.');
+
+  const enrollment = await findCourseEnrollmentById(notif.enrollment_id);
+  if (approvedNotif && enrollment && !approvedNotif.approved_student_notified_at) {
+    const studentPhone = normalizeWhatsAppRecipient(enrollment.wa_phone || enrollment.contact_phone || '');
+    const studentMessage = buildCourseEnrollmentApprovedStudentMessage(enrollment);
+    if (studentPhone && studentMessage) {
+      try {
+        await sendWhatsAppText(studentPhone, studentMessage);
+        await markCourseEnrollmentNotificationStudentNotified(notif.id);
+      } catch (e) {
+        console.error('❌ Error avisando al alumno aprobación de inscripción:', e?.response?.data || e?.message || e);
+      }
+    }
+  }
   return true;
 }
 
@@ -11774,7 +11846,8 @@ ${some}
       }
 
       const matches = isGenericCourseQuery ? courses : findCourses(courses, cleanedCourseQuery || courseQuery, intent.mode);
-      const replyCatalog = formatCoursesReply(matches, isGenericCourseQuery ? 'LIST' : intent.mode);
+      const replyMode = isGenericCourseQuery ? 'LIST' : intent.mode;
+      const replyCatalog = formatCoursesReply(matches, replyMode);
       if (replyCatalog) {
         const selectedCourseName = matches.length === 1 ? (matches[0]?.nombre || '') : '';
         const rememberedCourses = mergeCourseContextRows(matches, previousRecentCourses);
@@ -11795,8 +11868,7 @@ ${some}
           lastUserText: text,
         });
 
-        pushHistory(waId, "assistant", replyCatalog);
-        await sendWhatsAppText(phone, replyCatalog);
+        await sendCourseCatalogResponses(phone, waId, matches, replyMode);
         await maybeSendCoursePhotos(phone, matches);
         scheduleInactivityFollowUp(waId, phone);
         return;
