@@ -3627,10 +3627,13 @@ async function extractCourseEnrollmentIntentWithAI(text, context = {}) {
   if (detectSenaPaid({ text: raw }) || looksLikePaymentProofText(raw) || looksLikeProofAlreadySent(raw)) {
     return { action: 'PAYMENT', course_query: '' };
   }
+
+  let forcedAction = '';
   if (/(inscrib|inscripción|inscripcion|anot|reserv(ar|o)? lugar|quiero ese curso|quiero ese|me quiero sumar|quiero entrar|quiero reservar mi lugar|seña|sena)/i.test(t)) {
-    return { action: 'START_SIGNUP', course_query: '' };
+    forcedAction = 'START_SIGNUP';
+  } else if (context?.hasDraft) {
+    forcedAction = 'CONTINUE_SIGNUP';
   }
-  if (context?.hasDraft) return { action: 'CONTINUE_SIGNUP', course_query: '' };
 
   try {
     const completion = await openai.chat.completions.create({
@@ -3650,13 +3653,15 @@ Reglas:
 - PAYMENT si manda o menciona comprobante, transferencia, seña o pago.
 - PAUSE si quiere frenar o cancelar por ahora.
 - NONE si solo consulta info.
-- course_query solo si el mensaje menciona claramente el curso.`
+- course_query debe intentar extraer el nombre o tema del curso cuando la persona lo insinúa, incluso en frases como “quiero inscribirme al de celulares”, “el segundo”, “el de reparación”, “ese curso” o “al técnico de tablets”.
+- Si no se puede inferir con claridad, devolvé cadena vacía.`
         },
         {
           role: 'user',
           content: JSON.stringify({
             mensaje: raw,
             curso_actual: context.currentCourseName || '',
+            opciones_recientes: Array.isArray(context.recentCourseNames) ? context.recentCourseNames.slice(0, 12) : [],
             hay_borrador_activo: !!context.hasDraft,
             historial: context.historySnippet || '',
           })
@@ -3666,11 +3671,11 @@ Reglas:
     });
     const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
     return {
-      action: String(obj.action || 'NONE').trim().toUpperCase(),
+      action: String(forcedAction || obj.action || 'NONE').trim().toUpperCase(),
       course_query: String(obj.course_query || '').trim(),
     };
   } catch {
-    return { action: 'NONE', course_query: '' };
+    return { action: forcedAction || 'NONE', course_query: '' };
   }
 }
 
@@ -7645,6 +7650,93 @@ function resolveCourseFromConversationContext(rows, text, lastCourseContext = nu
   return currentCourse || null;
 }
 
+function resolveCourseByOrdinalChoice(rows, text = '') {
+  const list = Array.isArray(rows) ? rows.filter((x) => x?.nombre) : [];
+  if (!list.length) return null;
+  const t = normalize(text || '');
+  if (!t) return null;
+
+  if (/(primer|primero|1ro|uno|el primero|la primera)/.test(t)) return list[0] || null;
+  if (/(segundo|segunda|2do|dos|el segundo|la segunda)/.test(t)) return list[1] || null;
+  if (/(tercer|tercero|tercera|3ro|tres|el tercero|la tercera)/.test(t)) return list[2] || null;
+  if (/(ultimo|último|ultima|última|el ultimo|el último|la ultima|la última)/.test(t)) return list[list.length - 1] || null;
+  return null;
+}
+
+function stripCourseSignupNoise(text = '') {
+  return sanitizeCourseSearchQuery(
+    String(text || '')
+      .replace(/(quiero|me quiero|quisiera|para|anotarme|anotarme al|anotarme a|inscribirme|inscribirme al|inscribirme a|sumarme|reservar|reservar lugar|quiero reservar mi lugar|me quiero inscribir|para curso de|curso de)/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+  );
+}
+
+async function resolveCourseEnrollmentSelectionWithAI(rows, text, context = {}) {
+  const catalogRows = Array.isArray(rows) ? rows.filter((x) => x?.nombre) : [];
+  const recentRows = Array.isArray(context?.recentCourses) ? context.recentCourses.filter((x) => x?.nombre) : [];
+  const activeRows = recentRows.length ? recentRows : catalogRows;
+  const raw = String(text || '').trim();
+  if (!raw) return { course: null, course_query: '' };
+
+  const ordinal = resolveCourseByOrdinalChoice(activeRows, raw);
+  if (ordinal) return { course: ordinal, course_query: ordinal.nombre || '' };
+
+  const cleanedHint = stripCourseSignupNoise(raw);
+  if (cleanedHint) {
+    const hintedRecent = findCourseByReferenceHint(activeRows, cleanedHint) || findCourseByReferenceHint(activeRows, raw);
+    if (hintedRecent) return { course: hintedRecent, course_query: hintedRecent.nombre || cleanedHint };
+
+    const hintedMatches = findCourses(activeRows, cleanedHint, 'DETAIL');
+    if (hintedMatches.length === 1) return { course: hintedMatches[0], course_query: hintedMatches[0]?.nombre || cleanedHint };
+
+    const catalogHintedMatches = findCourses(catalogRows, cleanedHint, 'DETAIL');
+    if (catalogHintedMatches.length === 1) return { course: catalogHintedMatches[0], course_query: catalogHintedMatches[0]?.nombre || cleanedHint };
+  }
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Elegí cuál es el curso correcto mencionado por la persona. Devolvé SOLO JSON válido con:
+- selected_name: string
+- course_query: string
+
+Reglas:
+- Tenés que resolver referencias naturales como “el segundo”, “el de celulares”, “el técnico”, “ese”, “ese de reparación”.
+- selected_name debe ser exactamente uno de los nombres disponibles, o cadena vacía si no está claro.
+- course_query puede contener una pista corta útil si no lográs elegir con total claridad.
+- No inventes nombres.`
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje: raw,
+            curso_actual: context?.currentCourseName || '',
+            opciones_recientes: activeRows.map((x) => x.nombre).slice(0, 12),
+            cursos_disponibles: catalogRows.map((x) => x.nombre).slice(0, 20),
+            historial: context?.historySnippet || '',
+          })
+        }
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const selectedName = String(obj.selected_name || '').trim();
+    const courseQuery = String(obj.course_query || '').trim();
+    const selected = findCourseByContextName(activeRows, selectedName) || findCourseByContextName(catalogRows, selectedName);
+    if (selected) return { course: selected, course_query: selected.nombre || courseQuery };
+    return { course: null, course_query: courseQuery };
+  } catch {
+    return { course: null, course_query: cleanedHint || '' };
+  }
+}
+
 function formatNaturalCourseFollowupReply(course, goal = 'DETAIL') {
   if (!course) return '';
 
@@ -11424,6 +11516,7 @@ ${some}
       const courseEnrollmentIntent = await extractCourseEnrollmentIntentWithAI(text, {
         hasDraft: !!pendingCourseDraft,
         currentCourseName: activeCourse?.nombre || referencedCourse?.nombre || lastCourseContext?.selectedName || '',
+        recentCourseNames: Array.isArray(lastCourseContext?.recentCourses) ? lastCourseContext.recentCourses.map((x) => x?.nombre).filter(Boolean).slice(0, 12) : [],
         historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1200),
       });
       const isGenericCourseCatalogAsk = isLikelyGenericCourseListQuery(text) || /(otros cursos|que otros cursos|qué otros cursos|que cursos hay|qué cursos hay|que cursos estan dictando|qué cursos están dictando|que cursos tenes|qué cursos tenés|que cursos tienen|qué cursos tienen)/i.test(text || '');
@@ -11440,9 +11533,14 @@ ${some}
         pendingDraft = null;
         pendingStylistSuggestion = null;
 
-        const signupQuery = courseEnrollmentIntent.course_query || activeCourse?.nombre || referencedCourse?.nombre || lastCourseContext?.selectedName || text;
+        const aiSignupSelection = await resolveCourseEnrollmentSelectionWithAI(courses, text, {
+          currentCourseName: activeCourse?.nombre || referencedCourse?.nombre || lastCourseContext?.selectedName || '',
+          recentCourses: Array.isArray(lastCourseContext?.recentCourses) ? lastCourseContext.recentCourses : [],
+          historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1200),
+        });
+        const signupQuery = aiSignupSelection.course_query || courseEnrollmentIntent.course_query || activeCourse?.nombre || referencedCourse?.nombre || lastCourseContext?.selectedName || stripCourseSignupNoise(text) || text;
         const signupMatches = signupQuery ? findCourses(courses, signupQuery, 'DETAIL') : [];
-        const signupCourse = activeCourse || referencedCourse || signupMatches[0] || findCourseByContextName(courses, courseEnrollmentIntent.course_query || '') || null;
+        const signupCourse = aiSignupSelection.course || activeCourse || referencedCourse || signupMatches[0] || findCourseByContextName(courses, courseEnrollmentIntent.course_query || '') || null;
         const isFreshCourseSignup = courseEnrollmentIntent.action === 'START_SIGNUP';
         let baseCourseDraft = {
           ...(pendingCourseDraft || {}),
