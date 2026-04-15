@@ -4370,6 +4370,20 @@ function parseStylistDecisionAction(msg = {}, text = '') {
   return '';
 }
 
+function looksLikeRegularSalonChatIntent(text = '') {
+  const t = normalize(text || '');
+  if (!t) return false;
+  return /(hola|holi|holis|buen dia|buen día|buenas|buenas tardes|buenas noches|quisiera|quiero|cuanto|cuánto|como|cómo|demora|dura|precio|sale|tenes|tenés|hay|stock|turno|servicio|producto|curso|inscrib|foto|camilla|sillon|sillón|shampoo|keratina|botox|alisado|nutricion|nutrición|color|tintura|mechas|barber|corte|consulta|informacion|información|capacitacion|capacitación|masterclass)/i.test(t);
+}
+
+function shouldHandleStylistWorkflowWithoutReply(text = '', { action = '', suggestionDate = '', suggestionTime = '' } = {}) {
+  const clean = String(text || '').trim();
+  if (!clean) return false;
+  if (action === 'accept' || action === 'decline' || action === 'suggest') return true;
+  if ((suggestionDate || suggestionTime) && !looksLikeRegularSalonChatIntent(clean)) return true;
+  return false;
+}
+
 function stylistSuggestionNeedsDetails(msg = {}, text = '') {
   const buttonText = normalize(msg?.button?.text || msg?.interactive?.button_reply?.title || '');
   const raw = normalize(text || '');
@@ -4420,6 +4434,18 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
   if (parseCourseManagerApprovalAction(msg, text) === 'approve') return false;
 
   const contextMsgId = msg?.context?.id || '';
+  if (contextMsgId) {
+    const courseNotif = await findCourseEnrollmentNotificationByMessageId(contextMsgId);
+    if (courseNotif) return false;
+  }
+
+  const action = parseStylistDecisionAction(msg, text);
+  const suggestionDate = extractLikelyDateFromText(text);
+  const suggestionTime = extractLikelyHourFromText(text);
+  const allowWithoutReply = shouldHandleStylistWorkflowWithoutReply(text, { action, suggestionDate, suggestionTime });
+
+  if (!contextMsgId && !allowWithoutReply) return false;
+
   let appt = await findAppointmentByNotificationMessageId(contextMsgId);
   if (!appt) {
     const r = await db.query(
@@ -4434,6 +4460,8 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
     } else if (pendingRows.length > 1) {
       await sendWhatsAppText(phone, 'Veo más de un turno pendiente. Respondeme tocando o contestando sobre el mensaje puntual del turno para no equivocarme.');
       return true;
+    } else if (!contextMsgId) {
+      return false;
     }
   }
 
@@ -4447,9 +4475,6 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
     return true;
   }
 
-  const action = parseStylistDecisionAction(msg, text);
-  const suggestionDate = extractLikelyDateFromText(text);
-  const suggestionTime = extractLikelyHourFromText(text);
   const suggestionBits = [];
   if (suggestionDate) suggestionBits.push(ymdToDMY(suggestionDate));
   if (suggestionTime) suggestionBits.push(normalizeHourHM(suggestionTime));
@@ -9229,7 +9254,26 @@ async function handleCourseManagerApprovalInbound({ msg, text, phone, phoneRaw }
 
   const contextMsgId = msg?.context?.id || '';
   let notif = await findCourseEnrollmentNotificationByMessageId(contextMsgId);
-  if (!notif) notif = await findLatestPendingCourseEnrollmentNotification(inboundPhone);
+
+  if (!notif && !contextMsgId) {
+    const pendingR = await db.query(
+      `SELECT *
+         FROM course_enrollment_notifications
+        WHERE recipient_phone = $1
+          AND notification_type = 'course_payment_received'
+          AND approved_at IS NULL
+        ORDER BY sent_at DESC, id DESC
+        LIMIT 2`,
+      [normalizePhone(inboundPhone || '')]
+    );
+    const pendingRows = Array.isArray(pendingR.rows) ? pendingR.rows : [];
+    if (pendingRows.length === 1) {
+      notif = pendingRows[0];
+    } else if (pendingRows.length > 1) {
+      await sendWhatsAppText(phone, 'Veo más de una inscripción pendiente. Respondeme tocando o contestando sobre el mensaje puntual de la inscripción para no equivocarme.');
+      return true;
+    }
+  }
 
   if (!notif) {
     await sendWhatsAppText(phone, 'No encontré una inscripción pendiente para marcar como aprobada.');
