@@ -2425,6 +2425,238 @@ function clearLastCourseContext(waId) {
 }
 
 
+// ✅ Última oferta/respuesta activa del asistente (para interpretar mejor respuestas como
+// "pasá fotos", "quiero ese", "más info", "quiero avanzar", etc.)
+const activeAssistantOfferByUser = new Map();
+const ACTIVE_ASSISTANT_OFFER_TTL_MS = Number(process.env.ACTIVE_ASSISTANT_OFFER_TTL_MS || 90 * 60 * 1000);
+
+function normalizeActiveOfferItems(items = []) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of (Array.isArray(items) ? items : [])) {
+    const clean = String(raw || '').trim();
+    const key = normalize(clean);
+    if (!clean || !key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(clean);
+  }
+  return out.slice(0, 12);
+}
+
+function getActiveAssistantOffer(waId) {
+  const row = activeAssistantOfferByUser.get(waId);
+  if (!row) return null;
+  if ((Date.now() - Number(row.ts || 0)) > ACTIVE_ASSISTANT_OFFER_TTL_MS) {
+    activeAssistantOfferByUser.delete(waId);
+    return null;
+  }
+  return row;
+}
+
+function setActiveAssistantOffer(waId, patch = {}) {
+  if (!waId) return null;
+  const prev = getActiveAssistantOffer(waId) || {};
+  const items = normalizeActiveOfferItems(
+    patch.items !== undefined ? patch.items : (prev.items || [])
+  );
+  const selectedNameRaw = String(
+    patch.selectedName !== undefined ? patch.selectedName : (prev.selectedName || '')
+  ).trim();
+  const selectedName = selectedNameRaw || (items.length === 1 ? items[0] : '');
+  const next = {
+    ...prev,
+    ...patch,
+    items,
+    selectedName,
+    type: String(patch.type || prev.type || '').trim().toUpperCase(),
+    ts: Date.now(),
+  };
+  activeAssistantOfferByUser.set(waId, next);
+  return next;
+}
+
+function clearActiveAssistantOffer(waId) {
+  if (waId) activeAssistantOfferByUser.delete(waId);
+}
+
+function rememberAssistantProductOffer(waId, rows = [], extra = {}) {
+  const items = normalizeActiveOfferItems((Array.isArray(rows) ? rows : []).map((x) => x?.nombre || x).filter(Boolean));
+  return setActiveAssistantOffer(waId, {
+    type: 'PRODUCT',
+    items,
+    selectedName: extra.selectedName || (items.length === 1 ? items[0] : ''),
+    mode: extra.mode || '',
+    domain: extra.domain || '',
+    family: extra.family || '',
+    focusTerm: extra.focusTerm || '',
+    questionKind: extra.questionKind || '',
+    lastAssistantText: extra.lastAssistantText || '',
+  });
+}
+
+function rememberAssistantCourseOffer(waId, rows = [], extra = {}) {
+  const items = normalizeActiveOfferItems((Array.isArray(rows) ? rows : []).map((x) => x?.nombre || x).filter(Boolean));
+  return setActiveAssistantOffer(waId, {
+    type: 'COURSE',
+    items,
+    selectedName: extra.selectedName || (items.length === 1 ? items[0] : ''),
+    mode: extra.mode || '',
+    questionKind: extra.questionKind || '',
+    lastAssistantText: extra.lastAssistantText || '',
+  });
+}
+
+function rememberAssistantServiceOffer(waId, rows = [], extra = {}) {
+  const items = normalizeActiveOfferItems((Array.isArray(rows) ? rows : []).map((x) => cleanServiceName(x?.nombre || x)).filter(Boolean));
+  return setActiveAssistantOffer(waId, {
+    type: 'SERVICE',
+    items,
+    selectedName: extra.selectedName || (items.length === 1 ? items[0] : ''),
+    mode: extra.mode || '',
+    questionKind: extra.questionKind || '',
+    lastAssistantText: extra.lastAssistantText || '',
+  });
+}
+
+function looksLikeActiveOfferFollowup(text = '') {
+  const t = normalize(text || '');
+  if (!t) return false;
+  if (/^(ese|esa|esos|esas|de ese|de esa|de esos|de esas|ese curso|ese servicio|ese producto|el primero|la primera|el segundo|la segunda|el tercero|la tercera|quiero ese|quiero esa|mas info|más info|info|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|cuanto dura|cuánto dura|cuando empieza|cuándo empieza|horario|horarios|cupos|requisitos|quiero avanzar|quiero seguir|quiero continuar|quiero reservar|quiero inscribirme|quiero anotarme|quiero turno|pasame foto|pásame foto|pasame fotos|pásame fotos|mandame foto|mandame fotos|mostrame|mostrame fotos|ver|ok|oka|dale|bien|perfecto)$/.test(t)) return true;
+  if (userAsksForPhoto(text)) return true;
+  if (/(quiero (ese|esa|seguir|continuar|avanzar|reservar|inscribirme|anotarme|turno)|de ese|de esa|precio del primero|precio del segundo|foto del primero|foto del segundo|material del curso|pasame el material|pasame material|me interesa ese)/i.test(t)) return true;
+  return false;
+}
+
+async function resolveReplyToActiveAssistantOfferWithAI(text, context = {}) {
+  const raw = String(text || '').trim();
+  const activeOffer = context.activeOffer || null;
+  if (!raw || !activeOffer?.type) {
+    return { action: 'NONE', target_type: '', target_name: '', goal: 'NONE', wants_all_items: false };
+  }
+
+  const fallback = (() => {
+    const activeType = String(activeOffer?.type || '').toUpperCase();
+    const targetName = String(activeOffer?.selectedName || activeOffer?.items?.[0] || '').trim();
+
+    if (activeType === 'PRODUCT' && userAsksForPhoto(raw)) {
+      return {
+        action: 'CONTINUE_ACTIVE_OFFER',
+        target_type: 'PRODUCT',
+        target_name: targetName,
+        goal: 'PHOTO',
+        wants_all_items: !!(userAsksForAllPhotos(raw) || (!targetName && Array.isArray(activeOffer?.items) && activeOffer.items.length > 1)),
+      };
+    }
+
+    if (activeType === 'COURSE' && /(inscrib|inscripción|inscripcion|anot|reserv(ar|o)? lugar|quiero seguir|quiero avanzar|quiero ese|quiero ese curso|seña|sena)/i.test(normalize(raw))) {
+      return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'COURSE', target_name: targetName, goal: 'SIGNUP', wants_all_items: false };
+    }
+
+    if (activeType === 'SERVICE' && /(turno|reserv(ar|a)?|agend(ar|a)?|cita|quiero seguir|quiero avanzar|quiero ese servicio)/i.test(normalize(raw))) {
+      return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'SERVICE', target_name: targetName, goal: 'BOOK', wants_all_items: false };
+    }
+
+    return { action: 'NONE', target_type: '', target_name: '', goal: 'NONE', wants_all_items: false };
+  })();
+
+  if (!looksLikeActiveOfferFollowup(raw) && !context.force) return fallback;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Analizá si el mensaje del cliente responde DIRECTAMENTE a la última oferta/respuesta comercial del asistente por WhatsApp.
+
+Devolvé SOLO JSON válido con estas claves:
+- action: CONTINUE_ACTIVE_OFFER | SWITCH_TOPIC | NONE
+- target_type: PRODUCT | COURSE | SERVICE | OTHER
+- target_name: string
+- goal: PHOTO | PRICE | DETAIL | LIST_MORE | MATERIAL | SIGNUP | BOOK | DURATION | SCHEDULE | REQUIREMENTS | CUPS | NONE
+- wants_all_items: boolean
+
+Reglas:
+- Priorizá entender si la persona responde a lo ÚLTIMO que el asistente le mostró.
+- Si dice cosas como "pasame fotos", "precio del primero", "quiero ese", "de ese", "más info", "quiero avanzar", "quiero seguir", normalmente es CONTINUE_ACTIVE_OFFER.
+- PRODUCT: fotos, precio, detalle, elegir una opción, seguir con la recomendación.
+- COURSE: más info, precio, horarios, requisitos, material, o inscribirse.
+- SERVICE: precio, duración, detalle o sacar turno.
+- Si cambia claramente a otro tema distinto, devolvé SWITCH_TOPIC.
+- target_name debe ser el ítem más probable dentro de las opciones activas. Si no se puede saber y sigue siendo una respuesta a la oferta activa, puede ir vacío.
+- wants_all_items=true solo si pide ver todas las fotos/opciones o habla de todas las opciones activas.
+- No inventes productos, cursos ni servicios.`
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje: raw,
+            oferta_activa_tipo: activeOffer?.type || '',
+            oferta_activa_items: Array.isArray(activeOffer?.items) ? activeOffer.items.slice(0, 12) : [],
+            oferta_activa_item_seleccionado: activeOffer?.selectedName || '',
+            oferta_activa_modo: activeOffer?.mode || '',
+            oferta_activa_texto: activeOffer?.lastAssistantText || '',
+            ultimo_servicio: context.lastServiceName || '',
+            ultimo_curso: context.lastCourseName || '',
+            historial_reciente: context.historySnippet || '',
+          })
+        }
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    return {
+      action: String(obj.action || fallback.action || 'NONE').trim().toUpperCase(),
+      target_type: String(obj.target_type || activeOffer?.type || '').trim().toUpperCase(),
+      target_name: String(obj.target_name || '').trim(),
+      goal: String(obj.goal || fallback.goal || 'NONE').trim().toUpperCase(),
+      wants_all_items: !!obj.wants_all_items,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function buildSyntheticTextFromActiveOfferResolution(resolution, activeOffer = null) {
+  const type = String(resolution?.target_type || activeOffer?.type || '').trim().toUpperCase();
+  const target = String(resolution?.target_name || activeOffer?.selectedName || activeOffer?.items?.[0] || '').trim();
+  const goal = String(resolution?.goal || 'NONE').trim().toUpperCase();
+  const allItems = !!resolution?.wants_all_items;
+
+  if (!type) return '';
+
+  if (type === 'PRODUCT') {
+    if (goal === 'PHOTO') return allItems ? 'pasame fotos de todo eso' : `pasame foto de ${target}`.trim();
+    if (goal === 'PRICE') return `precio de ${target}`.trim();
+    if (goal === 'LIST_MORE') return target ? `mostrame más opciones de ${target}` : 'mostrame más opciones';
+    return target || 'quiero ese producto';
+  }
+
+  if (type === 'COURSE') {
+    if (goal === 'SIGNUP') return `quiero inscribirme al curso ${target}`.trim();
+    if (goal === 'MATERIAL') return `pasame el material del curso ${target}`.trim();
+    if (goal === 'PRICE') return `precio del curso ${target}`.trim();
+    if (goal === 'SCHEDULE') return `horarios del curso ${target}`.trim();
+    if (goal === 'DURATION') return `duración del curso ${target}`.trim();
+    if (goal === 'REQUIREMENTS') return `requisitos del curso ${target}`.trim();
+    if (goal === 'CUPS') return `cupos del curso ${target}`.trim();
+    return target ? `info del curso ${target}` : 'más info del curso';
+  }
+
+  if (type === 'SERVICE') {
+    if (goal === 'BOOK') return `quiero turno para ${target}`.trim();
+    if (goal === 'PRICE') return `precio del servicio ${target}`.trim();
+    if (goal === 'DURATION') return `cuánto dura ${target}`.trim();
+    return target ? `info del servicio ${target}` : 'más info del servicio';
+  }
+
+  return '';
+}
+
+
 function toCourseContextRow(course = {}) {
   const nombre = String(course?.nombre || '').trim();
   if (!nombre) return null;
@@ -8171,6 +8403,13 @@ async function sendCourseCatalogResponses(phone, waId, matches, mode) {
   const parts = formatCoursesReplySequence(matches, mode);
   if (!parts.length) return false;
 
+  rememberAssistantCourseOffer(waId, matches, {
+    mode,
+    selectedName: matches.length === 1 ? (matches[0]?.nombre || '') : '',
+    questionKind: mode === 'LIST' ? 'LIST' : 'DETAIL',
+    lastAssistantText: parts.join('\n\n'),
+  });
+
   for (const part of parts) {
     pushHistory(waId, "assistant", part);
     await sendWhatsAppText(phone, part);
@@ -8546,6 +8785,8 @@ Tené en cuenta el contexto previo:
 - curso_actual y curso_contexto_activo: si venían hablando de cursos, mensajes como "alguno de barbería", "más info", "de ese", "cuándo empieza", "precio", "cupos", "modalidad" deben clasificarse como COURSE.
 - flujo_actual: si el cliente ya estaba hablando de reservar, priorizá continuidad y no lo mandes a catálogo de nuevo.
 - Si el mensaje es solo 'si', 'dale', 'ok' o similar y venían hablando de un servicio, priorizá la continuidad de ese tema.
+- producto_actual, producto_contexto_activo y productos_recientes: si venían hablando de productos o el asistente acaba de recomendar opciones, mensajes como "pasame fotos", "precio del primero", "quiero ese", "más info" o "de ese" deben clasificarse como PRODUCT.
+- oferta_asistente_activa: si existe, priorizá interpretar el mensaje como respuesta a esa última oferta del bot, salvo que el cambio de tema sea claro.
 
 Ejemplos:
 - "hola busco cursos" => COURSE + query "cursos" + LIST
@@ -8567,9 +8808,15 @@ Respondé SOLO JSON.`
         content: JSON.stringify({
           mensaje: text,
           servicio_actual: context.lastServiceName || "",
+          producto_actual: context.lastProductName || "",
+          producto_contexto_activo: !!context.hasProductContext,
+          productos_recientes: context.productOptions || [],
           curso_actual: context.lastCourseName || "",
           curso_contexto_activo: !!context.hasCourseContext,
           cursos_recientes: context.courseOptions || [],
+          oferta_asistente_activa: context.activeAssistantOfferType || "",
+          oferta_asistente_items: context.activeAssistantOfferItems || [],
+          oferta_asistente_seleccionado: context.activeAssistantOfferSelectedName || "",
           flujo_actual: context.flowStep || "",
           tiene_borrador_turno: !!context.hasDraft,
           historial_reciente: context.historySnippet || "",
@@ -9866,6 +10113,7 @@ lastCloseContext.set(waId, {
 
       if (wrapUpControl.action === 'CLOSE_POLITELY') {
         clearProductMemory(waId);
+        clearActiveAssistantOffer(waId);
         clearPendingAmbiguousBeauty(waId);
         clearLastResolvedBeauty(waId);
         clearLastCourseContext(waId);
@@ -9982,17 +10230,90 @@ updateLastCloseContext(waId, {
 
     await upsertCommercialFollowupCandidate(waId);
 
-    // Si piden foto sin decir cuál: usar el último producto o las últimas opciones listadas
+    const activeAssistantOffer = getActiveAssistantOffer(waId);
+    const activeOfferResolution = activeAssistantOffer
+      ? await resolveReplyToActiveAssistantOfferWithAI(text, {
+          activeOffer: activeAssistantOffer,
+          lastServiceName: getLastKnownService(waId, await getAppointmentDraft(waId))?.nombre || '',
+          lastCourseName: getLastCourseContext(waId)?.selectedName || getLastCourseContext(waId)?.query || '',
+          historySnippet: ensureConv(waId).messages.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1400),
+        })
+      : null;
+
+    if (activeOfferResolution?.action === 'CONTINUE_ACTIVE_OFFER') {
+      if (activeOfferResolution.target_type === 'PRODUCT') {
+        const stockForActiveOffer = await getStockCatalog();
+        const activeProductNames = normalizeActiveOfferItems(
+          activeOfferResolution.wants_all_items
+            ? (activeAssistantOffer?.items || [])
+            : [
+                activeOfferResolution.target_name || '',
+                activeAssistantOffer?.selectedName || '',
+                activeAssistantOffer?.items?.[0] || '',
+              ]
+        );
+        const activeProducts = resolveProductsByNames(stockForActiveOffer, activeProductNames);
+        if (activeProducts.length) {
+          setLastProductContext(waId, {
+            domain: activeAssistantOffer?.domain || '',
+            family: activeAssistantOffer?.family || '',
+            focusTerm: activeAssistantOffer?.focusTerm || '',
+            mode: activeProducts.length > 1 ? 'list' : 'detail',
+            lastOptions: activeProducts.map((x) => x.nombre).slice(0, 10),
+          });
+          if (activeProducts.length === 1) lastProductByUser.set(waId, activeProducts[0]);
+
+          if (activeOfferResolution.goal === 'PHOTO') {
+            const sent = activeOfferResolution.wants_all_items || activeProducts.length > 1
+              ? await maybeSendMultipleProductPhotos(phone, activeProducts, userIntentText || text)
+              : await maybeSendProductPhoto(phone, activeProducts[0], userIntentText || text);
+            if (sent) {
+              scheduleInactivityFollowUp(waId, phone);
+              return;
+            }
+          }
+        }
+      }
+
+      const syntheticTextFromActiveOffer = buildSyntheticTextFromActiveOfferResolution(activeOfferResolution, activeAssistantOffer);
+      if (syntheticTextFromActiveOffer) {
+        text = syntheticTextFromActiveOffer;
+        userIntentText = syntheticTextFromActiveOffer;
+        updateLastCloseContext(waId, { lastUserText: syntheticTextFromActiveOffer });
+      }
+    } else if (activeOfferResolution?.action === 'SWITCH_TOPIC') {
+      clearActiveAssistantOffer(waId);
+    }
+
+    // Si piden foto sin decir cuál: priorizar la última oferta activa, luego el contexto de producto y por último el último producto puntual.
     if (userAsksForPhoto(userIntentText)) {
       const stockForPhotos = await getStockCatalog();
+      const activeOfferForPhotos = getActiveAssistantOffer(waId);
       const lastCtxForPhotos = getLastProductContext(waId);
 
-      if (userAsksForAllPhotos(userIntentText) && lastCtxForPhotos?.lastOptions?.length) {
+      if (activeOfferForPhotos?.type === 'PRODUCT' && Array.isArray(activeOfferForPhotos.items) && activeOfferForPhotos.items.length) {
+        const activeOfferProducts = resolveProductsByNames(stockForPhotos, activeOfferForPhotos.items);
+        if (activeOfferProducts.length) {
+          const sentFromActiveOffer = (userAsksForAllPhotos(userIntentText) || activeOfferProducts.length > 1)
+            ? await maybeSendMultipleProductPhotos(phone, activeOfferProducts, userIntentText)
+            : await maybeSendProductPhoto(phone, activeOfferProducts[0], userIntentText);
+          if (sentFromActiveOffer) {
+            scheduleInactivityFollowUp(waId, phone);
+            return;
+          }
+        }
+      }
+
+      if (lastCtxForPhotos?.lastOptions?.length) {
         const optionProducts = resolveProductsByNames(stockForPhotos, lastCtxForPhotos.lastOptions);
-        const sentAll = await maybeSendMultipleProductPhotos(phone, optionProducts, userIntentText);
-        if (sentAll) {
-          scheduleInactivityFollowUp(waId, phone);
-          return;
+        if (optionProducts.length) {
+          const sentFromContext = (userAsksForAllPhotos(userIntentText) || optionProducts.length > 1)
+            ? await maybeSendMultipleProductPhotos(phone, optionProducts, userIntentText)
+            : await maybeSendProductPhoto(phone, optionProducts[0], userIntentText);
+          if (sentFromContext) {
+            scheduleInactivityFollowUp(waId, phone);
+            return;
+          }
         }
       }
 
@@ -10197,6 +10518,7 @@ Cuando quiera retomarla, me escribe y seguimos desde ahí.`;
               lastUserText: text,
               suppressInactivityPrompt: true,
             });
+            rememberAssistantCourseOffer(waId, [referencedCourse], { mode: 'DETAIL', selectedName: referencedCourse?.nombre || '', questionKind: draftFollowupGoal || 'DETAIL', lastAssistantText: naturalCourseReply });
             pushHistory(waId, 'assistant', naturalCourseReply);
             await sendWhatsAppText(phone, naturalCourseReply);
             scheduleInactivityFollowUp(waId, phone);
@@ -10979,6 +11301,7 @@ Seña recibida ✔`.trim();
 
     if (!pendingDraft && isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
       clearProductMemory(waId);
+      clearActiveAssistantOffer(waId);
       const msgCierreTurno = `¡Gracias a vos! 😊
 
 Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
@@ -10990,6 +11313,7 @@ Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
 
     if (isPoliteCatalogDecline(text) && lastAssistantLooksLikeCatalogMessage(waId)) {
       clearProductMemory(waId);
+      clearActiveAssistantOffer(waId);
       const msgNoCatalogo = `Perdón 😊 No le molesto más con eso.
 
 Si después necesita algo, estoy acá ✨`;
@@ -11002,6 +11326,7 @@ Si después necesita algo, estoy acá ✨`;
     if (textAsksForServicesList(text)) {
       const services = await getServicesCatalog();
       const parts = formatServicesListAll(services, 8);
+      rememberAssistantServiceOffer(waId, services.slice(0, 12), { mode: 'LIST', questionKind: 'LIST', lastAssistantText: parts.join('\n\n') });
       for (const part of parts) {
         pushHistory(waId, "assistant", part);
         await sendWhatsAppText(phone, part);
@@ -11015,6 +11340,7 @@ Si después necesita algo, estoy acá ✨`;
       const matches = findStock(stock, lastKnownService.nombre, 'LIST');
       if (matches.length) {
         const replyCatalog = formatStockReply(matches, 'LIST', { domain: detectProductDomain(text), familyLabel: detectFurnitureFamily(text) || detectProductFamily(text) });
+        rememberAssistantProductOffer(waId, matches, { mode: 'LIST', selectedName: matches.length === 1 ? (matches[0]?.nombre || '') : '', lastAssistantText: replyCatalog });
         pushHistory(waId, 'assistant', replyCatalog);
         await sendWhatsAppText(phone, replyCatalog);
         scheduleInactivityFollowUp(waId, phone);
@@ -11055,6 +11381,7 @@ Si después necesita algo, estoy acá ✨`;
           }
         }
         const replyDuration = formatServicesReply(durationMatches, "DETAIL", { showDuration: true, showDescription: true });
+        rememberAssistantServiceOffer(waId, durationMatches, { mode: 'DETAIL', selectedName: durationMatches[0]?.nombre || '', questionKind: 'DURATION', lastAssistantText: replyDuration });
         if (replyDuration) {
           pushHistory(waId, "assistant", replyDuration);
           await sendWhatsAppText(phone, replyDuration);
@@ -11093,6 +11420,7 @@ Si después necesita algo, estoy acá ✨`;
           }
         }
         const replyPrice = formatServicesReply(priceMatches, "DETAIL");
+        rememberAssistantServiceOffer(waId, priceMatches, { mode: 'DETAIL', selectedName: priceMatches[0]?.nombre || '', questionKind: 'PRICE', lastAssistantText: replyPrice });
         if (replyPrice) {
           pushHistory(waId, "assistant", replyPrice);
           await sendWhatsAppText(phone, replyPrice);
@@ -11125,6 +11453,7 @@ Si después necesita algo, estoy acá ✨`;
           showDescription: wantsDuration,
         });
         if (replyImplicit) {
+          rememberAssistantServiceOffer(waId, implicitMatches, { mode: 'DETAIL', selectedName: implicitMatches[0]?.nombre || '', questionKind: wantsDuration ? 'DURATION' : 'DETAIL', lastAssistantText: replyImplicit });
           pushHistory(waId, 'assistant', replyImplicit);
           await sendWhatsAppText(phone, replyImplicit);
           scheduleInactivityFollowUp(waId, phone);
@@ -11137,9 +11466,15 @@ Si después necesita algo, estoy acá ✨`;
 
     let intent = await classifyAndExtract(text, {
       lastServiceName: lastKnownService?.nombre || '',
+      lastProductName: lastProductByUser.get(waId)?.nombre || '',
+      hasProductContext: !!getLastProductContext(waId),
+      productOptions: Array.isArray(getLastProductContext(waId)?.lastOptions) ? getLastProductContext(waId).lastOptions.slice(0, 10) : [],
       lastCourseName: lastCourseContext?.selectedName || lastCourseContext?.query || '',
       hasCourseContext: !!lastCourseContext,
       courseOptions: Array.isArray(lastCourseContext?.lastOptions) ? lastCourseContext.lastOptions.slice(0, 10) : [],
+      activeAssistantOfferType: getActiveAssistantOffer(waId)?.type || '',
+      activeAssistantOfferItems: Array.isArray(getActiveAssistantOffer(waId)?.items) ? getActiveAssistantOffer(waId).items.slice(0, 12) : [],
+      activeAssistantOfferSelectedName: getActiveAssistantOffer(waId)?.selectedName || '',
       flowStep: pendingDraft?.flow_step || '',
       hasDraft: !!pendingDraft,
       historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1600),
@@ -11307,6 +11642,7 @@ Si después necesita algo, estoy acá ✨`;
           seatsNeeded: resolvedSeatsNeeded || '',
           mode: 'list_all',
         });
+        rememberAssistantProductOffer(waId, stockBase.slice(0, 12), { mode: 'LIST', domain: resolvedDomain || '', family: resolvedFamily || '', focusTerm: resolvedFocusTerm || '', questionKind: 'LIST', lastAssistantText: parts.join('\n\n') });
         for (const part of parts) {
           pushHistory(waId, 'assistant', part);
           await sendWhatsAppText(phone, part);
@@ -11422,6 +11758,7 @@ Si después necesita algo, estoy acá ✨`;
               mode: 'recommendation',
               lastOptions: (picked.length ? picked : shortlist.slice(0, 4)).map((x) => x.nombre),
             });
+            rememberAssistantProductOffer(waId, picked.length ? picked : shortlist.slice(0, 4), { mode: 'recommendation', domain: resolvedDomain || detectProductDomain(text, resolvedFamily) || '', family: resolvedFamily || '', focusTerm: resolvedFocusTerm || '', questionKind: 'RECOMMENDATION', lastAssistantText: replyReco });
             if (picked.length === 1) lastProductByUser.set(waId, picked[0]);
             pushHistory(waId, 'assistant', replyReco);
             await sendWhatsAppText(phone, replyReco);
@@ -11462,6 +11799,7 @@ Si después necesita algo, estoy acá ✨`;
             familyLabel: resolvedFamily || (resolvedDomain === 'furniture' ? detectFurnitureFamily(resolvedQuery) : detectProductFamily(resolvedQuery)),
             chunkSize: 8,
           });
+          rememberAssistantProductOffer(waId, relatedSlice, { mode: 'LIST', domain: resolvedDomain || '', family: resolvedFamily || '', focusTerm: resolvedFocusTerm || '', questionKind: 'LIST', lastAssistantText: parts.join('\n\n') });
           for (const part of parts) {
             pushHistory(waId, 'assistant', part);
             await sendWhatsAppText(phone, part);
@@ -11523,6 +11861,7 @@ Si después necesita algo, estoy acá ✨`;
 
         const replyCatalog = formatStockReply(matches, matches.length === 1 ? 'DETAIL' : 'LIST', { domain: resolvedDomain, familyLabel: resolvedFamily });
         if (replyCatalog) {
+          rememberAssistantProductOffer(waId, matches, { mode: matches.length === 1 ? 'DETAIL' : 'LIST', domain: resolvedDomain || '', family: resolvedFamily || '', focusTerm: resolvedFocusTerm || '', selectedName: matches.length === 1 ? (matches[0]?.nombre || '') : '', questionKind: matches.length === 1 ? 'DETAIL' : 'LIST', lastAssistantText: replyCatalog });
           pushHistory(waId, 'assistant', replyCatalog);
           await sendWhatsAppText(phone, replyCatalog);
           scheduleInactivityFollowUp(waId, phone);
@@ -11556,6 +11895,7 @@ Si después necesita algo, estoy acá ✨`;
           familyLabel: resolvedFamily || (resolvedDomain === 'furniture' ? detectFurnitureFamily(resolvedQuery) : detectProductFamily(resolvedQuery)),
           chunkSize: 8,
         });
+        rememberAssistantProductOffer(waId, broaderSlice, { mode: 'LIST', domain: resolvedDomain || '', family: resolvedFamily || '', focusTerm: resolvedFocusTerm || '', questionKind: 'LIST', lastAssistantText: parts.join('\n\n') });
         for (const part of parts) {
           pushHistory(waId, 'assistant', part);
           await sendWhatsAppText(phone, part);
@@ -11797,6 +12137,7 @@ ${some}
             lastUserText: text,
           });
 
+          rememberAssistantCourseOffer(waId, [activeCourse], { mode: 'DETAIL', selectedName: activeCourse?.nombre || '', questionKind: followupGoal || 'DETAIL', lastAssistantText: naturalCourseReply });
           pushHistory(waId, 'assistant', naturalCourseReply);
           await sendWhatsAppText(phone, naturalCourseReply);
           scheduleInactivityFollowUp(waId, phone);
@@ -11838,6 +12179,7 @@ ${some}
             lastUserText: text,
           });
 
+          rememberAssistantCourseOffer(waId, [referencedCourse], { mode: 'DETAIL', selectedName: referencedCourse?.nombre || '', questionKind: 'DETAIL', lastAssistantText: detailReply });
           pushHistory(waId, "assistant", detailReply);
           await sendWhatsAppText(phone, detailReply);
           scheduleInactivityFollowUp(waId, phone);
