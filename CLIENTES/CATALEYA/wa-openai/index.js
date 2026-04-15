@@ -1,3 +1,4 @@
+
 const express = require("express");
 const axios = require("axios");
 const dotenv = require("dotenv");
@@ -4370,20 +4371,6 @@ function parseStylistDecisionAction(msg = {}, text = '') {
   return '';
 }
 
-function looksLikeRegularSalonChatIntent(text = '') {
-  const t = normalize(text || '');
-  if (!t) return false;
-  return /(hola|holi|holis|buen dia|buen día|buenas|buenas tardes|buenas noches|quisiera|quiero|cuanto|cuánto|como|cómo|demora|dura|precio|sale|tenes|tenés|hay|stock|turno|servicio|producto|curso|inscrib|foto|camilla|sillon|sillón|shampoo|keratina|botox|alisado|nutricion|nutrición|color|tintura|mechas|barber|corte|consulta|informacion|información|capacitacion|capacitación|masterclass)/i.test(t);
-}
-
-function shouldHandleStylistWorkflowWithoutReply(text = '', { action = '', suggestionDate = '', suggestionTime = '' } = {}) {
-  const clean = String(text || '').trim();
-  if (!clean) return false;
-  if (action === 'accept' || action === 'decline' || action === 'suggest') return true;
-  if ((suggestionDate || suggestionTime) && !looksLikeRegularSalonChatIntent(clean)) return true;
-  return false;
-}
-
 function stylistSuggestionNeedsDetails(msg = {}, text = '') {
   const buttonText = normalize(msg?.button?.text || msg?.interactive?.button_reply?.title || '');
   const raw = normalize(text || '');
@@ -4434,18 +4421,6 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
   if (parseCourseManagerApprovalAction(msg, text) === 'approve') return false;
 
   const contextMsgId = msg?.context?.id || '';
-  if (contextMsgId) {
-    const courseNotif = await findCourseEnrollmentNotificationByMessageId(contextMsgId);
-    if (courseNotif) return false;
-  }
-
-  const action = parseStylistDecisionAction(msg, text);
-  const suggestionDate = extractLikelyDateFromText(text);
-  const suggestionTime = extractLikelyHourFromText(text);
-  const allowWithoutReply = shouldHandleStylistWorkflowWithoutReply(text, { action, suggestionDate, suggestionTime });
-
-  if (!contextMsgId && !allowWithoutReply) return false;
-
   let appt = await findAppointmentByNotificationMessageId(contextMsgId);
   if (!appt) {
     const r = await db.query(
@@ -4460,8 +4435,6 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
     } else if (pendingRows.length > 1) {
       await sendWhatsAppText(phone, 'Veo más de un turno pendiente. Respondeme tocando o contestando sobre el mensaje puntual del turno para no equivocarme.');
       return true;
-    } else if (!contextMsgId) {
-      return false;
     }
   }
 
@@ -4475,6 +4448,9 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
     return true;
   }
 
+  const action = parseStylistDecisionAction(msg, text);
+  const suggestionDate = extractLikelyDateFromText(text);
+  const suggestionTime = extractLikelyHourFromText(text);
   const suggestionBits = [];
   if (suggestionDate) suggestionBits.push(ymdToDMY(suggestionDate));
   if (suggestionTime) suggestionBits.push(normalizeHourHM(suggestionTime));
@@ -9254,26 +9230,7 @@ async function handleCourseManagerApprovalInbound({ msg, text, phone, phoneRaw }
 
   const contextMsgId = msg?.context?.id || '';
   let notif = await findCourseEnrollmentNotificationByMessageId(contextMsgId);
-
-  if (!notif && !contextMsgId) {
-    const pendingR = await db.query(
-      `SELECT *
-         FROM course_enrollment_notifications
-        WHERE recipient_phone = $1
-          AND notification_type = 'course_payment_received'
-          AND approved_at IS NULL
-        ORDER BY sent_at DESC, id DESC
-        LIMIT 2`,
-      [normalizePhone(inboundPhone || '')]
-    );
-    const pendingRows = Array.isArray(pendingR.rows) ? pendingR.rows : [];
-    if (pendingRows.length === 1) {
-      notif = pendingRows[0];
-    } else if (pendingRows.length > 1) {
-      await sendWhatsAppText(phone, 'Veo más de una inscripción pendiente. Respondeme tocando o contestando sobre el mensaje puntual de la inscripción para no equivocarme.');
-      return true;
-    }
-  }
+  if (!notif) notif = await findLatestPendingCourseEnrollmentNotification(inboundPhone);
 
   if (!notif) {
     await sendWhatsAppText(phone, 'No encontré una inscripción pendiente para marcar como aprobada.');
@@ -10228,13 +10185,22 @@ lastCloseContext.set(waId, {
     }
 
     // ✅ Si el cliente frena, posterga o cambia de tema en medio del flujo, resolvemos eso antes de seguir.
-    const pauseDraftEarly = await getAppointmentDraft(waId);
-    if (pauseDraftEarly && !quickCourseFlow) {
+    // Precompute pending appointment draft and course draft.  We need these
+    // variables early because looksLikeCourseFlowSignal uses pendingCourseDraft.
+    let pendingDraft = await getAppointmentDraft(waId);
+    let pendingCourseDraft = await getCourseEnrollmentDraft(waId);
+    // Detect whether the current message likely belongs to a course flow.  We call this
+    // before referencing quickCourseFlow to avoid a temporal dead zone.
+    const quickCourseFlowEarly = looksLikeCourseFlowSignal(text, {
+      lastCourseContext: getLastCourseContext(waId),
+      pendingCourseDraft,
+    });
+    if (pendingDraft && !quickCourseFlowEarly) {
       const draftControlEarly = await classifyAppointmentDraftControl(text, {
-        serviceName: pauseDraftEarly?.servicio || pauseDraftEarly?.last_service_name || '',
-        date: pauseDraftEarly?.fecha || '',
-        time: pauseDraftEarly?.hora || '',
-        flowStep: pauseDraftEarly?.flow_step || '',
+        serviceName: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
+        date: pendingDraft?.fecha || '',
+        time: pendingDraft?.hora || '',
+        flowStep: pendingDraft?.flow_step || '',
         historySnippet: ensureConv(waId).messages.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1200),
       });
 
@@ -10402,10 +10368,14 @@ updateLastCloseContext(waId, {
     }
 
     // ===================== ✅ TURNOS (Calendar + Railway Postgres) =====================
-    let pendingDraft = await getAppointmentDraft(waId);
-    let pendingCourseDraft = await getCourseEnrollmentDraft(waId);
+    // Reuse previously-computed pendingDraft and pendingCourseDraft if available.  If
+    // they are undefined (e.g. because the early pause logic didn't run), compute
+    // them now.  Avoid re-declaring with `let` to prevent shadowing.
+    pendingDraft = pendingDraft || await getAppointmentDraft(waId);
+    pendingCourseDraft = pendingCourseDraft || await getCourseEnrollmentDraft(waId);
     let pendingStylistSuggestion = getPendingStylistSuggestion(waId);
-    const quickCourseFlow = looksLikeCourseFlowSignal(text, {
+    // Reuse the early quickCourseFlow detection if defined; otherwise compute it here.
+    const quickCourseFlow = (typeof quickCourseFlowEarly !== 'undefined') ? quickCourseFlowEarly : looksLikeCourseFlowSignal(text, {
       lastCourseContext: getLastCourseContext(waId),
       pendingCourseDraft,
     });
