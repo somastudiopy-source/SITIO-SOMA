@@ -9393,53 +9393,103 @@ function imageMimeFromPathish(value) {
   if (/\.png($|\?)/.test(v)) return 'image/png';
   if (/\.webp($|\?)/.test(v)) return 'image/webp';
   if (/\.jpe?g($|\?)/.test(v)) return 'image/jpeg';
+  if (/\.mp4($|\?)/.test(v)) return 'video/mp4';
+  if (/\.mov($|\?)/.test(v)) return 'video/quicktime';
+  if (/\.3gp($|\?)/.test(v)) return 'video/3gpp';
+  if (/\.m4v($|\?)/.test(v)) return 'video/mp4';
   return 'image/jpeg';
 }
 
-async function downloadImageFromSharedLink(link, tmpPrefix = 'img') {
+function mediaExtFromMime(mimeType = '') {
+  const m = String(mimeType || '').toLowerCase();
+  if (m === 'image/png') return '.png';
+  if (m === 'image/webp') return '.webp';
+  if (m === 'image/jpeg' || m === 'image/jpg') return '.jpg';
+  if (m === 'video/mp4') return '.mp4';
+  if (m === 'video/quicktime') return '.mov';
+  if (m === 'video/3gpp') return '.3gp';
+  if (m === 'application/pdf') return '.pdf';
+  return imageExtFromMime(mimeType);
+}
+
+function normalizeSharedMediaMimeType(mimeType = '', fallbackValue = '') {
+  const clean = String(mimeType || '').split(';')[0].trim().toLowerCase();
+  if (clean) return clean;
+  return imageMimeFromPathish(fallbackValue || '');
+}
+
+async function downloadSharedMediaFromLink(link, tmpPrefix = 'media') {
   const value = String(link || '').trim();
   if (!value) throw new Error('missing_link');
 
   const driveFileId = extractDriveFileId(value);
   if (driveFileId) {
-    let mimeType = 'image/jpeg';
+    let mimeType = '';
     try {
       const drive = await getDriveClient();
       const meta = await drive.files.get({ fileId: driveFileId, fields: 'mimeType,name' });
-      mimeType = meta?.data?.mimeType || mimeType;
+      mimeType = meta?.data?.mimeType || '';
     } catch {}
 
-    const ext = imageExtFromMime(mimeType);
+    mimeType = normalizeSharedMediaMimeType(mimeType, value);
+    const ext = mediaExtFromMime(mimeType);
     const tmpPath = path.join(getTmpDir(), `${tmpPrefix}-${driveFileId}${ext}`);
     await downloadDriveFileToPath(driveFileId, tmpPath);
     return { tmpPath, mimeType };
   }
 
   const resp = await axios.get(value, { responseType: 'arraybuffer' });
-  const mimeType = String(resp?.headers?.['content-type'] || imageMimeFromPathish(value)).split(';')[0].trim() || 'image/jpeg';
-  const ext = imageExtFromMime(mimeType);
+  const mimeType = normalizeSharedMediaMimeType(resp?.headers?.['content-type'] || '', value);
+  const ext = mediaExtFromMime(mimeType);
   const tmpPath = path.join(getTmpDir(), `${tmpPrefix}-${Date.now()}${ext}`);
   fs.writeFileSync(tmpPath, Buffer.from(resp.data));
   return { tmpPath, mimeType };
 }
 
-async function sendCoursePhotoDirect(phone, course) {
+async function sendWhatsAppVideoById(to, mediaId, caption) {
+  await axios.post(
+    `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'video',
+      video: { id: mediaId, ...(caption ? { caption } : {}) },
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+  await dbInsertMessage({
+    direction: 'out',
+    wa_peer: to,
+    name: null,
+    text: caption || '',
+    msg_type: 'video',
+    wa_msg_id: mediaId || null,
+    raw: { sent: true, media: { id: mediaId, filename: `out-${mediaId}.mp4` } },
+  });
+}
+
+async function sendCourseMediaDirect(phone, course) {
   if (!course) return { ok: false, reason: 'no_course' };
 
-  const imageLink = String(course.link || '').trim();
-  if (!imageLink) {
+  const mediaLink = String(course.link || '').trim();
+  if (!mediaLink) {
     return { ok: false, reason: 'missing_link' };
   }
 
   let tmpPath = '';
   try {
-    const downloaded = await downloadImageFromSharedLink(imageLink, 'course');
+    const downloaded = await downloadSharedMediaFromLink(mediaLink, 'course');
     tmpPath = downloaded.tmpPath;
-    const mimeType = downloaded.mimeType || 'image/jpeg';
+    const mimeType = normalizeSharedMediaMimeType(downloaded.mimeType || '', mediaLink);
     const mediaId = await uploadMediaToWhatsApp(tmpPath, mimeType);
 
     try {
-      const savedName = `out-${mediaId}${imageExtFromMime(mimeType)}`;
+      const savedName = `out-${mediaId}${mediaExtFromMime(mimeType)}`;
       fs.copyFileSync(tmpPath, path.join(MEDIA_DIR, savedName));
     } catch {}
 
@@ -9449,10 +9499,17 @@ async function sendCoursePhotoDirect(phone, course) {
       course.fechaInicio ? `Inicio: ${course.fechaInicio}` : '',
     ].filter(Boolean).join(' | ');
 
-    await sendWhatsAppImageById(phone, mediaId, caption);
-    return { ok: true };
+    if (mimeType.startsWith('image/')) {
+      await sendWhatsAppImageById(phone, mediaId, caption);
+    } else if (mimeType.startsWith('video/')) {
+      await sendWhatsAppVideoById(phone, mediaId, caption);
+    } else {
+      await sendWhatsAppDocumentById(phone, mediaId, path.basename(tmpPath), caption);
+    }
+
+    return { ok: true, mediaType: mimeType };
   } catch (e) {
-    console.error('❌ Error enviando foto del curso:', e?.response?.data || e?.message || e);
+    console.error('❌ Error enviando material del curso:', e?.response?.data || e?.message || e);
     return { ok: false, reason: 'send_error', error: e };
   } finally {
     if (tmpPath) {
@@ -9471,11 +9528,11 @@ async function maybeSendCoursePhotos(phone, courses) {
   const failed = [];
 
   if (limited.length > 1) {
-    await sendWhatsAppText(phone, 'Le paso también las fotos de los cursos 😊');
+    await sendWhatsAppText(phone, 'Le paso también el material de los cursos 😊');
   }
 
   for (const course of limited) {
-    const result = await sendCoursePhotoDirect(phone, course);
+    const result = await sendCourseMediaDirect(phone, course);
     if (result.ok) {
       sentCount += 1;
     } else if (result.reason === 'missing_link') {
@@ -9486,13 +9543,13 @@ async function maybeSendCoursePhotos(phone, courses) {
   }
 
   if (missing.length) {
-    await sendWhatsAppText(phone, `No tengo la foto vinculada correctamente en la columna “Link” para: ${missing.join(', ')}.`);
+    await sendWhatsAppText(phone, `No tengo el link del material cargado correctamente en la columna “Link” para: ${missing.join(', ')}.`);
   }
 
   if (failed.length && !sentCount) {
-    await sendWhatsAppText(phone, 'No pude enviar las fotos de los cursos en este momento. Revise que el link de imagen esté accesible o compartido correctamente.');
+    await sendWhatsAppText(phone, 'No pude enviar el material de los cursos en este momento. Revise que el link de imagen o video esté accesible o compartido correctamente.');
   } else if (failed.length) {
-    await sendWhatsAppText(phone, `No pude enviar algunas fotos de cursos ahora mismo: ${failed.join(', ')}.`);
+    await sendWhatsAppText(phone, `No pude enviar algunos archivos de cursos ahora mismo: ${failed.join(', ')}.`);
   }
 
   return sentCount > 0 || missing.length > 0 || failed.length > 0;
