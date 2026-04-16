@@ -6526,6 +6526,42 @@ function buildOutOfStockCatalogMessage({ domain = '', family = '', query = '' } 
     : 'Por el momento ese producto no está disponible en stock.';
 }
 
+const AUTO_PHOTO_SPECIAL_ALIASES = ['capa', 'capas', 'tijera', 'tijeras', 'rociador', 'rociadores'];
+const AUTO_PHOTO_TAB_NAMES = ['equipamiento', 'muebles'];
+
+function isAutoPhotoTabName(tab = '') {
+  const t = normalizeCatalogSearchText(tab || '');
+  return AUTO_PHOTO_TAB_NAMES.includes(t);
+}
+
+function rowMatchesAutoPhotoSpecial(row) {
+  const hay = buildStockHaystack(row);
+  return AUTO_PHOTO_SPECIAL_ALIASES.some((alias) => containsCatalogPhrase(hay, alias));
+}
+
+function isAutoPhotoExceptionalRow(row) {
+  if (!row?.nombre) return false;
+  if (isAutoPhotoTabName(row?.tab || '')) return true;
+  return rowMatchesAutoPhotoSpecial(row);
+}
+
+function selectAutoPhotoExceptionalRows(rows, { domain = '', family = '', query = '' } = {}) {
+  const list = Array.isArray(rows) ? rows.filter((row) => !!row?.nombre) : [];
+  if (!list.length) return [];
+
+  const normalizedFamily = normalizeCatalogSearchText(family || '');
+  const normalizedQuery = normalizeCatalogSearchText(query || '');
+  const forcesException = (
+    domain === 'furniture'
+    || ['plancha', 'secador'].includes(normalizedFamily)
+    || /(\bplancha\b|\bplanchita\b|\bplanchitas\b|\bsecador\b|\bsecadores\b|\bcapa\b|\bcapas\b|\btijera\b|\btijeras\b|\brociador\b|\brociadores\b|\bmueble\b|\bmuebles\b|\bequipamiento\b|\bsillon\b|\bsillón\b|\bsillones\b|\bcamilla\b|\bcamillas\b|\bespejo\b|\bespejos\b)/i.test(normalizedQuery)
+  );
+
+  const preferred = list.filter((row) => isAutoPhotoExceptionalRow(row) || (domain === 'furniture' && detectRowProductDomain(row) === 'furniture'));
+  if (preferred.length) return preferred;
+  return forcesException ? list : [];
+}
+
 // ===================== SERVICES / COURSES (values normal) =====================
 async function getServicesCatalog() {
   const now = Date.now();
@@ -10034,6 +10070,65 @@ async function maybeSendMultipleProductPhotos(phone, products, userText) {
   return sentCount > 0 || missing.length > 0 || failed.length > 0;
 }
 
+async function trySendExceptionalProductPhotos(phone, products, { domain = '', family = '', query = '' } = {}) {
+  const selected = selectAutoPhotoExceptionalRows(products, { domain, family, query });
+  if (!selected.length) return { attempted: false, handled: false, sentCount: 0, missing: [], failed: [] };
+
+  const unique = [];
+  const seen = new Set();
+  for (const product of selected) {
+    const key = normalizeCatalogSearchText(`${product?.nombre || ''} ${product?.marca || ''}`);
+    if (!product?.nombre || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(product);
+  }
+
+  const limited = unique.slice(0, 8);
+  if (!limited.length) return { attempted: false, handled: false, sentCount: 0, missing: [], failed: [] };
+
+  if (limited.length > 1) {
+    await sendWhatsAppText(phone, 'Le paso las opciones con foto 😊');
+  }
+
+  let sentCount = 0;
+  const missing = [];
+  const failed = [];
+
+  for (const product of limited) {
+    const result = await sendProductPhotoDirect(phone, product);
+    if (result.ok) {
+      sentCount += 1;
+    } else if (result.reason === 'missing_link') {
+      missing.push(product.nombre || 'Producto');
+    } else {
+      failed.push(product.nombre || 'Producto');
+    }
+  }
+
+  if (!sentCount) {
+    if (missing.length) {
+      const msg = missing.length === 1
+        ? `No tengo foto vinculada para *${missing[0]}*, pero le paso la info igual 😊`
+        : `No tengo foto vinculada para estas opciones: ${missing.join(', ')}, pero le paso la info igual 😊`;
+      await sendWhatsAppText(phone, msg);
+    }
+    if (failed.length) {
+      await sendWhatsAppText(phone, 'No pude enviar las fotos en este momento. Le paso la info igual 😊');
+    }
+    return { attempted: true, handled: false, sentCount, missing, failed, selected: limited };
+  }
+
+  if (missing.length) {
+    await sendWhatsAppText(phone, `No tengo foto vinculada de: ${missing.join(', ')}.`);
+  }
+
+  if (failed.length) {
+    await sendWhatsAppText(phone, `No pude enviar algunas fotos ahora mismo: ${failed.join(', ')}.`);
+  }
+
+  return { attempted: true, handled: true, sentCount, missing, failed, selected: limited };
+}
+
 async function maybeSendProductPhoto(phone, product, userText) {
   if (!product) return false;
   if (!userAsksForPhoto(userText)) return false;
@@ -12132,6 +12227,31 @@ Si después necesita algo, estoy acá ✨`;
         (lastProductCtx && ((resolvedDomain === 'furniture' && looksLikeFurniturePreferenceReply(text)) || (resolvedDomain !== 'furniture' && looksLikeProductPreferenceReply(text))))
       );
 
+      const tryExceptionalPhotoReply = async (rows, { mode = 'LIST', selectedName = '', questionKind = 'LIST' } = {}) => {
+        const summaryMode = mode === 'DETAIL' ? 'DETAIL' : 'LIST';
+        const summaryText = formatStockReply(rows, summaryMode, { domain: resolvedDomain, familyLabel: resolvedFamily }) || '';
+        rememberAssistantProductOffer(waId, rows, {
+          mode,
+          domain: resolvedDomain || '',
+          family: resolvedFamily || '',
+          focusTerm: resolvedFocusTerm || '',
+          selectedName: selectedName || '',
+          questionKind,
+          lastAssistantText: summaryText,
+        });
+        if (summaryText) pushHistory(waId, 'assistant', summaryText);
+        const photoResult = await trySendExceptionalProductPhotos(phone, rows, {
+          domain: resolvedDomain,
+          family: resolvedFamily,
+          query: `${resolvedQuery || ''} ${text || ''}`,
+        });
+        if (photoResult.handled) {
+          scheduleInactivityFollowUp(waId, phone);
+          return true;
+        }
+        return false;
+      };
+
       if (wantsRecommendation) {
         const treatmentPool = treatmentKnowledge
           ? buildTreatmentRecommendationPool(stock, {
@@ -12224,8 +12344,13 @@ Si después necesita algo, estoy acá ✨`;
               mode: 'recommendation',
               lastOptions: (picked.length ? picked : shortlist.slice(0, 4)).map((x) => x.nombre),
             });
-            rememberAssistantProductOffer(waId, picked.length ? picked : shortlist.slice(0, 4), { mode: 'recommendation', domain: resolvedDomain || detectProductDomain(text, resolvedFamily) || '', family: resolvedFamily || '', focusTerm: resolvedFocusTerm || '', questionKind: 'RECOMMENDATION', lastAssistantText: replyReco });
-            if (picked.length === 1) lastProductByUser.set(waId, picked[0]);
+            const pickedRows = picked.length ? picked : shortlist.slice(0, 4);
+            rememberAssistantProductOffer(waId, pickedRows, { mode: 'recommendation', domain: resolvedDomain || detectProductDomain(text, resolvedFamily) || '', family: resolvedFamily || '', focusTerm: resolvedFocusTerm || '', questionKind: 'RECOMMENDATION', lastAssistantText: replyReco });
+            if (pickedRows.length === 1) lastProductByUser.set(waId, pickedRows[0]);
+            const exceptionalRecoHandled = await tryExceptionalPhotoReply(pickedRows, { mode: 'recommendation', selectedName: pickedRows.length === 1 ? (pickedRows[0]?.nombre || '') : '', questionKind: 'RECOMMENDATION' });
+            if (exceptionalRecoHandled) {
+              return;
+            }
             pushHistory(waId, 'assistant', replyReco);
             await sendWhatsAppText(phone, replyReco);
             scheduleInactivityFollowUp(waId, phone);
@@ -12251,6 +12376,11 @@ Si después necesita algo, estoy acá ✨`;
             mode: 'list',
             lastOptions: relatedSlice.map((x) => x.nombre),
           });
+
+          const exceptionalListHandled = await tryExceptionalPhotoReply(relatedSlice, { mode: 'LIST', questionKind: 'LIST' });
+          if (exceptionalListHandled) {
+            return;
+          }
 
           if (userAsksForAllPhotos(text)) {
             const sentAll = await maybeSendMultipleProductPhotos(phone, relatedSlice, text);
@@ -12309,6 +12439,15 @@ Si después necesita algo, estoy acá ✨`;
           });
         }
 
+        const exceptionalMatchHandled = await tryExceptionalPhotoReply(matches.length === 1 ? [matches[0]] : matches.slice(0, 8), {
+          mode: matches.length === 1 ? 'DETAIL' : 'LIST',
+          selectedName: matches.length === 1 ? (matches[0]?.nombre || '') : '',
+          questionKind: matches.length === 1 ? 'DETAIL' : 'LIST',
+        });
+        if (exceptionalMatchHandled) {
+          return;
+        }
+
         if (userAsksForAllPhotos(text) && matches.length > 1) {
           const sentAll = await maybeSendMultipleProductPhotos(phone, matches, text);
           if (sentAll) {
@@ -12347,6 +12486,11 @@ Si después necesita algo, estoy acá ✨`;
           mode: 'list',
           lastOptions: broaderSlice.map((x) => x.nombre),
         });
+
+        const exceptionalBroaderHandled = await tryExceptionalPhotoReply(broaderSlice, { mode: 'LIST', questionKind: 'LIST' });
+        if (exceptionalBroaderHandled) {
+          return;
+        }
 
         if (userAsksForAllPhotos(text)) {
           const sentAll = await maybeSendMultipleProductPhotos(phone, broaderSlice, text);
