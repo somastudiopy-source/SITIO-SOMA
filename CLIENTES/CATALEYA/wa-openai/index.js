@@ -2657,6 +2657,193 @@ function buildSyntheticTextFromActiveOfferResolution(resolution, activeOffer = n
   return '';
 }
 
+async function reviewInboundMessageFirstWithAI(text, context = {}) {
+  const raw = String(text || '').trim();
+  if (!raw) {
+    return {
+      type: 'OTHER',
+      mode: 'DETAIL',
+      query: '',
+      product_domain: '',
+      product_family: '',
+      follows_active_offer: false,
+      topic_changed: false,
+      keep_appointment_flow: false,
+      should_clear_active_offer: false,
+    };
+  }
+
+  const fallback = (() => {
+    const fastIntent = detectFastCatalogIntent(raw, {
+      hasCourseContext: !!context.hasCourseContext,
+      hasDraft: !!context.hasDraft,
+      flowStep: context.flowStep || '',
+    });
+
+    const explicitCourse = detectCourseIntentFromContext(raw, {
+      lastCourseContext: context.lastCourseContext || null,
+    });
+
+    const activeType = String(context.activeAssistantOfferType || '').trim().toUpperCase();
+    const activeDomain = String(context.activeAssistantOfferDomain || '').trim();
+    const activeFamily = String(context.activeAssistantOfferFamily || '').trim();
+    const productDomain = detectProductDomain(raw, detectFurnitureFamily(raw) || detectProductFamily(raw));
+    const productFamily = productDomain === 'furniture' ? detectFurnitureFamily(raw) : detectProductFamily(raw);
+
+    const inferredType = explicitCourse.isCourse
+      ? 'COURSE'
+      : (fastIntent?.type || (isExplicitProductIntent(raw) ? 'PRODUCT' : (isExplicitServiceIntent(raw) ? 'SERVICE' : 'OTHER')));
+
+    const followsActiveOffer = !!activeType
+      && looksLikeActiveOfferFollowup(raw)
+      && (
+        inferredType === 'OTHER'
+        || inferredType === activeType
+        || (activeType === 'PRODUCT' && inferredType === 'PRODUCT' && !productFamily)
+      );
+
+    const topicChanged = !!(
+      activeType
+      && !followsActiveOffer
+      && inferredType !== 'OTHER'
+      && (
+        inferredType !== activeType
+        || (inferredType === 'PRODUCT' && (
+          (!!activeDomain && !!productDomain && activeDomain !== productDomain)
+          || (!!activeFamily && !!productFamily && normalizeCatalogSearchText(activeFamily) !== normalizeCatalogSearchText(productFamily))
+        ))
+      )
+    );
+
+    return {
+      type: inferredType,
+      mode: explicitCourse.isCourse ? (explicitCourse.mode || 'DETAIL') : (fastIntent?.mode || 'DETAIL'),
+      query: explicitCourse.isCourse
+        ? (explicitCourse.query || raw)
+        : (fastIntent?.query || raw),
+      product_domain: productDomain || '',
+      product_family: productFamily || '',
+      follows_active_offer: followsActiveOffer,
+      topic_changed: topicChanged,
+      keep_appointment_flow: !!(context.hasDraft && looksLikeAppointmentIntent(raw, {
+        pendingDraft: context.pendingDraft || null,
+        lastService: context.lastService || null,
+      })),
+      should_clear_active_offer: topicChanged,
+    };
+  })();
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Analizá el mensaje del cliente ANTES de activar cualquier flujo del bot.
+
+Devolvé SOLO JSON válido con estas claves:
+- type: PRODUCT | SERVICE | COURSE | OTHER
+- mode: LIST | DETAIL
+- query: string
+- product_domain: hair | furniture | ""
+- product_family: string
+- follows_active_offer: boolean
+- topic_changed: boolean
+- keep_appointment_flow: boolean
+
+Reglas:
+- PRODUCT incluye stock, productos, insumos, muebles, sillones, camillas, espejos, planchas, secadores y equipamiento.
+- SERVICE incluye servicios del salón y continuidad real de turnos.
+- COURSE incluye cursos, talleres, capacitaciones e inscripción.
+- Si el mensaje introduce un tema nuevo y concreto, marcá topic_changed=true.
+- Si viene una oferta activa pero el cliente cambia a otro producto/servicio/curso distinto, follows_active_offer=false y topic_changed=true.
+- “necesito una plancha”, “necesito un secador”, “tienen sillones de barbería” son PRODUCT y normalmente topic_changed=true si antes venían con otra cosa.
+- “sí, quiero esa”, “pasame foto”, “precio del primero”, “más info” suelen follows_active_offer=true solo si realmente responden a la última oferta.
+- “barbería” dentro de “sillones de barbería” sigue siendo PRODUCT/furniture, no SERVICE.
+- keep_appointment_flow=true solo si realmente sigue un turno activo con fecha, hora, nombre, teléfono, comprobante o confirmación clara del turno.
+- No inventes productos, servicios ni cursos.`,
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje: raw,
+            oferta_activa_tipo: context.activeAssistantOfferType || '',
+            oferta_activa_dominio: context.activeAssistantOfferDomain || '',
+            oferta_activa_familia: context.activeAssistantOfferFamily || '',
+            oferta_activa_items: Array.isArray(context.activeAssistantOfferItems) ? context.activeAssistantOfferItems.slice(0, 12) : [],
+            oferta_activa_seleccionado: context.activeAssistantOfferSelectedName || '',
+            tiene_borrador_turno: !!context.hasDraft,
+            flujo_actual: context.flowStep || '',
+            ultimo_servicio: context.lastServiceName || '',
+            ultimo_producto: context.lastProductName || '',
+            ultimo_curso: context.lastCourseName || '',
+            historial_reciente: context.historySnippet || '',
+          }),
+        },
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const type = String(obj.type || fallback.type || 'OTHER').trim().toUpperCase();
+    const mode = String(obj.mode || fallback.mode || 'DETAIL').trim().toUpperCase() === 'LIST' ? 'LIST' : 'DETAIL';
+    const productDomainRaw = String(obj.product_domain || fallback.product_domain || '').trim().toLowerCase();
+    const productDomain = ['hair', 'furniture'].includes(productDomainRaw)
+      ? productDomainRaw
+      : (fallback.product_domain || '');
+    const productFamily = String(
+      obj.product_family
+      || fallback.product_family
+      || (type === 'PRODUCT' ? (productDomain === 'furniture' ? detectFurnitureFamily(raw) : detectProductFamily(raw)) : '')
+    ).trim();
+
+    const activeType = String(context.activeAssistantOfferType || '').trim().toUpperCase();
+    const activeDomain = String(context.activeAssistantOfferDomain || '').trim();
+    const activeFamily = String(context.activeAssistantOfferFamily || '').trim();
+
+    const followsActiveOffer = !!obj.follows_active_offer
+      && !(
+        type === 'PRODUCT'
+        && (
+          (!!activeDomain && !!productDomain && activeDomain !== productDomain)
+          || (!!activeFamily && !!productFamily && normalizeCatalogSearchText(activeFamily) !== normalizeCatalogSearchText(productFamily))
+        )
+      );
+
+    const topicChanged = !!(
+      obj.topic_changed
+      || (
+        activeType
+        && !followsActiveOffer
+        && type !== 'OTHER'
+        && (
+          type !== activeType
+          || (type === 'PRODUCT' && (
+            (!!activeDomain && !!productDomain && activeDomain !== productDomain)
+            || (!!activeFamily && !!productFamily && normalizeCatalogSearchText(activeFamily) !== normalizeCatalogSearchText(productFamily))
+          ))
+        )
+      )
+    );
+
+    return {
+      type,
+      mode,
+      query: String(obj.query || fallback.query || raw).trim(),
+      product_domain: productDomain || '',
+      product_family: productFamily || '',
+      follows_active_offer: followsActiveOffer,
+      topic_changed: topicChanged,
+      keep_appointment_flow: !!obj.keep_appointment_flow,
+      should_clear_active_offer: topicChanged,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 
 function toCourseContextRow(course = {}) {
   const nombre = String(course?.nombre || '').trim();
@@ -6297,6 +6484,48 @@ async function getStockCatalog() {
   return all;
 }
 
+function isCatalogAdministrativeRow(row) {
+  const bag = normalizeCatalogSearchText(`${row?.tab || ''} ${row?.nombre || ''} ${row?.categoria || ''} ${row?.descripcion || ''}`);
+  if (!bag) return false;
+  if (/(\bseña\b|\bsena\b|\bseñas\b|\bsenas\b|\bturno\b|\bturnos\b|\bcorte masculino\b|\borden de llegada\b|\bhorario\b|\bhorarios\b|\binscrip|\binscripción|\bcurso\b|\bcursos\b|\bclase\b|\bclases\b|\bcapacit)/i.test(bag)) {
+    return true;
+  }
+  if (/\bservicio\b|\bservicios\b/i.test(bag) && !/(shampoo|champu|champú|acondicionador|mascara|mascarilla|serum|sérum|aceite|oleo|óleo|tintura|oxidante|decolorante|matizador|ampolla|keratina|alisado|botox|protector|spray|gel|cera|plancha|secador|camilla|sillon|sillón|espejo|mueble|mesa|puff)/i.test(bag)) {
+    return true;
+  }
+  return false;
+}
+
+function isCatalogRowAvailable(row) {
+  const stockTxt = normalizeCatalogSearchText(String(row?.stock || '').trim());
+  if (!stockTxt) return true;
+  if (/(sin stock|agotad|no disponible|no hay|sin unidades)/i.test(stockTxt)) return false;
+  if (/^0+(?:[.,]0+)?$/.test(stockTxt)) return false;
+  const m = stockTxt.match(/\d+(?:[.,]\d+)?/);
+  if (m) {
+    const qty = Number(String(m[0]).replace(',', '.'));
+    if (!Number.isNaN(qty)) return qty > 0;
+  }
+  return true;
+}
+
+function filterSellableCatalogRows(rows, { includeOutOfStock = true } = {}) {
+  const base = Array.isArray(rows) ? rows.filter((row) => row?.nombre && !isCatalogAdministrativeRow(row)) : [];
+  return includeOutOfStock ? base : base.filter((row) => isCatalogRowAvailable(row));
+}
+
+function buildOutOfStockCatalogMessage({ domain = '', family = '', query = '' } = {}) {
+  const normalizedQuery = normalizeCatalogSearchText(query || '');
+  if (family === 'plancha') return 'Por el momento no tenemos una plancha para el pelo disponible en stock.';
+  if (family === 'secador') return 'Por el momento no tenemos un secador para el pelo disponible en stock.';
+  if (family === 'sillon') return 'Por el momento no tenemos sillones de barbería disponibles en stock.';
+  if (family === 'camilla') return 'Por el momento no tenemos camillas disponibles en stock.';
+  if (/\bampolla\b/.test(normalizedQuery)) return 'Por el momento no tenemos ampollas disponibles en stock.';
+  return domain === 'furniture'
+    ? 'Por el momento ese mueble o equipamiento no está disponible en stock.'
+    : 'Por el momento ese producto no está disponible en stock.';
+}
+
 // ===================== SERVICES / COURSES (values normal) =====================
 async function getServicesCatalog() {
   const now = Date.now();
@@ -7337,11 +7566,33 @@ function scoreProductCandidate(row, { query = '', family = '', domain = '', hair
   return score;
 }
 
+function isHairCareRecommendationCandidate(row, { family = '' } = {}) {
+  const fam = normalizeCatalogSearchText(family || '');
+  if (fam === 'plancha' || fam === 'secador') return true;
+  const hay = buildStockHaystack(row);
+  if (!hay) return false;
+  if (/(pinza|pinzas|peine|peines|cepillo|cepillos|gorra|brocha|brochas|bowl|espatula|espátula|papel aluminio|papel|guante|guantes|difusor|boquilla|pico|repuesto|accesorio|accesorios)/i.test(hay)) {
+    return false;
+  }
+  return true;
+}
+
 function shortlistProductsForRecommendation(rows, criteria = {}) {
   const items = Array.isArray(rows) ? rows.filter((r) => r?.nombre) : [];
   if (!items.length) return [];
 
-  const scopedItems = criteria?.focusTerm ? filterRowsByProductFocus(items, criteria.focusTerm) : items;
+  const needsHairCareFilter = (
+    criteria?.domain === 'hair'
+    && (!!criteria?.need || !!criteria?.hairType)
+    && !['plancha', 'secador'].includes(normalizeCatalogSearchText(criteria?.family || ''))
+  );
+
+  const filteredItems = needsHairCareFilter
+    ? items.filter((row) => isHairCareRecommendationCandidate(row, { family: criteria?.family || '' }))
+    : items;
+
+  const scopedBase = filteredItems.length ? filteredItems : items;
+  const scopedItems = criteria?.focusTerm ? filterRowsByProductFocus(scopedBase, criteria.focusTerm) : scopedBase;
 
   const scored = scopedItems
     .map((row) => ({ row, score: scoreProductCandidate(row, criteria) }))
@@ -10206,6 +10457,32 @@ lastCloseContext.set(waId, {
 
     pushHistory(waId, "user", text);
 
+    const activeOfferForReview = getActiveAssistantOffer(waId);
+    const firstAiReview = await reviewInboundMessageFirstWithAI(text, {
+      activeAssistantOfferType: activeOfferForReview?.type || '',
+      activeAssistantOfferDomain: activeOfferForReview?.domain || '',
+      activeAssistantOfferFamily: activeOfferForReview?.family || '',
+      activeAssistantOfferItems: Array.isArray(activeOfferForReview?.items) ? activeOfferForReview.items.slice(0, 12) : [],
+      activeAssistantOfferSelectedName: activeOfferForReview?.selectedName || '',
+      hasDraft: !!(await getAppointmentDraft(waId)),
+      pendingDraft: await getAppointmentDraft(waId),
+      flowStep: (await getAppointmentDraft(waId))?.flow_step || '',
+      lastService: getLastKnownService(waId, await getAppointmentDraft(waId)),
+      lastServiceName: getLastKnownService(waId, await getAppointmentDraft(waId))?.nombre || '',
+      lastProductName: lastProductByUser.get(waId)?.nombre || '',
+      lastCourseContext: getLastCourseContext(waId),
+      lastCourseName: getLastCourseContext(waId)?.selectedName || getLastCourseContext(waId)?.query || '',
+      hasCourseContext: !!getLastCourseContext(waId),
+      historySnippet: ensureConv(waId).messages.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1600),
+    });
+
+    if (firstAiReview?.topic_changed) {
+      if (firstAiReview?.should_clear_active_offer) clearActiveAssistantOffer(waId);
+      if (firstAiReview?.type !== 'PRODUCT') clearProductMemory(waId);
+      if (firstAiReview?.type !== 'COURSE') clearLastCourseContext(waId);
+      if (firstAiReview?.type !== 'SERVICE') lastServiceByUser.delete(waId);
+    }
+
     if (!pendingNameReq?.awaiting && shouldRunConversationWrapUpAI(text, waId)) {
       const wrapUpControl = await classifyConversationWrapUpWithAI(text, {
         lastAssistantMessage: getLastAssistantMessage(waId)?.content || '',
@@ -10346,18 +10623,26 @@ updateLastCloseContext(waId, {
     await upsertCommercialFollowupCandidate(waId);
 
     const activeAssistantOffer = getActiveAssistantOffer(waId);
-    const activeOfferResolution = activeAssistantOffer
+    const shouldReviewActiveOffer = !!(
+      activeAssistantOffer
+      && (
+        firstAiReview?.follows_active_offer
+        || (!firstAiReview?.topic_changed && (firstAiReview?.type === 'OTHER' || !firstAiReview?.type))
+      )
+    );
+
+    const activeOfferResolution = shouldReviewActiveOffer
       ? await resolveReplyToActiveAssistantOfferWithAI(text, {
           activeOffer: activeAssistantOffer,
           lastServiceName: getLastKnownService(waId, await getAppointmentDraft(waId))?.nombre || '',
           lastCourseName: getLastCourseContext(waId)?.selectedName || getLastCourseContext(waId)?.query || '',
           historySnippet: ensureConv(waId).messages.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1400),
         })
-      : null;
+      : (firstAiReview?.topic_changed ? { action: 'SWITCH_TOPIC' } : null);
 
     if (activeOfferResolution?.action === 'CONTINUE_ACTIVE_OFFER') {
       if (activeOfferResolution.target_type === 'PRODUCT') {
-        const stockForActiveOffer = await getStockCatalog();
+        const stockForActiveOffer = filterSellableCatalogRows(await getStockCatalog(), { includeOutOfStock: false });
         const activeProductNames = normalizeActiveOfferItems(
           activeOfferResolution.wants_all_items
             ? (activeAssistantOffer?.items || [])
@@ -10402,7 +10687,7 @@ updateLastCloseContext(waId, {
 
     // Si piden foto sin decir cuál: priorizar la última oferta activa, luego el contexto de producto y por último el último producto puntual.
     if (userAsksForPhoto(userIntentText)) {
-      const stockForPhotos = await getStockCatalog();
+      const stockForPhotos = filterSellableCatalogRows(await getStockCatalog(), { includeOutOfStock: false });
       const activeOfferForPhotos = getActiveAssistantOffer(waId);
       const lastCtxForPhotos = getLastProductContext(waId);
 
@@ -10448,7 +10733,11 @@ updateLastCloseContext(waId, {
     let normTxt = normalize(text);
     const activeCourseContextEarly = getLastCourseContext(waId);
     const explicitCourseIntentEarly = detectCourseIntentFromContext(text, { lastCourseContext: activeCourseContextEarly });
-    const shouldSkipBarberWalkInRule = !!explicitCourseIntentEarly?.isCourse || (!!activeCourseContextEarly && looksLikeCourseFollowUp(text));
+    const shouldSkipBarberWalkInRule = (
+      !!explicitCourseIntentEarly?.isCourse
+      || (!!activeCourseContextEarly && looksLikeCourseFollowUp(text))
+      || firstAiReview?.type === 'PRODUCT'
+    );
 
     // Corte masculino: solo por orden de llegada (no se toma turno)
     if (/(\bcorte\b.*\b(mascul|varon|hombre)\b|\bcorte\s+masculino\b|\bbarber\b|\bbarberia\b)/i.test(normTxt) && !detectFemaleContext(text) && !shouldSkipBarberWalkInRule) {
@@ -11455,7 +11744,7 @@ Si después necesita algo, estoy acá ✨`;
     }
 
     if (!pendingDraft && !beautyIntentOverride && lastKnownService?.nombre && /^producto$/i.test(normalize(text))) {
-      const stock = await getStockCatalog();
+      const stock = filterSellableCatalogRows(await getStockCatalog(), { includeOutOfStock: false });
       const matches = findStock(stock, lastKnownService.nombre, 'LIST');
       if (matches.length) {
         const replyCatalog = formatStockReply(matches, 'LIST', { domain: detectProductDomain(text), familyLabel: detectFurnitureFamily(text) || detectProductFamily(text) });
@@ -11609,8 +11898,17 @@ Si después necesita algo, estoy acá ✨`;
       };
     }
 
+    if (firstAiReview?.type && firstAiReview.type !== 'OTHER') {
+      intent = {
+        ...intent,
+        type: firstAiReview.type,
+        query: firstAiReview.query || intent.query || '',
+        mode: firstAiReview.mode || intent.mode || 'DETAIL',
+      };
+    }
+
     const explicitCourseIntent = detectCourseIntentFromContext(text, { lastCourseContext });
-    if (explicitCourseIntent.isCourse) {
+    if (explicitCourseIntent.isCourse && (!firstAiReview?.type || firstAiReview.type === 'COURSE' || firstAiReview.type === 'OTHER')) {
       intent = {
         ...intent,
         type: 'COURSE',
@@ -11627,7 +11925,7 @@ Si después necesita algo, estoy acá ✨`;
       flowStep: pendingDraft?.flow_step || '',
     });
 
-    if (fastIntent) {
+    if (fastIntent && (!firstAiReview?.type || firstAiReview.type === 'OTHER')) {
       const shouldOverride = (
         intent.type === 'OTHER'
         || (fastIntent.type === 'COURSE' && intent.type !== 'COURSE')
@@ -11678,7 +11976,7 @@ Si después necesita algo, estoy acá ✨`;
     // Si el clasificador falla, igual intentamos buscar en stock con el texto del cliente
     // ✅ Evitar confusión: "SI/NO/OK/DALE" como respuesta a la última pregunta del bot NO debe disparar catálogo.
     if (!shouldTreatAsProduct && intent.type === 'OTHER' && !(isYesNoShortReply(text) && lastAssistantWasQuestion(waId))) {
-      const stock = await getStockCatalog();
+      const stock = filterSellableCatalogRows(await getStockCatalog(), { includeOutOfStock: false });
       const q = guessQueryFromText(text);
       const matches = findStock(stock, q, 'DETAIL');
 
@@ -11705,13 +12003,17 @@ Si después necesita algo, estoy acá ✨`;
 
     // PRODUCT
     if (shouldTreatAsProduct) {
-      const stock = await getStockCatalog();
+      const rawStock = await getStockCatalog();
+      const stockAll = filterSellableCatalogRows(rawStock, { includeOutOfStock: true });
+      const stock = filterSellableCatalogRows(rawStock, { includeOutOfStock: false });
       const aiFamilyRaw = productAI?.family || '';
       const aiFamily = normalizeCatalogSearchText(aiFamilyRaw) === 'otro' ? '' : aiFamilyRaw;
       const aiSearchText = productAI?.specific_name || productAI?.search_text || '';
-      const resolvedQuery = aiSearchText || intent.query || guessQueryFromText(text) || text;
-      const resolvedDomain = productAI?.domain || detectProductDomain(aiSearchText || resolvedQuery || text, aiFamily || lastProductCtx?.family || '') || lastProductCtx?.domain || '';
-      const resolvedFamily = aiFamily || (resolvedDomain === 'furniture' ? detectFurnitureFamily(resolvedQuery) || detectFurnitureFamily(text) : detectProductFamily(resolvedQuery) || detectProductFamily(text)) || lastProductCtx?.family || '';
+      const forcedDomainFromFirstAI = firstAiReview?.type === 'PRODUCT' ? (firstAiReview.product_domain || '') : '';
+      const forcedFamilyFromFirstAI = firstAiReview?.type === 'PRODUCT' ? (firstAiReview.product_family || '') : '';
+      const resolvedQuery = aiSearchText || firstAiReview?.query || intent.query || guessQueryFromText(text) || text;
+      const resolvedDomain = forcedDomainFromFirstAI || productAI?.domain || detectProductDomain(aiSearchText || resolvedQuery || text, aiFamily || forcedFamilyFromFirstAI || lastProductCtx?.family || '') || lastProductCtx?.domain || '';
+      const resolvedFamily = forcedFamilyFromFirstAI || aiFamily || (resolvedDomain === 'furniture' ? detectFurnitureFamily(resolvedQuery) || detectFurnitureFamily(text) : detectProductFamily(resolvedQuery) || detectProductFamily(text)) || lastProductCtx?.family || '';
       const resolvedFocusTerm = detectProductFocusTerm(aiSearchText || intent.query || text) || lastProductCtx?.focusTerm || '';
       const resolvedHairType = productAI?.hair_type || lastProductCtx?.hairType || '';
       const resolvedNeed = productAI?.need || productAI?.treatment_context || lastProductCtx?.need || '';
@@ -11785,8 +12087,27 @@ Si después necesita algo, estoy acá ✨`;
       related = filterRowsForRequestedFamily(related, { family: resolvedFamily, domain: resolvedDomain, query: `${resolvedQuery || ''} ${text || ''}` });
       broader = filterRowsForRequestedFamily(broader, { family: resolvedFamily, domain: resolvedDomain, query: `${resolvedQuery || ''} ${text || ''}` });
 
+      const unavailableMatchesBase = detailQuery ? findStock(stockAll, detailQuery, 'DETAIL') : [];
+      const unavailableMatches = filterRowsForRequestedFamily(unavailableMatchesBase, {
+        family: resolvedFamily,
+        domain: resolvedDomain,
+        query: `${detailQuery || ''} ${text || ''}`,
+      }).filter((row) => !isCatalogRowAvailable(row));
+
       const strictNoApprox = wantsStrictNoApproximation(`${resolvedQuery || ''} ${text || ''}`, resolvedFamily, resolvedDomain);
       const wantsPhotoOnly = !!productAI?.wants_photo || userAsksForPhoto(text);
+      if (!matches.length && unavailableMatches.length && strictNoApprox) {
+        const msgNoStock = buildOutOfStockCatalogMessage({
+          domain: resolvedDomain,
+          family: resolvedFamily,
+          query: `${resolvedQuery || ''} ${text || ''}`,
+        });
+        pushHistory(waId, 'assistant', msgNoStock);
+        await sendWhatsAppText(phone, msgNoStock);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+
       if (!matches.length && !related.length && !broader.length && strictNoApprox) {
         const msgNoExact = buildNoExactCatalogMessage({
           domain: resolvedDomain,
@@ -11823,6 +12144,12 @@ Si después necesita algo, estoy acá ✨`;
             })
           : [];
 
+        const treatingNeed = !!(
+          resolvedDomain === 'hair'
+          && (treatmentKnowledge || resolvedNeed || resolvedHairType)
+          && !['plancha', 'secador'].includes(normalizeCatalogSearchText(resolvedFamily || ''))
+        );
+
         const pool = (matches.length > 1 ? matches : [])
           .concat(treatmentPool)
           .concat(related)
@@ -11832,7 +12159,8 @@ Si después necesita algo, estoy acá ✨`;
               normalizeCatalogSearchText(`${x?.nombre || ''} ${x?.marca || ''}`) ===
               normalizeCatalogSearchText(`${row?.nombre || ''} ${row?.marca || ''}`)
             ) === idx
-          );
+          )
+          .filter((row) => !treatingNeed || isHairCareRecommendationCandidate(row, { family: resolvedFamily }));
 
         const shortlist = shortlistProductsForRecommendation(pool.length ? pool : stock, {
           domain: resolvedDomain,
