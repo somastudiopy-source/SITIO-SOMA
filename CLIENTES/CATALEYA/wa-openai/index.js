@@ -6806,6 +6806,57 @@ function detectProductDomain(query, family = '') {
   return '';
 }
 
+const STRICT_EMPTY_RESULT_FAMILIES = new Set(['secador', 'plancha', 'camilla', 'sillon', 'espejo', 'mesa', 'puff', 'respaldo', 'tocador', 'recepcion']);
+
+function queryNeedsStrictFamilyResult({ query = '', family = '', domain = '' } = {}) {
+  const bag = normalizeCatalogSearchText(`${query || ''} ${family || ''}`);
+  const fam = normalizeCatalogSearchText(family || '');
+  if (!bag) return false;
+  if (domain === 'furniture' && !!fam) return true;
+  if (STRICT_EMPTY_RESULT_FAMILIES.has(fam)) return true;
+  if (/(ampolla|ampollas|secador|secadores|plancha|planchita|planchas|shock de keratina|sillon|sillones|camilla|camillas|espejo|espejos)/i.test(bag)) return true;
+  return false;
+}
+
+function buildNoCatalogMatchMessage({ query = '', family = '', domain = '' } = {}) {
+  const readable = String(query || family || '').trim();
+  if (readable) {
+    return domain === 'furniture'
+      ? `No encuentro *${readable}* cargado en el catálogo de muebles/equipamiento en este momento.`
+      : `No encuentro *${readable}* cargado en el catálogo en este momento.`;
+  }
+  return domain === 'furniture'
+    ? 'No encuentro esa opción cargada en el catálogo de muebles/equipamiento en este momento.'
+    : 'No encuentro esa opción cargada en el catálogo en este momento.';
+}
+
+function buildNoLinkedPhotoMessage(productName = '') {
+  const readable = String(productName || '').trim();
+  return readable
+    ? `No tengo vinculada la foto de *${readable}* en este momento.`
+    : 'No tengo vinculada esa foto en este momento.';
+}
+
+function findExactNamedStockMatches(rows, query, { domain = '' } = {}) {
+  const list = Array.isArray(rows) ? rows.filter(Boolean) : [];
+  const clean = normalizeCatalogSearchText(query || '');
+  if (!clean || !list.length) return [];
+
+  const scoped = domain ? list.filter((row) => detectRowProductDomain(row) === domain) : list;
+  const exact = scoped.filter((row) => normalizeCatalogSearchText(row?.nombre || '') == clean);
+  if (exact.length) return exact;
+
+  const byPhrase = scoped.filter((row) => containsCatalogPhrase(row?.nombre || '', clean));
+  if (byPhrase.length) return byPhrase;
+
+  const tokens = tokenize(clean, { expandSynonyms: false }).filter((tok) => tok.length >= 3);
+  if (!tokens.length) return [];
+  return scoped.filter((row) => {
+    const hay = normalizeCatalogSearchText(`${row?.nombre || ''} ${row?.categoria || ''} ${row?.marca || ''}`);
+    return tokens.every((tok) => hay.includes(tok));
+  });
+}
+
 function detectRowProductDomain(row) {
   const bag = normalizeCatalogSearchText(`${row?.tab || ''} ${row?.nombre || ''} ${row?.categoria || ''} ${row?.descripcion || ''}`);
   if (/(muebles|equipamiento|camilla|sillon|sillón|espejo|mesa|puff|respaldo|tocador|mostrador|recepcion|recepción)/i.test(bag)) return 'furniture';
@@ -6898,7 +6949,9 @@ function applyProductTypeGuard(rows, query) {
     return aliases.some((alias) => containsCatalogPhrase(haystack, alias));
   });
 
-  return guarded.length ? guarded : rows.filter((r) => !activeDomain || detectRowProductDomain(r) === activeDomain);
+  if (guarded.length) return guarded;
+  if (queryNeedsStrictFamilyResult({ query, family, domain: activeDomain })) return [];
+  return rows.filter((r) => !activeDomain || detectRowProductDomain(r) === activeDomain);
 }
 
 function buildStockHaystack(row) {
@@ -7071,12 +7124,16 @@ Reglas:
 - Si pregunta por productos para el cabello, domain=hair.
 - Si pregunta genéricamente por una familia, wants_all_related=true.
 - Si pide stock, precios, lista, catálogo, opciones o qué hay de una familia, is_product_query=true.
-- Si pide foto o precio de un producto puntual, specific_name debe contener ese producto.
+- Si pide foto o precio de un producto puntual, specific_name debe contener EXACTAMENTE ese producto o mueble.
 - Si trae detalles para elegir, wants_recommendation=true.
 - En hair, los detalles suelen ser tipo de cabello o resultado buscado.
 - En hair, si consulta por una etapa técnica (por ejemplo baño de crema, nutrición, matizador, tintura, keratina, barbería, cera, gel), tratá de detectar el contexto del trabajo en treatment_context.
 - En furniture, los detalles suelen ser si es para uso personal o negocio, estilo, cantidad de puestos, espacio o prioridad de diseño/funcionalidad.
 - Si existe familia_actual y el cliente responde solo con datos de preferencia, seguí la continuidad y marcá is_product_query=true.
+- Si el cliente nombra una familia exacta como secador, plancha, ampolla, camilla, sillón, espejo o shock de keratina, NO lo redirijas a accesorios o familias parecidas.
+- Si el cliente pide una foto, mantené el foco en el nombre específico pedido. Si no encontrás foto vinculada, igual debe quedar asociado al producto correcto.
+- "sillones de barbería" es PRODUCT/furniture, no COURSE.
+- "shock de keratina" puede ser servicio o producto según el mensaje; no lo mezcles automáticamente con keratina común.
 - Si parece servicio/turno y no producto, is_product_query=false.
 - No inventes nombres de productos.`,
         },
@@ -8798,6 +8855,11 @@ Ejemplos:
 - "hay espejos?" => PRODUCT + LIST
 - "qué stock hay de camillas" => PRODUCT + LIST
 - "precio del espejo led" => PRODUCT + DETAIL
+- "sillones de barbería" => PRODUCT + DETAIL
+- "camillas para spa" => PRODUCT + DETAIL
+- "necesito un secador" => PRODUCT + DETAIL
+- "necesito una plancha" => PRODUCT + DETAIL
+- "cuánto dura el shock de keratina" => SERVICE + DETAIL
 - "qué servicios hacen" => SERVICE + LIST
 - "quiero turno para corte" => SERVICE + DETAIL
 - "precio del alisado" => OTHER
@@ -8836,6 +8898,128 @@ Respondé SOLO JSON.`
     };
   } catch {
     return { type: "OTHER", query: "", mode: "DETAIL" };
+  }
+}
+
+
+
+function normalizeIntentType(value = '') {
+  const t = String(value || '').trim().toUpperCase();
+  return ['PRODUCT', 'SERVICE', 'COURSE', 'OTHER'].includes(t) ? t : 'OTHER';
+}
+
+function normalizeIntentMode(value = '') {
+  const t = String(value || '').trim().toUpperCase();
+  return t === 'LIST' ? 'LIST' : 'DETAIL';
+}
+
+function normalizeProductDomainHint(value = '') {
+  const t = normalizeCatalogSearchText(value || '');
+  return ['hair', 'furniture'].includes(t) ? t : '';
+}
+
+function normalizeAiRouteFamily(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const furniture = detectFurnitureFamily(raw);
+  if (furniture) return furniture;
+  const product = detectProductFamily(raw);
+  if (product) return product;
+  return raw;
+}
+
+function mergeProductIntentSignals(base = null, route = null) {
+  const src = base && typeof base === 'object' ? base : {};
+  const hint = route && typeof route === 'object' ? route : {};
+  return {
+    ...src,
+    is_product_query: hint.type === 'PRODUCT' ? true : !!src.is_product_query,
+    domain: normalizeProductDomainHint(hint.domain || src.domain || ''),
+    family: normalizeAiRouteFamily(hint.family || src.family || ''),
+    search_text: String(hint.query || src.search_text || '').trim(),
+    specific_name: String(hint.specific_name || src.specific_name || '').trim(),
+    wants_all_related: !!(hint.mode === 'LIST' || src.wants_all_related),
+    wants_photo: !!(hint.wants_photo || src.wants_photo),
+    wants_price: !!src.wants_price,
+    wants_recommendation: !!src.wants_recommendation,
+    hair_type: String(src.hair_type || '').trim(),
+    need: String(src.need || '').trim(),
+    use_type: String(src.use_type || '').trim(),
+    business_type: String(src.business_type || '').trim(),
+    style: String(src.style || '').trim(),
+    seats_needed: String(src.seats_needed || '').trim(),
+    treatment_context: String(src.treatment_context || '').trim(),
+    work_type: String(src.work_type || '').trim(),
+  };
+}
+
+async function routeInboundMessageWithAI(text, context = {}) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Analizá el MENSAJE ENTRANTE y decidí qué flujo principal debería seguir el bot.
+
+Devolvé SOLO JSON con estas claves:
+- type: PRODUCT | SERVICE | COURSE | OTHER
+- query: string
+- mode: LIST | DETAIL
+- domain: hair | furniture | vacío
+- family: string
+- specific_name: string
+- wants_photo: boolean
+- confidence: number (0 a 1)
+
+Reglas críticas:
+- PRODUCT incluye stock, catálogo, muebles, equipamiento, insumos, accesorios y pedidos de fotos de productos.
+- SERVICE incluye servicios del salón, duración, precio y turnos.
+- COURSE incluye cursos, inscripción, precio, fechas, requisitos, modalidad y material.
+- "sillones de barbería" es PRODUCT/furniture, no COURSE.
+- "camillas para spa" es PRODUCT/furniture.
+- "secador" y "plancha" son PRODUCT exactos; no los conviertas en accesorios salvo que el cliente lo pida.
+- "ampolla" debe seguir como consulta de ampollas/tratamientos; no redirijas a shampoo salvo que el cliente lo acepte.
+- "shock de keratina" puede ser SERVICE o PRODUCT según el texto; no lo mezcles automáticamente con keratina común.
+- Si el cliente pide foto de un nombre puntual, specific_name debe ser exactamente ese nombre o la mejor forma normalizada de ese nombre.
+- Si hay cambio claro de tema respecto del contexto, priorizá el mensaje actual.
+- No inventes nombres.`,
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje: raw,
+            servicio_actual: context.lastServiceName || '',
+            producto_actual: context.lastProductName || '',
+            producto_contexto_activo: !!context.hasProductContext,
+            curso_actual: context.lastCourseName || '',
+            curso_contexto_activo: !!context.hasCourseContext,
+            flujo_actual: context.flowStep || '',
+            historial_reciente: context.historySnippet || '',
+          }),
+        },
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    return {
+      type: normalizeIntentType(obj.type || 'OTHER'),
+      query: String(obj.query || '').trim(),
+      mode: normalizeIntentMode(obj.mode || 'DETAIL'),
+      domain: normalizeProductDomainHint(obj.domain || ''),
+      family: normalizeAiRouteFamily(obj.family || ''),
+      specific_name: String(obj.specific_name || '').trim(),
+      wants_photo: !!obj.wants_photo,
+      confidence: Math.max(0, Math.min(1, Number(obj.confidence || 0) || 0)),
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -9666,7 +9850,7 @@ async function maybeSendMultipleProductPhotos(phone, products, userText) {
   }
 
   if (missing.length) {
-    await sendWhatsAppText(phone, `No tengo la foto vinculada correctamente de: ${missing.join(', ')}.`);
+    await sendWhatsAppText(phone, `No tengo vinculada la foto de: ${missing.join(', ')}.`);
   }
 
   if (failed.length && !sentCount) {
@@ -9688,7 +9872,7 @@ async function maybeSendProductPhoto(phone, product, userText) {
   if (result.reason === 'missing_link') {
     await sendWhatsAppText(
       phone,
-      'No tengo la foto vinculada correctamente en la columna “Foto del producto”. Si quiere, le paso alternativas o la descripción.'
+      buildNoLinkedPhotoMessage(product?.nombre || '')
     );
     return true;
   }
@@ -11477,6 +11661,17 @@ Si después necesita algo, estoy acá ✨`;
     }
 
     const lastCourseContext = getLastCourseContext(waId);
+    const lastProductCtx = getLastProductContext(waId);
+
+    const aiRoute = await routeInboundMessageWithAI(text, {
+      lastServiceName: lastKnownService?.nombre || '',
+      lastProductName: lastProductByUser.get(waId)?.nombre || '',
+      hasProductContext: !!lastProductCtx,
+      lastCourseName: lastCourseContext?.selectedName || lastCourseContext?.query || '',
+      hasCourseContext: !!lastCourseContext,
+      flowStep: pendingDraft?.flow_step || '',
+      historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1600),
+    });
 
     let intent = await classifyAndExtract(text, {
       lastServiceName: lastKnownService?.nombre || '',
@@ -11539,19 +11734,39 @@ Si después necesita algo, estoy acá ✨`;
       }
     }
 
-    const lastProductCtx = getLastProductContext(waId);
 
-    const productAI = (intent.type === 'PRODUCT' || intent.type === 'OTHER' || isExplicitProductIntent(text) || !!lastProductCtx)
-      ? await extractProductIntentWithAI(text, {
-          lastProductName: lastProductByUser.get(waId)?.nombre || '',
-          lastServiceName: lastKnownService?.nombre || '',
-          lastFamily: lastProductCtx?.family || '',
-          lastHairType: lastProductCtx?.hairType || '',
-          lastNeed: lastProductCtx?.need || '',
-          lastUseType: lastProductCtx?.useType || '',
-          lastDomain: lastProductCtx?.domain || '',
-        })
-      : null;
+    const productAI = mergeProductIntentSignals(
+      (intent.type === 'PRODUCT' || intent.type === 'OTHER' || isExplicitProductIntent(text) || !!lastProductCtx)
+        ? await extractProductIntentWithAI(text, {
+            lastProductName: lastProductByUser.get(waId)?.nombre || '',
+            lastServiceName: lastKnownService?.nombre || '',
+            lastFamily: lastProductCtx?.family || '',
+            lastHairType: lastProductCtx?.hairType || '',
+            lastNeed: lastProductCtx?.need || '',
+            lastUseType: lastProductCtx?.useType || '',
+            lastDomain: lastProductCtx?.domain || '',
+          })
+        : null,
+      aiRoute
+    );
+
+    if (aiRoute && aiRoute.type && aiRoute.type !== 'OTHER') {
+      const shouldUseAiRoute = (
+        aiRoute.confidence >= 0.62 ||
+        intent.type === 'OTHER' ||
+        (aiRoute.type === 'PRODUCT' && aiRoute.domain === 'furniture') ||
+        (aiRoute.type === 'SERVICE' && /(?:shock de keratina|keratina|botox|nutricion|nutrición|alisado|color|tintura)/i.test(normalize(text || '')))
+      );
+
+      if (shouldUseAiRoute) {
+        intent = {
+          ...intent,
+          type: aiRoute.type || intent.type,
+          query: aiRoute.query || intent.query || '',
+          mode: aiRoute.mode || intent.mode || 'DETAIL',
+        };
+      }
+    }
 
     const shouldTreatAsProduct = intent.type === 'PRODUCT' || (
       intent.type !== 'SERVICE' &&
@@ -11601,11 +11816,12 @@ Si después necesita algo, estoy acá ✨`;
     // PRODUCT
     if (shouldTreatAsProduct) {
       const stock = await getStockCatalog();
-      const aiFamilyRaw = productAI?.family || '';
+      const aiFamilyRaw = productAI?.family || aiRoute?.family || '';
       const aiFamily = normalizeCatalogSearchText(aiFamilyRaw) === 'otro' ? '' : aiFamilyRaw;
-      const aiSearchText = productAI?.specific_name || productAI?.search_text || '';
+      const requestedSpecificName = String(productAI?.specific_name || aiRoute?.specific_name || '').trim();
+      const aiSearchText = requestedSpecificName || productAI?.search_text || aiRoute?.query || '';
       const resolvedQuery = aiSearchText || intent.query || guessQueryFromText(text) || text;
-      const resolvedDomain = productAI?.domain || detectProductDomain(aiSearchText || resolvedQuery || text, aiFamily || lastProductCtx?.family || '') || lastProductCtx?.domain || '';
+      const resolvedDomain = productAI?.domain || aiRoute?.domain || detectProductDomain(aiSearchText || resolvedQuery || text, aiFamily || lastProductCtx?.family || '') || lastProductCtx?.domain || '';
       const resolvedFamily = aiFamily || (resolvedDomain === 'furniture' ? detectFurnitureFamily(resolvedQuery) || detectFurnitureFamily(text) : detectProductFamily(resolvedQuery) || detectProductFamily(text)) || lastProductCtx?.family || '';
       const resolvedFocusTerm = detectProductFocusTerm(aiSearchText || intent.query || text) || lastProductCtx?.focusTerm || '';
       const resolvedHairType = productAI?.hair_type || lastProductCtx?.hairType || '';
@@ -11634,6 +11850,7 @@ Si después necesita algo, estoy acá ✨`;
       ) ? 'LIST' : intent.mode;
 
       const qCleanTokens = tokenize(intent.query || resolvedQuery || '', { expandSynonyms: true });
+      const strictEmptyIfMissing = queryNeedsStrictFamilyResult({ query: resolvedQuery || text, family: resolvedFamily, domain: resolvedDomain });
       const wantsAll = productMode === 'LIST' && (
         !resolvedQuery || !String(resolvedQuery).trim() || qCleanTokens.length === 0 ||
         /\b(catalogo|catálogo|lista|todo|toda|todos|todas|productos|stock)\b/i.test(resolvedQuery)
@@ -11667,15 +11884,34 @@ Si después necesita algo, estoy acá ✨`;
 
       let related = findStockRelated(stock, resolvedQuery, { domain: resolvedDomain, family: resolvedFamily, focusTerm: resolvedFocusTerm, limit: 200 });
       let broader = related.length ? related : findStockRelated(stock, text, { domain: resolvedDomain, family: resolvedFamily, focusTerm: resolvedFocusTerm, limit: 200 });
-      const detailQuery = productAI?.specific_name || intent.query || guessQueryFromText(text);
+      const detailQuery = requestedSpecificName || productAI?.specific_name || intent.query || guessQueryFromText(text);
       let matches = detailQuery ? findStock(stock, detailQuery, 'DETAIL') : [];
+
+      if (requestedSpecificName) {
+        const exactNamedMatches = findExactNamedStockMatches(stock, requestedSpecificName, { domain: resolvedDomain });
+        if (exactNamedMatches.length) {
+          matches = exactNamedMatches;
+          related = exactNamedMatches;
+          broader = exactNamedMatches;
+        }
+      }
 
       if (resolvedFocusTerm && (isGenericProductOptionsFollowUp(text) || productMode === 'LIST' || !!productAI?.wants_all_related)) {
         related = filterRowsByProductFocus(related, resolvedFocusTerm);
         broader = filterRowsByProductFocus(broader, resolvedFocusTerm);
         matches = filterRowsByProductFocus(matches, resolvedFocusTerm);
       }
+      const mustStaySpecificForPhoto = !!((productAI?.wants_photo || aiRoute?.wants_photo || userAsksForPhoto(text)) && requestedSpecificName);
+      if (mustStaySpecificForPhoto && !matches.length) {
+        const noPhotoItemMsg = buildNoCatalogMatchMessage({ query: requestedSpecificName, family: resolvedFamily, domain: resolvedDomain });
+        pushHistory(waId, 'assistant', noPhotoItemMsg);
+        await sendWhatsAppText(phone, noPhotoItemMsg);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+
       const wantsRecommendation = !!(
+        !mustStaySpecificForPhoto && (
         productAI?.wants_recommendation ||
         resolvedHairType ||
         resolvedNeed ||
@@ -11685,6 +11921,7 @@ Si después necesita algo, estoy acá ✨`;
         resolvedSeatsNeeded ||
         shouldAutoRecommendTreatment ||
         (lastProductCtx && ((resolvedDomain === 'furniture' && looksLikeFurniturePreferenceReply(text)) || (resolvedDomain !== 'furniture' && looksLikeProductPreferenceReply(text))))
+        )
       );
 
       if (wantsRecommendation) {
@@ -11865,12 +12102,20 @@ Si después necesita algo, estoy acá ✨`;
           }
         }
 
-        if ((productAI?.wants_photo || userAsksForPhoto(text)) && matches.length === 1) {
+        if ((productAI?.wants_photo || aiRoute?.wants_photo || userAsksForPhoto(text)) && matches.length === 1) {
           const sent = await maybeSendProductPhoto(phone, matches[0], text);
           if (sent) {
             scheduleInactivityFollowUp(waId, phone);
             return;
           }
+        }
+
+        if ((productAI?.wants_photo || aiRoute?.wants_photo || userAsksForPhoto(text)) && matches.length > 1 && requestedSpecificName) {
+          const specificPhotoMsg = buildNoCatalogMatchMessage({ query: requestedSpecificName, family: resolvedFamily, domain: resolvedDomain });
+          pushHistory(waId, 'assistant', specificPhotoMsg);
+          await sendWhatsAppText(phone, specificPhotoMsg);
+          scheduleInactivityFollowUp(waId, phone);
+          return;
         }
 
         const replyCatalog = formatStockReply(matches, matches.length === 1 ? 'DETAIL' : 'LIST', { domain: resolvedDomain, familyLabel: resolvedFamily });
@@ -11881,6 +12126,28 @@ Si después necesita algo, estoy acá ✨`;
           scheduleInactivityFollowUp(waId, phone);
           return;
         }
+      }
+
+
+      if (strictEmptyIfMissing && !matches.length && !related.length && !broader.length) {
+        const strictMsg = buildNoCatalogMatchMessage({ query: requestedSpecificName || resolvedQuery || text, family: resolvedFamily, domain: resolvedDomain });
+        setLastProductContext(waId, {
+          domain: resolvedDomain || '',
+          family: resolvedFamily || '',
+          focusTerm: resolvedFocusTerm || '',
+          hairType: resolvedHairType || '',
+          need: resolvedNeed || '',
+          useType: resolvedUseType || '',
+          businessType: resolvedBusinessType || '',
+          style: resolvedStyle || '',
+          seatsNeeded: resolvedSeatsNeeded || '',
+          treatmentId: treatmentKnowledge?.id || '',
+          mode: 'followup',
+        });
+        pushHistory(waId, 'assistant', strictMsg);
+        await sendWhatsAppText(phone, strictMsg);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
       }
 
       if (broader.length) {
