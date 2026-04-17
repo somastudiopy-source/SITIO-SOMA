@@ -1884,6 +1884,7 @@ async function buildProductFollowupMessage({ ctx, contact }) {
     need: fullText,
     useType: normalizeUseType(fullText),
     treatmentKnowledge,
+    historySnippet: buildConversationHistorySnippet(ensureConv(ctx?.waId || '').messages || [], 18, 2200),
     products: shortlist.slice(0, 6),
   });
 
@@ -7642,6 +7643,9 @@ Devolvé SOLO JSON con estas claves:
 - work_type: string
 
 Reglas:
+- Priorizá interpretar el mensaje junto con historial_reciente si existe.
+- Si el cliente primero pidió opciones y después agrega variables como uso personal, cabello dañado, lo mejor, económico, para trabajar, rubio, reparación o nutrición, seguí ese mismo hilo y marcá wants_recommendation=true.
+- Si en el historial ya quedó claro que están hablando de productos, no lo saques de PRODUCT salvo que el cambio a servicio o turno sea clarísimo.
 - Si pregunta por muebles o equipamiento, domain=furniture.
 - Si pregunta por productos para el cabello, domain=hair.
 - Si pregunta genéricamente por una familia, wants_all_related=true.
@@ -7668,6 +7672,7 @@ Reglas:
             cabello_actual: context.lastHairType || '',
             necesidad_actual: context.lastNeed || '',
             uso_actual: context.lastUseType || '',
+            historial_reciente: context.historySnippet || '',
           }),
         },
       ],
@@ -7884,7 +7889,7 @@ function shortlistProductsForRecommendation(rows, criteria = {}) {
   return out.length ? out : scopedItems.slice(0, criteria.limit || 10);
 }
 
-async function recommendProductsWithAI({ text, domain = '', familyLabel = '', hairType = '', need = '', useType = '', businessType = '', style = '', seatsNeeded = '', treatmentKnowledge = null, products = [] } = {}) {
+async function recommendProductsWithAI({ text, domain = '', familyLabel = '', hairType = '', need = '', useType = '', businessType = '', style = '', seatsNeeded = '', treatmentKnowledge = null, historySnippet = '', products = [] } = {}) {
   const candidates = Array.isArray(products)
     ? products.filter((p) => p?.nombre).slice(0, 10).map((row) => buildProductAICandidate(row, { treatmentKnowledge, useType }))
     : [];
@@ -7914,6 +7919,9 @@ Tu trabajo:
 - Si uso=profesional, hablá en lógica de trabajo y terminación.
 - Si uso=personal, hablá en lógica de cuidado y mantenimiento.
 - Si hay "resumen_tratamiento", usalo solo para orientar la selección.
+- Priorizá el contexto completo de historial_reciente y no solo el último mensaje.
+- Si el historial ya marca una necesidad concreta, no la contradigas después.
+- Cuando el cliente pide "la mejor" opción, elegí primero la más alineada al problema, no la más genérica.
 - No agregues productos fuera de las opciones enviadas.
 - Usá un tono lindo y simple, con como mucho un emoji suave como ✨.
 
@@ -7937,6 +7945,7 @@ Respondé SOLO JSON con:
             tipo_negocio: businessType || '',
             estilo: style || '',
             puestos: seatsNeeded || '',
+            historial_reciente: historySnippet || '',
             tratamiento: treatmentKnowledge ? {
               id: treatmentKnowledge.id,
               label: treatmentKnowledge.label,
@@ -9048,7 +9057,16 @@ function mergeConversationForAI(dbMessages, localMessages) {
     seen.add(key);
     merged.push({ role: m.role, content: String(m.content || '').trim() });
   }
-  return merged.slice(-20);
+  return merged.slice(-32);
+}
+
+function buildConversationHistorySnippet(messages = [], maxTurns = 16, maxChars = 2400) {
+  const rows = Array.isArray(messages) ? messages.slice(-Math.max(1, maxTurns)) : [];
+  return rows
+    .map((m) => `${m.role === 'assistant' ? 'assistant' : 'user'}: ${String(m?.content || '').replace(/\s+/g, ' ').trim()}`)
+    .filter(Boolean)
+    .join(' | ')
+    .slice(0, Math.max(200, maxChars));
 }
 
 function getLastKnownService(waId, draft) {
@@ -10803,7 +10821,7 @@ lastCloseContext.set(waId, {
       lastCourseContext: getLastCourseContext(waId),
       lastCourseName: getLastCourseContext(waId)?.selectedName || getLastCourseContext(waId)?.query || '',
       hasCourseContext: !!getLastCourseContext(waId),
-      historySnippet: ensureConv(waId).messages.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1600),
+      historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 12, 1600),
     });
 
     if (firstAiReview?.topic_changed) {
@@ -10821,7 +10839,7 @@ lastCloseContext.set(waId, {
         hasProductContext: !!getLastProductContext(waId),
         hasBeautyContext: !!getLastResolvedBeauty(waId) || !!getPendingAmbiguousBeauty(waId) || !!getLastKnownService(waId, null),
         hasCourseContext: !!getLastCourseContext(waId),
-        historySnippet: ensureConv(waId).messages.slice(-10).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1800),
+        historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 14, 1800),
       });
 
       if (wrapUpControl.action === 'CLOSE_POLITELY') {
@@ -10913,7 +10931,7 @@ lastCloseContext.set(waId, {
         date: pendingDraft?.fecha || '',
         time: pendingDraft?.hora || '',
         flowStep: pendingDraft?.flow_step || '',
-        historySnippet: ensureConv(waId).messages.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1200),
+        historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 10, 1200),
       });
 
       if (draftControlEarly.action === 'PAUSE_APPOINTMENT' || draftControlEarly.action === 'SWITCH_TOPIC') {
@@ -10966,7 +10984,7 @@ updateLastCloseContext(waId, {
           activeOffer: activeAssistantOffer,
           lastServiceName: getLastKnownService(waId, await getAppointmentDraft(waId))?.nombre || '',
           lastCourseName: getLastCourseContext(waId)?.selectedName || getLastCourseContext(waId)?.query || '',
-          historySnippet: ensureConv(waId).messages.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1400),
+          historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 12, 1400),
         })
       : (firstAiReview?.topic_changed ? { action: 'SWITCH_TOPIC' } : null);
 
@@ -11204,7 +11222,7 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
       const courseDraftIntent = await extractCourseEnrollmentIntentWithAI(text, {
         hasDraft: true,
         currentCourseName: pendingCourseDraft?.curso_nombre || '',
-        historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1200),
+        historySnippet: buildConversationHistorySnippet(convForAI, 14, 1200),
       });
 
       if (courseDraftIntent.action === 'PAUSE') {
@@ -11344,7 +11362,7 @@ Cuando quiera retomarla, me escribe y seguimos desde ahí.`;
         date: pendingDraft?.fecha || '',
         time: pendingDraft?.hora || '',
         flowStep: pendingDraft?.flow_step || '',
-        historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1200),
+        historySnippet: buildConversationHistorySnippet(convForAI, 14, 1200),
       });
 
       if (draftControl.action === 'PAUSE_APPOINTMENT' || draftControl.action === 'SWITCH_TOPIC') {
@@ -11433,7 +11451,7 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
         lastResolvedTerm: lastResolvedBeauty?.term || '',
         lastResolvedKind: lastResolvedBeauty?.kind || '',
         lastServiceName: lastKnownService?.nombre || '',
-        historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1600),
+        historySnippet: buildConversationHistorySnippet(convForAI, 18, 1600),
       });
 
       const canonicalBeautyQuery = buildBeautyCanonicalLabel(
@@ -12215,7 +12233,7 @@ Si después necesita algo, estoy acá ✨`;
       activeAssistantOfferSelectedName: getActiveAssistantOffer(waId)?.selectedName || '',
       flowStep: pendingDraft?.flow_step || '',
       hasDraft: !!pendingDraft,
-      historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1600),
+      historySnippet: buildConversationHistorySnippet(convForAI, 18, 1600),
     });
 
 
@@ -12283,6 +12301,7 @@ Si después necesita algo, estoy acá ✨`;
           lastNeed: lastProductCtx?.need || '',
           lastUseType: lastProductCtx?.useType || '',
           lastDomain: lastProductCtx?.domain || '',
+          historySnippet: buildConversationHistorySnippet(convForAI, 18, 2200),
         })
       : null;
 
@@ -12543,6 +12562,7 @@ Si después necesita algo, estoy acá ✨`;
             style: resolvedStyle,
             seatsNeeded: resolvedSeatsNeeded,
             treatmentKnowledge,
+            historySnippet: buildConversationHistorySnippet(convForAI, 18, 2200),
             products: shortlist,
           });
 
@@ -12834,7 +12854,7 @@ ${some}
         hasDraft: !!pendingCourseDraft,
         currentCourseName: activeCourse?.nombre || referencedCourse?.nombre || lastCourseContext?.selectedName || '',
         recentCourseNames: Array.isArray(lastCourseContext?.recentCourses) ? lastCourseContext.recentCourses.map((x) => x?.nombre).filter(Boolean).slice(0, 12) : [],
-        historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1200),
+        historySnippet: buildConversationHistorySnippet(convForAI, 14, 1200),
       });
       const isGenericCourseCatalogAsk = isLikelyGenericCourseListQuery(text) || /(otros cursos|que otros cursos|qué otros cursos|que cursos hay|qué cursos hay|que cursos estan dictando|qué cursos están dictando|que cursos tenes|qué cursos tenés|que cursos tienen|qué cursos tienen)/i.test(text || '');
       const hasExplicitCourseSignupSignal = followupGoal === 'SIGNUP' || courseEnrollmentIntent.action === 'START_SIGNUP';
@@ -12853,7 +12873,7 @@ ${some}
         const aiSignupSelection = await resolveCourseEnrollmentSelectionWithAI(courses, text, {
           currentCourseName: activeCourse?.nombre || referencedCourse?.nombre || lastCourseContext?.selectedName || '',
           recentCourses: Array.isArray(lastCourseContext?.recentCourses) ? lastCourseContext.recentCourses : [],
-          historySnippet: convForAI.slice(-8).map((m) => `${m.role}: ${m.content}`).join(' | ').slice(0, 1200),
+          historySnippet: buildConversationHistorySnippet(convForAI, 14, 1200),
         });
         const signupQuery = aiSignupSelection.course_query || courseEnrollmentIntent.course_query || activeCourse?.nombre || referencedCourse?.nombre || lastCourseContext?.selectedName || stripCourseSignupNoise(text) || text;
         const signupMatches = signupQuery ? findCourses(courses, signupQuery, 'DETAIL') : [];
