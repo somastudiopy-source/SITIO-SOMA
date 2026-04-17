@@ -323,7 +323,9 @@ async function ensureCourseEnrollmentTables() {
       sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       approved_at TIMESTAMPTZ,
       approved_by_phone TEXT,
-      approval_text TEXT
+      approval_text TEXT,
+      expired_at TIMESTAMPTZ,
+      expired_reason TEXT
     )
   `);
 
@@ -331,6 +333,8 @@ async function ensureCourseEnrollmentTables() {
   await db.query(`ALTER TABLE course_enrollment_notifications ADD COLUMN IF NOT EXISTS approved_by_phone TEXT`);
   await db.query(`ALTER TABLE course_enrollment_notifications ADD COLUMN IF NOT EXISTS approval_text TEXT`);
   await db.query(`ALTER TABLE course_enrollment_notifications ADD COLUMN IF NOT EXISTS approved_student_notified_at TIMESTAMPTZ`);
+  await db.query(`ALTER TABLE course_enrollment_notifications ADD COLUMN IF NOT EXISTS expired_at TIMESTAMPTZ`);
+  await db.query(`ALTER TABLE course_enrollment_notifications ADD COLUMN IF NOT EXISTS expired_reason TEXT`);
 }
 
 
@@ -905,6 +909,8 @@ const COURSE_NOTIFY_PHONE_RAW = process.env.COURSE_NOTIFY_PHONE || STYLIST_NOTIF
 const APPOINTMENT_ACTIVE_CONFLICT_STATUSES = ['pending_stylist_confirmation', 'awaiting_payment'];
 const TEMPLATE_CURSO_SENA_RECIBIDA = process.env.TEMPLATE_CURSO_SENA_RECIBIDA || "inscripcion_curso_sena_recibida";
 const APPOINTMENT_TEMPLATE_SCAN_MS = Number(process.env.APPOINTMENT_TEMPLATE_SCAN_MS || 60000);
+const STYLIST_CONFIRMATION_TIMEOUT_MS = Number(process.env.STYLIST_CONFIRMATION_TIMEOUT_MS || 2 * 60 * 60 * 1000);
+const COURSE_MANAGER_CONFIRMATION_TIMEOUT_MS = Number(process.env.COURSE_MANAGER_CONFIRMATION_TIMEOUT_MS || 12 * 60 * 60 * 1000);
 
 const ENABLE_COMMERCIAL_FOLLOWUPS = String(process.env.ENABLE_COMMERCIAL_FOLLOWUPS || "true").toLowerCase() === "true";
 const COMMERCIAL_FOLLOWUP_SCAN_MS = Number(process.env.COMMERCIAL_FOLLOWUP_SCAN_MS || 60000);
@@ -4971,6 +4977,112 @@ Si ninguno de los horarios comerciales le sirve, puedo revisar otros horarios �
 
   await sendWhatsAppText(phone, 'Respondeme con aceptar o no puede, o sugerime otro horario, y yo sigo el flujo con la clienta.');
   return true;
+}
+
+function buildStylistTimeoutClientMessage(appt = {}) {
+  const fechaTxt = appt?.appointment_date ? ymdToDMY(appt.appointment_date) : '';
+  const horaTxt = formatAppointmentTimeForTemplate(appt?.appointment_time || '');
+  const servicioTxt = String(appt?.service_name || '').trim();
+  return [
+    'Todavía no recibimos confirmación de la estilista para ese turno 😊',
+    '',
+    servicioTxt ? `Servicio: ${servicioTxt}` : '',
+    fechaTxt ? `📅 Fecha solicitada: ${fechaTxt}` : '',
+    horaTxt ? `🕐 Hora solicitada: ${horaTxt}` : '',
+    '',
+    'Si quiere, puedo volver a revisar otro horario disponible y seguimos por acá ✨',
+  ].filter(Boolean).join('\n').trim();
+}
+
+function buildCourseManagerTimeoutStudentMessage(enrollment = {}) {
+  const studentName = String(enrollment?.student_name || '').trim();
+  const courseName = String(enrollment?.course_name || '').trim();
+  const saludo = studentName ? `${studentName}, ` : '';
+  return [
+    `Perfecto 😊 ${saludo}ya tenemos registrada la seña${courseName ? ` para *${courseName}*` : ''}.`,
+    '',
+    'La responsable todavía no terminó de revisarlo, así que por ahora quedó *pendiente de confirmación manual*.',
+    'Apenas lo valide, le avisamos por este mismo medio ✨',
+  ].join('\n').trim();
+}
+
+async function processAppointmentResponseTimeouts() {
+  const r = await db.query(
+    `SELECT id, wa_id, wa_phone, client_name, contact_phone, service_name,
+            appointment_date::text AS appointment_date,
+            to_char(appointment_time, 'HH24:MI') AS appointment_time,
+            status,
+            stylist_notified_at
+       FROM appointments
+      WHERE status = 'pending_stylist_confirmation'
+        AND stylist_notified_at IS NOT NULL`
+  );
+
+  for (const raw of (r.rows || [])) {
+    const appt = buildAppointmentData(raw);
+    const notifiedAt = new Date(appt.stylist_notified_at || 0).getTime();
+    if (!notifiedAt || Number.isNaN(notifiedAt)) continue;
+    if ((Date.now() - notifiedAt) < STYLIST_CONFIRMATION_TIMEOUT_MS) continue;
+
+    try {
+      const updated = await updateAppointmentStatus(appt.id, {
+        status: 'stylist_timeout',
+        stylist_decision_note: `Sin respuesta de la estilista dentro de ${Math.round(STYLIST_CONFIRMATION_TIMEOUT_MS / 3600000)} horas.`,
+        mark_stylist_decision_at: true,
+      });
+      await deleteAppointmentDraft(appt.wa_id);
+      clearPendingStylistSuggestion(appt.wa_id);
+
+      const clientPhone = normalizeWhatsAppRecipient(appt.contact_phone || appt.wa_phone || '');
+      const clientMsg = buildStylistTimeoutClientMessage(updated || appt);
+      if (clientPhone && clientMsg) {
+        pushHistory(appt.wa_id, 'assistant', clientMsg);
+        await sendWhatsAppText(clientPhone, clientMsg);
+      }
+    } catch (e) {
+      console.error(`❌ Error venciendo espera de estilista para appointment ${appt.id}:`, e?.response?.data || e?.message || e);
+    }
+  }
+}
+
+async function processCourseManagerApprovalTimeouts() {
+  const r = await db.query(
+    `SELECT n.*, e.wa_phone, e.contact_phone, e.student_name, e.course_name
+       FROM course_enrollment_notifications n
+       JOIN course_enrollments e ON e.id = n.enrollment_id
+      WHERE n.notification_type = 'course_payment_received'
+        AND n.approved_at IS NULL
+        AND n.expired_at IS NULL`
+  );
+
+  for (const row of (r.rows || [])) {
+    const sentAt = new Date(row.sent_at || 0).getTime();
+    if (!sentAt || Number.isNaN(sentAt)) continue;
+    if ((Date.now() - sentAt) < COURSE_MANAGER_CONFIRMATION_TIMEOUT_MS) continue;
+
+    try {
+      const expired = await db.query(
+        `UPDATE course_enrollment_notifications
+            SET expired_at = COALESCE(expired_at, NOW()),
+                expired_reason = COALESCE(expired_reason, $2)
+          WHERE id = $1
+            AND approved_at IS NULL
+            AND expired_at IS NULL
+          RETURNING *`,
+        [Number(row.id || 0), `Sin respuesta de la responsable dentro de ${Math.round(COURSE_MANAGER_CONFIRMATION_TIMEOUT_MS / 3600000)} horas.`]
+      );
+      const expiredRow = expired.rows?.[0];
+      if (!expiredRow) continue;
+
+      const studentPhone = normalizeWhatsAppRecipient(row.wa_phone || row.contact_phone || '');
+      const studentMsg = buildCourseManagerTimeoutStudentMessage(row);
+      if (studentPhone && studentMsg) {
+        await sendWhatsAppText(studentPhone, studentMsg);
+      }
+    } catch (e) {
+      console.error(`❌ Error venciendo aprobación de curso ${row.enrollment_id}:`, e?.response?.data || e?.message || e);
+    }
+  }
 }
 
 async function processAppointmentTemplateNotifications() {
@@ -9858,6 +9970,7 @@ async function findLatestPendingCourseEnrollmentNotification(recipientPhone = ''
       WHERE recipient_phone = $1
         AND notification_type = 'course_payment_received'
         AND approved_at IS NULL
+        AND expired_at IS NULL
       ORDER BY sent_at DESC, id DESC
       LIMIT 1`,
     [normalizePhone(recipientPhone || '')]
@@ -9884,6 +9997,11 @@ async function handleCourseManagerApprovalInbound({ msg, text, phone, phoneRaw }
 
   if (notif.approved_at) {
     await sendWhatsAppText(phone, 'Esa inscripción ya estaba marcada como aprobada.');
+    return true;
+  }
+
+  if (notif.expired_at) {
+    await sendWhatsAppText(phone, 'Esa inscripción ya venció por falta de respuesta dentro del plazo configurado.');
     return true;
   }
 
@@ -13194,6 +13312,12 @@ if (ENABLE_APPOINTMENT_TEMPLATES) {
     processAppointmentTemplateNotifications().catch((e) => {
       console.error('❌ Error en el scheduler de plantillas de turnos:', e?.response?.data || e?.message || e);
     });
+    processAppointmentResponseTimeouts().catch((e) => {
+      console.error('❌ Error en el scheduler de vencimiento de turnos:', e?.response?.data || e?.message || e);
+    });
+    processCourseManagerApprovalTimeouts().catch((e) => {
+      console.error('❌ Error en el scheduler de vencimiento de cursos:', e?.response?.data || e?.message || e);
+    });
   }, APPOINTMENT_TEMPLATE_SCAN_MS);
 } else {
   console.log("ℹ️ Plantillas de turnos desactivadas temporalmente");
@@ -13239,6 +13363,8 @@ const PORT = process.env.PORT || 3000;
   console.log(ENABLE_APPOINTMENT_TEMPLATES
     ? "ℹ️ Plantillas de turnos activadas"
     : "ℹ️ Plantillas de turnos desactivadas temporalmente");
+  console.log(`ℹ️ Vencimiento de respuesta de peluquera: ${Math.round(STYLIST_CONFIRMATION_TIMEOUT_MS / 3600000)} hs`);
+  console.log(`ℹ️ Vencimiento de respuesta de responsable de cursos: ${Math.round(COURSE_MANAGER_CONFIRMATION_TIMEOUT_MS / 3600000)} hs`);
   console.log(ENABLE_COMMERCIAL_FOLLOWUPS
     ? "ℹ️ Follow-up comercial activado"
     : "ℹ️ Follow-up comercial desactivado");
@@ -13251,6 +13377,12 @@ const PORT = process.env.PORT || 3000;
   if (ENABLE_APPOINTMENT_TEMPLATES) {
     await processAppointmentTemplateNotifications().catch((e) => {
       console.error('❌ Error inicial procesando plantillas de turnos:', e?.response?.data || e?.message || e);
+    });
+    await processAppointmentResponseTimeouts().catch((e) => {
+      console.error('❌ Error inicial procesando vencimientos de turnos:', e?.response?.data || e?.message || e);
+    });
+    await processCourseManagerApprovalTimeouts().catch((e) => {
+      console.error('❌ Error inicial procesando vencimientos de cursos:', e?.response?.data || e?.message || e);
     });
   }
   if (ENABLE_COMMERCIAL_FOLLOWUPS) {
