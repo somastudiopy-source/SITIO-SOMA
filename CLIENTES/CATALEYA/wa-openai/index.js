@@ -631,8 +631,10 @@ async function searchHubSpotContacts(filterGroups = [], limit = 10) {
       HUBSPOT_PROPERTY.nameSource,
       HUBSPOT_PROPERTY.nameUpdatedAt,
       HUBSPOT_PROPERTY.fechaNacimiento,
+      HUBSPOT_STUDENT_PROPERTY,
+      HUBSPOT_STUDENT_COURSES_PROPERTY,
       'mobilephone',
-    ],
+    ].filter(Boolean),
   };
 
   try {
@@ -914,8 +916,10 @@ const COURSE_MANAGER_CONFIRMATION_TIMEOUT_MS = Number(process.env.COURSE_MANAGER
 
 const ENABLE_COMMERCIAL_FOLLOWUPS = String(process.env.ENABLE_COMMERCIAL_FOLLOWUPS || "true").toLowerCase() === "true";
 const COMMERCIAL_FOLLOWUP_SCAN_MS = Number(process.env.COMMERCIAL_FOLLOWUP_SCAN_MS || 60000);
-const COMMERCIAL_FOLLOWUP_DELAY_MS = Number(process.env.COMMERCIAL_FOLLOWUP_DELAY_MS || 5 * 60 * 1000);
+const COMMERCIAL_FOLLOWUP_DELAY_MS = Number(process.env.COMMERCIAL_FOLLOWUP_DELAY_MS || 23 * 60 * 60 * 1000);
 const COMMERCIAL_FOLLOWUP_MAX_PER_RUN = Number(process.env.COMMERCIAL_FOLLOWUP_MAX_PER_RUN || 20);
+const COMMERCIAL_PROMO_WINDOW_HOURS = Number(process.env.COMMERCIAL_PROMO_WINDOW_HOURS || 48);
+const COMMERCIAL_PROMO_DISCOUNT_PERCENT = Number(process.env.COMMERCIAL_PROMO_DISCOUNT_PERCENT || 50);
 
 const ENABLE_BIRTHDAY_MESSAGES = String(process.env.ENABLE_BIRTHDAY_MESSAGES || "true").toLowerCase() === "true";
 const BIRTHDAY_SCAN_MS = Number(process.env.BIRTHDAY_SCAN_MS || 60 * 60 * 1000);
@@ -952,6 +956,9 @@ const HUBSPOT_OPTION = {
   clienteSi: "true",
   empresaCataleya: "CATALEYA Salón de Belleza",
 };
+
+const HUBSPOT_STUDENT_PROPERTY = String(process.env.HUBSPOT_STUDENT_PROPERTY || '').trim();
+const HUBSPOT_STUDENT_COURSES_PROPERTY = String(process.env.HUBSPOT_STUDENT_COURSES_PROPERTY || '').trim();
 
 function hasHubSpotEnabled() {
   return !!HUBSPOT_ACCESS_TOKEN;
@@ -1793,6 +1800,259 @@ function getFriendlyFirstName(ctx = {}, contact = null) {
   );
 }
 
+function compactCommercialText(value = '', maxLen = 90) {
+  const txt = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!txt) return '';
+  if (txt.length <= maxLen) return txt;
+  return `${txt.slice(0, Math.max(0, maxLen - 3)).trim()}...`;
+}
+
+function stableCommercialHash(value = '') {
+  const raw = String(value || '');
+  let hash = 0;
+  for (let i = 0; i < raw.length; i += 1) {
+    hash = ((hash << 5) - hash) + raw.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function pickCommercialVariant(seed = '', options = []) {
+  const rows = Array.isArray(options) ? options.filter(Boolean) : [];
+  if (!rows.length) return '';
+  return rows[stableCommercialHash(seed) % rows.length] || rows[0] || '';
+}
+
+function parseCommercialMoneyNumber(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const cleaned = raw.replace(/[^\d,.-]/g, '');
+  if (!cleaned) return null;
+  if (cleaned.includes(',') && cleaned.includes('.')) {
+    const normalized = cleaned.replace(/\./g, '').replace(',', '.');
+    const num = Number(normalized);
+    return Number.isFinite(num) ? num : null;
+  }
+  if (cleaned.includes(',') && !cleaned.includes('.')) {
+    const normalized = cleaned.replace(',', '.');
+    const num = Number(normalized);
+    return Number.isFinite(num) ? num : null;
+  }
+  const num = Number(cleaned);
+  return Number.isFinite(num) ? num : null;
+}
+
+function resolveCommercialPromoPrices(row = {}) {
+  const beforeRaw = String(row?.precioSinPromocion || '').trim();
+  const nowRaw = String(row?.precio || '').trim();
+  if (!beforeRaw || !nowRaw) return null;
+
+  const beforeNum = parseCommercialMoneyNumber(beforeRaw);
+  const nowNum = parseCommercialMoneyNumber(nowRaw);
+  if (beforeNum != null && nowNum != null && beforeNum <= nowNum) return null;
+
+  return {
+    beforeRaw,
+    nowRaw,
+    beforeNum,
+    nowNum,
+    beforeText: moneyOrConsult(beforeRaw),
+    nowText: moneyOrConsult(nowRaw),
+  };
+}
+
+function hasCommercialPromoPrices(row = {}) {
+  return !!resolveCommercialPromoPrices(row);
+}
+
+function normalizeTruthyHubSpotValue(value = '') {
+  const t = normalize(String(value || '').trim());
+  if (!t) return false;
+  return /^(si|sí|true|1|yes|x|ok|alumno|alumna|activo|activa)$/i.test(t)
+    || t.includes('si✅')
+    || t.includes('si')
+    || t.includes('alumno')
+    || t.includes('alumna');
+}
+
+function splitCommercialCourseValues(value = '') {
+  const raw = String(value || '').replace(/[•·]/g, '\n');
+  return raw
+    .split(/[\n,;|/]+/g)
+    .map((x) => String(x || '').replace(/\s+/g, ' ').trim())
+    .filter((x) => x && x.length >= 3)
+    .slice(0, 30);
+}
+
+function getHubSpotStudentSignals(contact = null) {
+  const props = contact?.properties || {};
+  const studentValue = HUBSPOT_STUDENT_PROPERTY ? props?.[HUBSPOT_STUDENT_PROPERTY] : '';
+  const coursesValue = HUBSPOT_STUDENT_COURSES_PROPERTY ? props?.[HUBSPOT_STUDENT_COURSES_PROPERTY] : '';
+  return {
+    isStudent: normalizeTruthyHubSpotValue(studentValue),
+    studentValue: String(studentValue || '').trim(),
+    studiedCourses: splitCommercialCourseValues(coursesValue),
+  };
+}
+
+async function getStudentProfileForCommercialFollowup({ waId = '', phone = '', contact = null } = {}) {
+  const phoneNorm = normalizePhone(phone || '');
+  const dbCourses = [];
+  const seen = new Set();
+  const addCourse = (value) => {
+    const clean = String(value || '').replace(/\s+/g, ' ').trim();
+    const key = normalize(clean);
+    if (!clean || !key || seen.has(key)) return;
+    seen.add(key);
+    dbCourses.push(clean);
+  };
+
+  const params = [];
+  const clauses = [];
+  let idx = 1;
+  if (waId) {
+    clauses.push(`wa_id = $${idx++}`);
+    params.push(String(waId));
+  }
+  if (phoneNorm) {
+    clauses.push(`wa_phone = $${idx}`);
+    clauses.push(`contact_phone = $${idx}`);
+    params.push(phoneNorm);
+    idx += 1;
+  }
+
+  if (clauses.length) {
+    const sql = `
+      SELECT course_name
+        FROM course_enrollments
+       WHERE (${clauses.join(' OR ')})
+       ORDER BY updated_at DESC, created_at DESC
+       LIMIT 50`;
+    try {
+      const r = await db.query(sql, params);
+      for (const row of (r.rows || [])) addCourse(row?.course_name || '');
+    } catch (e) {
+      console.error('❌ Error leyendo historial de cursos para follow-up comercial:', e?.message || e);
+    }
+  }
+
+  const hubspotSignals = getHubSpotStudentSignals(contact);
+  for (const value of (hubspotSignals.studiedCourses || [])) addCourse(value);
+
+  return {
+    isStudent: !!(hubspotSignals.isStudent || dbCourses.length),
+    studiedCourses: dbCourses,
+    hubspotStudentValue: hubspotSignals.studentValue || '',
+  };
+}
+
+function doesCourseMatchStudy(courseName = '', studiedCourses = []) {
+  const base = normalize(String(courseName || '').trim());
+  if (!base) return false;
+  return (Array.isArray(studiedCourses) ? studiedCourses : []).some((value) => {
+    const key = normalize(String(value || '').trim());
+    return !!key && (key === base || key.includes(base) || base.includes(key));
+  });
+}
+
+function filterCommercialAvailableCourses(rows = []) {
+  return (Array.isArray(rows) ? rows : []).filter((row) => {
+    const estado = normalize(String(row?.estado || '').trim());
+    const cupos = normalize(String(row?.cupos || '').trim());
+    if (/(cerrad|complet|agotad|sin cupo|no disponible|finalizad)/i.test(estado)) return false;
+    if (/^0+(?:[.,]0+)?$/.test(cupos)) return false;
+    return true;
+  });
+}
+
+function buildCommercialProductActionLine() {
+  return `Si le interesa, avíseme y se lo dejo preparado. Pasadas estas *${COMMERCIAL_PROMO_WINDOW_HOURS} hs*, la promoción deja de estar vigente.`;
+}
+
+function buildCommercialCourseActionLine() {
+  return 'Si le interesa, avíseme y le paso lo que está disponible o avanzamos con la inscripción sin perder la oportunidad.';
+}
+
+function buildCommercialProductIntro({ firstName = '', isStudent = false, studiedCourses = [], domain = '' } = {}) {
+  const saludo = firstName ? `Buen día ${firstName} 😊` : 'Buen día 😊';
+  const studyHint = studiedCourses.length
+    ? ` por lo que viene relacionado con ${studiedCourses.length === 1 ? `*${studiedCourses[0]}*` : 'lo que estudió'}`
+    : '';
+
+  const variants = isStudent
+    ? [
+        `${saludo}
+
+Por ser *alumno/a*, le quedó por estas *${COMMERCIAL_PROMO_WINDOW_HOURS} hs* una promoción especial del *${COMMERCIAL_PROMO_DISCOUNT_PERCENT}% OFF* en opciones que le pueden servir para trabajar o para uso personal${studyHint} ✨`,
+        `${saludo}
+
+Le aviso porque como *alumno/a* tiene un beneficio especial del *${COMMERCIAL_PROMO_DISCOUNT_PERCENT}% OFF* durante estas *${COMMERCIAL_PROMO_WINDOW_HOURS} hs* en productos${studyHint}.`,
+        `${saludo}
+
+Como *alumno/a* le quedó una oportunidad especial por estas *${COMMERCIAL_PROMO_WINDOW_HOURS} hs*: *${COMMERCIAL_PROMO_DISCOUNT_PERCENT}% OFF* en productos que le pueden complementar muy bien${studyHint}.`,
+      ]
+    : [
+        `${saludo}
+
+Le escribo porque por estas *${COMMERCIAL_PROMO_WINDOW_HOURS} hs* le quedó una promoción exclusiva del *${COMMERCIAL_PROMO_DISCOUNT_PERCENT}% OFF* en opciones que van muy bien con lo que venía consultando ✨`,
+        `${saludo}
+
+Le aviso antes de que se cierre: durante estas *${COMMERCIAL_PROMO_WINDOW_HOURS} hs* tiene una promoción exclusiva del *${COMMERCIAL_PROMO_DISCOUNT_PERCENT}% OFF* en productos relacionados con lo que le interesó.`,
+        `${saludo}
+
+Le dejé seleccionadas algunas opciones que pueden complementar justo lo que estaba buscando, con *${COMMERCIAL_PROMO_DISCOUNT_PERCENT}% OFF* por estas *${COMMERCIAL_PROMO_WINDOW_HOURS} hs*.`,
+      ];
+
+  return pickCommercialVariant(`${firstName}|${isStudent}|${domain}|${studiedCourses.join('|')}`, variants);
+}
+
+function buildCommercialCourseIntro({ firstName = '', isStudent = false, studiedCourses = [], topCourseName = '' } = {}) {
+  const saludo = firstName ? `Buen día ${firstName} 😊` : 'Buen día 😊';
+  const studyHint = studiedCourses.length
+    ? (studiedCourses.length === 1 ? ` por lo que ya estudió en *${studiedCourses[0]}*` : ' por lo que ya estuvo estudiando con nosotros')
+    : '';
+
+  const variants = isStudent
+    ? [
+        `${saludo}
+
+Le aviso antes que se cierre la oportunidad: hay un curso que puede complementarle muy bien${studyHint}, y todavía está a tiempo de aprovechar los cupos.`,
+        `${saludo}
+
+Como *alumno/a*, quise avisarle antes que a otros porque quedó una opción de curso que puede servirle mucho${studyHint}.`,
+        `${saludo}
+
+Por ser *alumno/a*, le escribo para avisarle que todavía hay cupos en otra propuesta que puede sumarle muy bien${studyHint}.`,
+      ]
+    : [
+        `${saludo}
+
+Le escribo porque el curso que había consultado está moviendo los cupos y todavía está a tiempo de aprovechar la oportunidad ✨`,
+        `${saludo}
+
+Le aviso antes de que se cierren lugares: hay cursos con cupos en movimiento y puede reservar antes de perder la oportunidad.`,
+        `${saludo}
+
+Quise avisarle porque todavía está a tiempo de avanzar con un curso y no quedarse sin lugar.`,
+      ];
+
+  return pickCommercialVariant(`${firstName}|${isStudent}|${topCourseName}|${studiedCourses.join('|')}`, variants);
+}
+
+function buildCommercialPromoLines(rows = []) {
+  return (Array.isArray(rows) ? rows : []).filter(Boolean).slice(0, 3).map((row) => {
+    const promo = resolveCommercialPromoPrices(row);
+    if (!promo) return '';
+    const desc = compactCommercialText(row?.descripcion || '', 78);
+    return [
+      `• *${row.nombre}*`,
+      `Antes: *${promo.beforeText}*`,
+      `Ahora por estas *${COMMERCIAL_PROMO_WINDOW_HOURS} hs*: *${promo.nowText}*`,
+      desc ? `• ${desc}` : '',
+    ].filter(Boolean).join('\n');
+  }).filter(Boolean);
+}
+
 async function getHubSpotContactForFollowup(ctx = {}) {
   let contact = null;
   if (ctx?.waId) contact = await findHubSpotContactByWaId(ctx.waId);
@@ -1805,69 +2065,117 @@ async function getHubSpotContactForFollowup(ctx = {}) {
 
 async function buildCourseFollowupMessage({ ctx, contact }) {
   const props = contact?.properties || {};
+  const studentProfile = await getStudentProfileForCommercialFollowup({
+    waId: ctx?.waId || '',
+    phone: ctx?.phoneRaw || ctx?.phone || '',
+    contact,
+  });
+
   const fullText = [
-    props?.[HUBSPOT_PROPERTY.observacion] || "",
-    props?.[HUBSPOT_PROPERTY.producto] || "",
-    props?.[HUBSPOT_PROPERTY.categoria] || "",
-    ctx?.interest || "",
-    ctx?.lastUserText || "",
-    getConversationSnippetForClose(ctx?.waId || ""),
-  ].join(" | ");
+    props?.[HUBSPOT_PROPERTY.observacion] || '',
+    props?.[HUBSPOT_PROPERTY.producto] || '',
+    props?.[HUBSPOT_PROPERTY.categoria] || '',
+    studentProfile.studiedCourses.join(' | '),
+    ctx?.interest || '',
+    ctx?.lastUserText || '',
+    getConversationSnippetForClose(ctx?.waId || ''),
+  ].join(' | ');
 
-  const courses = await getCoursesCatalog();
-  if (!courses.length) return "";
+  const courses = filterCommercialAvailableCourses(await getCoursesCatalog());
+  if (!courses.length) return '';
 
-  let matches = findCourses(courses, fullText, "DETAIL");
-  if (!matches.length) matches = findCourses(courses, "curso", "LIST");
+  let matches = findCourses(courses, fullText, 'DETAIL');
+  if (!matches.length && ctx?.interest) matches = findCourses(courses, ctx.interest, 'DETAIL');
+  if (!matches.length) matches = findCourses(courses, 'curso', 'LIST');
 
-  const selected = matches.slice(0, 2).filter(Boolean);
-  if (!selected.length) return "";
-
-  const firstName = getFriendlyFirstName(ctx, contact);
-  const saludo = firstName ? `Buen día ${firstName} 😊` : `Buen día 😊`;
+  let selected = matches.filter(Boolean);
+  if (studentProfile.isStudent) {
+    const notStudied = selected.filter((row) => !doesCourseMatchStudy(row?.nombre || '', studentProfile.studiedCourses));
+    if (notStudied.length) selected = notStudied;
+  }
+  if (!selected.length && studentProfile.isStudent) {
+    selected = courses.filter((row) => !doesCourseMatchStudy(row?.nombre || '', studentProfile.studiedCourses));
+  }
+  if (!selected.length) selected = courses.slice(0, 3);
 
   const top = selected[0];
+  if (!top?.nombre) return '';
+
+  const firstName = getFriendlyFirstName(ctx, contact);
+  const intro = buildCommercialCourseIntro({
+    firstName,
+    isStudent: studentProfile.isStudent,
+    studiedCourses: studentProfile.studiedCourses,
+    topCourseName: top.nombre,
+  });
+
+  const detailLines = [
+    `• *${top.nombre}*`,
+    top.fechaInicio ? `• Inicio: ${top.fechaInicio}` : '',
+    top.diasHorarios ? `• Días y horarios: ${top.diasHorarios}` : '',
+    top.modalidad ? `• Modalidad: ${top.modalidad}` : '',
+    top.precio ? `• Precio: *${moneyOrConsult(top.precio)}*` : '',
+    top.sena ? `• Seña / inscripción: ${top.sena}` : '',
+    top.cupos ? `• Cupos: ${top.cupos}` : '',
+  ].filter(Boolean).join('\n');
+
+  const secondaryCourse = selected.slice(1).find((row) => row?.nombre);
+  let bridge = '';
+  if (studentProfile.isStudent) {
+    bridge = secondaryCourse
+      ? `También le puede servir *${secondaryCourse.nombre}* como complemento.`
+      : 'Si quiere, también puedo recomendarle otra opción relacionada o dejarle un cupo para un conocido cercano.';
+  } else {
+    bridge = secondaryCourse
+      ? `Si quiere, también le puedo pasar otra opción disponible como *${secondaryCourse.nombre}*.`
+      : 'Si quiere, también le puedo pasar otras opciones que hoy estén disponibles.';
+  }
 
   return [
-    saludo,
-    "",
-    `Le escribo porque *${top.nombre}* está avanzando con los cupos.`,
-    "Si quiere asegurarse el lugar, conviene señarlo cuanto antes ✨",
-    top.precio ? `• Precio: *${moneyOrConsult(top.precio)}*` : "",
-    top.sena ? `• Seña / inscripción: ${top.sena}` : "",
-    top.fechaInicio ? `• Inicio: ${top.fechaInicio}` : "",
-    "",
-    "Si quiere, le paso ahora mismo la info para reservar su lugar."
-  ].filter(Boolean).join("\n");
+    intro,
+    '',
+    detailLines,
+    '',
+    bridge,
+    buildCommercialCourseActionLine(),
+  ].filter(Boolean).join('\n');
 }
 
 async function buildProductFollowupMessage({ ctx, contact }) {
   const props = contact?.properties || {};
+  const studentProfile = await getStudentProfileForCommercialFollowup({
+    waId: ctx?.waId || '',
+    phone: ctx?.phoneRaw || ctx?.phone || '',
+    contact,
+  });
+
   const fullText = [
-    props?.[HUBSPOT_PROPERTY.observacion] || "",
-    props?.[HUBSPOT_PROPERTY.producto] || "",
-    props?.[HUBSPOT_PROPERTY.categoria] || "",
-    ctx?.interest || "",
-    ctx?.lastUserText || "",
-    getConversationSnippetForClose(ctx?.waId || ""),
-  ].join(" | ");
+    props?.[HUBSPOT_PROPERTY.observacion] || '',
+    props?.[HUBSPOT_PROPERTY.producto] || '',
+    props?.[HUBSPOT_PROPERTY.categoria] || '',
+    studentProfile.studiedCourses.join(' | '),
+    ctx?.interest || '',
+    ctx?.lastUserText || '',
+    getConversationSnippetForClose(ctx?.waId || ''),
+  ].join(' | ');
 
   const stock = await getStockCatalog();
-  if (!stock.length) return "";
+  if (!stock.length) return '';
 
   const resolvedDomain = detectProductDomain(fullText) || 'hair';
   const resolvedFamily = resolvedDomain === 'furniture'
-    ? (detectFurnitureFamily(fullText) || "")
-    : (detectProductFamily(fullText) || "");
-  const resolvedFocusTerm = detectProductFocusTerm(fullText) || "";
+    ? (detectFurnitureFamily(fullText) || '')
+    : (detectProductFamily(fullText) || '');
+  const resolvedFocusTerm = detectProductFocusTerm(fullText) || '';
+
   const related = findStockRelated(stock, fullText, {
     domain: resolvedDomain,
     family: resolvedFamily,
     focusTerm: resolvedFocusTerm,
-    limit: 30,
-  });
+    limit: 40,
+  }).filter((row) => hasCommercialPromoPrices(row));
 
-  if (!related.length) return "";
+  if (!related.length) return '';
 
   const treatmentKnowledge = resolvedDomain === 'hair'
     ? detectHairTreatmentKnowledge({ text: fullText, family: resolvedFamily, need: fullText })
@@ -1881,7 +2189,9 @@ async function buildProductFollowupMessage({ ctx, contact }) {
     need: fullText,
     useType: normalizeUseType(fullText),
     limit: 6,
-  });
+  }).filter((row) => hasCommercialPromoPrices(row));
+
+  if (!shortlist.length) return '';
 
   const recoAI = await recommendProductsWithAI({
     text: fullText,
@@ -1898,27 +2208,31 @@ async function buildProductFollowupMessage({ ctx, contact }) {
     Array.isArray(recoAI?.recommended_names) ? recoAI.recommended_names : []
   );
 
-  let picked = shortlist.filter((x) => pickedNames.has(x.nombre)).slice(0, 4);
-  if (!picked.length) picked = shortlist.slice(0, 3);
-
-  const body = formatRecommendedProductsReply(recoAI, picked, {
-    domain: resolvedDomain,
-    familyLabel: resolvedFamily,
-    need: fullText,
-    useType: normalizeUseType(fullText),
-    treatmentKnowledge,
-  });
-
-  if (!body) return "";
+  let picked = shortlist.filter((x) => pickedNames.has(x.nombre)).slice(0, 3);
+  if (!picked.length) picked = shortlist.slice(0, 2);
+  if (!picked.length) return '';
 
   const firstName = getFriendlyFirstName(ctx, contact);
-  const saludo = firstName ? `Buen día ${firstName} 😊` : `Buen día 😊`;
+  const intro = buildCommercialProductIntro({
+    firstName,
+    isStudent: studentProfile.isStudent,
+    studiedCourses: studentProfile.studiedCourses,
+    domain: resolvedDomain,
+  });
 
-  return `${saludo}
+  const bodyLines = buildCommercialPromoLines(picked);
+  if (!bodyLines.length) return '';
 
-Le dejo una recomendación según lo que consultó:
+  const supportLine = compactCommercialText(recoAI?.sales_angle || recoAI?.rationale || recoAI?.follow_up || '', 110);
 
-${body}`;
+  return [
+    intro,
+    supportLine || '',
+    '',
+    bodyLines.join('\n\n'),
+    '',
+    buildCommercialProductActionLine(),
+  ].filter(Boolean).join('\n');
 }
 
 async function processCommercialFollowups() {
@@ -2060,8 +2374,10 @@ async function searchHubSpotContactsPaged(filterGroups = [], limit = 200, extraP
     HUBSPOT_PROPERTY.whatsappPhoneNormalized,
     HUBSPOT_PROPERTY.whatsappProfileName,
     HUBSPOT_PROPERTY.fechaNacimiento,
+    HUBSPOT_STUDENT_PROPERTY,
+    HUBSPOT_STUDENT_COURSES_PROPERTY,
     ...extraProperties,
-  ]));
+  ].filter(Boolean)));
 
   let after = undefined;
   const all = [];
@@ -6798,6 +7114,10 @@ async function getStockCatalog() {
       categoria: header.findIndex(h => normalize(h) === "categoria"),
       marca: header.findIndex(h => normalize(h) === "marca"),
       precio: header.findIndex(h => normalize(h) === "precio"),
+      precioSinPromocion: header.findIndex(h => {
+        const v = normalize(h);
+        return v === "precio sin promocion" || v.includes("precio sin promocion");
+      }),
       stock: header.findIndex(h => normalize(h) === "stock"),
       descripcion: header.findIndex(h => normalize(h) === "descripcion"),
       foto: header.findIndex(h => normalize(h).includes("foto")), // “Foto del producto”
@@ -6818,6 +7138,7 @@ async function getStockCatalog() {
         categoria: idx.categoria >= 0 ? (r[idx.categoria] || "").trim() : "",
         marca: idx.marca >= 0 ? (r[idx.marca] || "").trim() : "",
         precio: idx.precio >= 0 ? (r[idx.precio] || "").trim() : "",
+        precioSinPromocion: idx.precioSinPromocion >= 0 ? (r[idx.precioSinPromocion] || "").trim() : "",
         stock: idx.stock >= 0 ? (r[idx.stock] || "").trim() : "",
         descripcion: idx.descripcion >= 0 ? (r[idx.descripcion] || "").trim() : "",
         // ✅ guardamos link real si existe, si no el texto
