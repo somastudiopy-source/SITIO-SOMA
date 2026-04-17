@@ -368,6 +368,23 @@ async function ensureCommercialFollowupTables() {
   `);
 }
 
+
+async function ensureBirthdayMessageTables() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS birthday_message_logs (
+      id BIGSERIAL PRIMARY KEY,
+      hubspot_contact_id TEXT NOT NULL,
+      wa_phone TEXT NOT NULL,
+      sent_date DATE NOT NULL,
+      contact_name TEXT,
+      birthday_value TEXT,
+      message_text TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (hubspot_contact_id, sent_date)
+    )
+  `);
+}
+
 // ✅ Normalización única: 549XXXXXXXX -> 54XXXXXXXX
 function normalizePhone(s) {
   s = String(s || "").trim().replace(/[ \+\-\(\)]/g, "");
@@ -609,6 +626,7 @@ async function searchHubSpotContacts(filterGroups = [], limit = 10) {
       HUBSPOT_PROPERTY.whatsappProfileName,
       HUBSPOT_PROPERTY.nameSource,
       HUBSPOT_PROPERTY.nameUpdatedAt,
+      HUBSPOT_PROPERTY.fechaNacimiento,
       'mobilephone',
     ],
   };
@@ -893,6 +911,8 @@ const COMMERCIAL_FOLLOWUP_SCAN_MS = Number(process.env.COMMERCIAL_FOLLOWUP_SCAN_
 const COMMERCIAL_FOLLOWUP_DELAY_MS = Number(process.env.COMMERCIAL_FOLLOWUP_DELAY_MS || 5 * 60 * 1000);
 const COMMERCIAL_FOLLOWUP_MAX_PER_RUN = Number(process.env.COMMERCIAL_FOLLOWUP_MAX_PER_RUN || 20);
 
+const ENABLE_BIRTHDAY_MESSAGES = String(process.env.ENABLE_BIRTHDAY_MESSAGES || "true").toLowerCase() === "true";
+const BIRTHDAY_SCAN_MS = Number(process.env.BIRTHDAY_SCAN_MS || 60 * 60 * 1000);
 
 
 // ===================== HUBSPOT (CRM seguimiento) =====================
@@ -919,6 +939,7 @@ const HUBSPOT_PROPERTY = {
   whatsappProfileName: "whatsapp_profile_name",
   nameSource: "name_source",
   nameUpdatedAt: "name_updated_at",
+  fechaNacimiento: "fecha_de_nacimiento",
 };
 
 const HUBSPOT_OPTION = {
@@ -2015,6 +2036,220 @@ async function processCommercialFollowups() {
         status: "error",
         errorText: errTxt,
       });
+    }
+  }
+}
+
+
+async function searchHubSpotContactsPaged(filterGroups = [], limit = 200, extraProperties = []) {
+  if (!HUBSPOT_ACCESS_TOKEN || !Array.isArray(filterGroups) || !filterGroups.length) return [];
+
+  const properties = Array.from(new Set([
+    HUBSPOT_PROPERTY.firstname,
+    HUBSPOT_PROPERTY.lastname,
+    HUBSPOT_PROPERTY.phone,
+    'mobilephone',
+    HUBSPOT_PROPERTY.whatsappPhoneRaw,
+    HUBSPOT_PROPERTY.whatsappPhoneNormalized,
+    HUBSPOT_PROPERTY.whatsappProfileName,
+    HUBSPOT_PROPERTY.fechaNacimiento,
+    ...extraProperties,
+  ]));
+
+  let after = undefined;
+  const all = [];
+
+  while (true) {
+    const body = {
+      filterGroups,
+      limit,
+      properties,
+      ...(after ? { after } : {}),
+    };
+
+    const data = await hubspotRequest('post', '/crm/v3/objects/contacts/search', body);
+    const rows = Array.isArray(data?.results) ? data.results : [];
+    all.push(...rows);
+
+    const nextAfter = data?.paging?.next?.after;
+    if (!nextAfter) break;
+    after = nextAfter;
+  }
+
+  return all;
+}
+
+function getTodayPartsInSalonTZ() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+
+  const get = (t) => parts.find((p) => p.type === t)?.value || '';
+  return {
+    year: get('year'),
+    month: get('month'),
+    day: get('day'),
+    ymd: `${get('year')}-${get('month')}-${get('day')}`,
+  };
+}
+
+function parseHubSpotBirthdayMonthDay(rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) return null;
+
+  if (/^\d{11,15}$/.test(raw)) {
+    const n = Number(raw);
+    if (Number.isFinite(n)) {
+      const d = new Date(n);
+      if (!Number.isNaN(d.getTime())) {
+        return {
+          month: String(d.getUTCMonth() + 1).padStart(2, '0'),
+          day: String(d.getUTCDate()).padStart(2, '0'),
+          iso: d.toISOString(),
+        };
+      }
+    }
+  }
+
+  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) {
+    return {
+      month: iso[2],
+      day: iso[3],
+      iso: raw,
+    };
+  }
+
+  const d = new Date(raw);
+  if (!Number.isNaN(d.getTime())) {
+    return {
+      month: String(d.getUTCMonth() + 1).padStart(2, '0'),
+      day: String(d.getUTCDate()).padStart(2, '0'),
+      iso: d.toISOString(),
+    };
+  }
+
+  return null;
+}
+
+function getBestContactPhoneForBirthday(props = {}) {
+  return (
+    props[HUBSPOT_PROPERTY.whatsappPhoneNormalized] ||
+    props[HUBSPOT_PROPERTY.whatsappPhoneRaw] ||
+    props.mobilephone ||
+    props[HUBSPOT_PROPERTY.phone] ||
+    ''
+  );
+}
+
+function getBestContactNameForBirthday(props = {}) {
+  const full = [props.firstname || '', props.lastname || ''].filter(Boolean).join(' ').trim();
+  if (full) return titleCaseName(full);
+  if (props[HUBSPOT_PROPERTY.whatsappProfileName]) return titleCaseName(props[HUBSPOT_PROPERTY.whatsappProfileName]);
+  return '';
+}
+
+function getBestContactFirstNameForBirthday(props = {}) {
+  const first = titleCaseName(props.firstname || '');
+  if (first) return first;
+  const fallback = getBestContactNameForBirthday(props);
+  return titleCaseName((fallback || '').split(' ')[0] || '');
+}
+
+function buildBirthdayMessage(contactProps = {}) {
+  const firstName = getBestContactFirstNameForBirthday(contactProps);
+  return `${firstName ? `¡Feliz cumpleaños, ${firstName}!` : '¡Feliz cumpleaños!'} 🎉💖
+
+Hoy queremos saludarte con mucho cariño de parte de todo el salón de Cataleya.
+Gracias por ser parte de esta familia tan linda. Esperamos que tengas un día hermoso, lleno de alegría y cosas lindas ✨
+
+Por ser alumno/a especial, hoy tenés un beneficio exclusivo para productos de Cataleya.
+Si quiere, le cuento cuál es la promo disponible 😊`;
+}
+
+async function wasBirthdayMessageSentToday(hubspotContactId, ymd) {
+  const r = await db.query(
+    `SELECT 1
+       FROM birthday_message_logs
+      WHERE hubspot_contact_id = $1
+        AND sent_date = $2::date
+      LIMIT 1`,
+    [String(hubspotContactId), String(ymd)]
+  );
+  return !!r.rows?.length;
+}
+
+async function logBirthdayMessage({ hubspotContactId, waPhone, sentDate, contactName, birthdayValue, messageText }) {
+  await db.query(
+    `INSERT INTO birthday_message_logs (
+      hubspot_contact_id, wa_phone, sent_date, contact_name, birthday_value, message_text
+    ) VALUES ($1,$2,$3::date,$4,$5,$6)
+    ON CONFLICT (hubspot_contact_id, sent_date) DO NOTHING`,
+    [
+      String(hubspotContactId),
+      normalizePhone(waPhone || ''),
+      String(sentDate),
+      String(contactName || ''),
+      String(birthdayValue || ''),
+      String(messageText || ''),
+    ]
+  );
+}
+
+async function processBirthdayMessages() {
+  if (!ENABLE_BIRTHDAY_MESSAGES || !hasHubSpotEnabled()) return;
+
+  const today = getTodayPartsInSalonTZ();
+
+  let contacts = [];
+  try {
+    contacts = await searchHubSpotContactsPaged([
+      {
+        filters: [
+          {
+            propertyName: HUBSPOT_PROPERTY.fechaNacimiento,
+            operator: 'HAS_PROPERTY',
+          }
+        ]
+      }
+    ], 200, [HUBSPOT_PROPERTY.fechaNacimiento]);
+  } catch (e) {
+    console.error('❌ Error buscando cumpleaños en HubSpot:', e?.response?.data || e?.message || e);
+    return;
+  }
+
+  for (const contact of (contacts || [])) {
+    try {
+      const props = contact?.properties || {};
+      const rawBirthday = props[HUBSPOT_PROPERTY.fechaNacimiento];
+      const parsed = parseHubSpotBirthdayMonthDay(rawBirthday);
+      if (!parsed) continue;
+      if (parsed.month !== today.month || parsed.day !== today.day) continue;
+
+      const recipient = normalizeWhatsAppRecipient(getBestContactPhoneForBirthday(props));
+      if (!recipient) continue;
+
+      const alreadySent = await wasBirthdayMessageSentToday(contact.id, today.ymd);
+      if (alreadySent) continue;
+
+      const messageText = buildBirthdayMessage(props);
+      await sendWhatsAppText(recipient, messageText);
+
+      await logBirthdayMessage({
+        hubspotContactId: contact.id,
+        waPhone: recipient,
+        sentDate: today.ymd,
+        contactName: getBestContactNameForBirthday(props),
+        birthdayValue: rawBirthday,
+        messageText,
+      });
+
+      console.log(`🎂 Feliz cumpleaños enviado a ${recipient} (${contact.id})`);
+    } catch (e) {
+      console.error('❌ Error enviando cumpleaños:', e?.response?.data || e?.message || e);
     }
   }
 }
@@ -12955,6 +13190,17 @@ if (ENABLE_COMMERCIAL_FOLLOWUPS) {
   console.log("ℹ️ Follow-up comercial desactivado");
 }
 
+// ===================== CUMPLEAÑOS =====================
+if (ENABLE_BIRTHDAY_MESSAGES) {
+  setInterval(() => {
+    processBirthdayMessages().catch((e) => {
+      console.error("❌ Error en el scheduler de cumpleaños:", e?.response?.data || e?.message || e);
+    });
+  }, BIRTHDAY_SCAN_MS);
+} else {
+  console.log("ℹ️ Mensajes de cumpleaños desactivados");
+}
+
 // ===================== START =====================
 const PORT = process.env.PORT || 3000;
 
@@ -12963,6 +13209,7 @@ const PORT = process.env.PORT || 3000;
   await ensureAppointmentTables();
   await ensureCourseEnrollmentTables();
   await ensureCommercialFollowupTables();
+  await ensureBirthdayMessageTables();
   console.log(hasHubSpotEnabled()
     ? "✅ HubSpot CRM habilitado para seguimiento al cierre de charla"
     : "⚠️ HubSpot CRM no configurado: falta HUBSPOT_ACCESS_TOKEN / HUBSPOT_TOKEN");
@@ -12975,6 +13222,9 @@ const PORT = process.env.PORT || 3000;
   console.log(ENABLE_COMMERCIAL_FOLLOWUPS
     ? "ℹ️ Follow-up comercial activado"
     : "ℹ️ Follow-up comercial desactivado");
+  console.log(ENABLE_BIRTHDAY_MESSAGES
+    ? "ℹ️ Mensajes de cumpleaños activados"
+    : "ℹ️ Mensajes de cumpleaños desactivados");
   console.log(hasGoogleContactsSyncEnabled()
     ? `ℹ️ Google Contacts sincronizado en ${GOOGLE_CONTACTS_TARGETS.map((x) => x.email).join(' y ')}`
     : "ℹ️ Google Contacts no configurado para sincronización automática");
@@ -12986,6 +13236,11 @@ const PORT = process.env.PORT || 3000;
   if (ENABLE_COMMERCIAL_FOLLOWUPS) {
     await processCommercialFollowups().catch((e) => {
       console.error('❌ Error inicial procesando follow-up comercial:', e?.response?.data || e?.message || e);
+    });
+  }
+  if (ENABLE_BIRTHDAY_MESSAGES) {
+    await processBirthdayMessages().catch((e) => {
+      console.error('❌ Error inicial procesando cumpleaños:', e?.response?.data || e?.message || e);
     });
   }
 
