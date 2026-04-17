@@ -8,6 +8,10 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { Pool } = require("pg");
+let XLSX = null;
+try { XLSX = require("xlsx"); } catch {}
+let multer = null;
+try { multer = require("multer"); } catch {}
 const CLIENT_ID = "CATALEYA";
 // ===================== ✅ PDF (documentos) =====================
 // Intentamos extraer texto de PDFs si está instalado 'pdf-parse'.
@@ -896,8 +900,802 @@ async function dbInsertMessage({ direction, wa_peer, name, text, msg_type, wa_ms
   );
 }
 
+
+// ===================== DIFUSIÓN DIARIA (EXCEL -> COLA -> ENVÍO) =====================
+const BROADCAST_MESSAGES = [
+  'Buen día 😊 Desde Cataleya queríamos avisarte que seguimos con lugares disponibles en nuestros talleres de peinados, trenzas africanas y pinta caritas. Si te interesa, te paso la info.',
+  'Hola 😊 Te escribimos desde Cataleya porque esta semana seguimos tomando inscripciones para nuestros talleres. Si querés, te cuento cuáles están disponibles ahora.',
+  'Buen día ✨ Estamos organizando nuevas inscripciones en Cataleya para talleres de peinados, trenzas africanas y pinta caritas. Si querés avanzar, te paso toda la info.',
+  'Hola, ¿cómo estás? 😊 Desde Cataleya queríamos contarte que seguimos con cupos para algunos talleres. Si te interesa, te digo cuáles quedan disponibles.',
+  'Buenas 😊 Te escribimos desde Cataleya porque aún hay lugares en algunos de nuestros talleres. Si querés, te cuento opciones y cómo reservar.',
+  'Buen día 💛 Queríamos avisarte que en Cataleya seguimos con inscripciones abiertas en talleres seleccionados. Si te interesa, te paso más información.',
+  'Hola 😊 Desde Cataleya queríamos acercarte esta info: todavía hay cupos en algunos talleres y si querés te orientamos según lo que más te interese.',
+  'Buen día ✨ Seguimos sumando inscripciones en Cataleya para distintos talleres. Si querés, te paso la propuesta disponible en este momento.',
+  'Hola, ¿cómo estás? 😊 Te escribimos desde Cataleya porque quizá te interese saber que todavía hay algunos cupos en talleres. Si querés, te cuento.',
+  'Buenas 💛 Desde Cataleya queríamos consultarte si seguís interesada en nuestros talleres. Si te interesa, te paso la info actualizada.',
+  'Buen día 😊 En Cataleya seguimos con consultas e inscripciones para talleres de peinados, trenzas africanas y pinta caritas. Si querés, te explico cómo sería.',
+  'Hola ✨ Te escribimos desde Cataleya porque todavía tenemos lugares en algunos talleres. Si te interesa, te paso toda la información sin compromiso.',
+  'Buen día 😊 Queríamos avisarte que en Cataleya siguen disponibles algunos talleres y si querés te puedo orientar con el que más te convenga.',
+  'Hola 💛 Desde Cataleya seguimos con cupos en talleres seleccionados. Si te interesa, te paso cuáles están disponibles y cómo reservar lugar.',
+  'Buenas 😊 Te escribimos porque en Cataleya todavía quedan lugares en algunos talleres. Si querés, te paso info y opciones para avanzar.',
+  'Buen día ✨ Queríamos comentarte que en Cataleya seguimos con inscripciones para talleres. Si querés, te paso lo disponible y te explico.',
+  'Hola 😊 Desde Cataleya queríamos acercarte esta propuesta porque aún hay cupos para algunos talleres. Si te interesa, te digo cuáles.',
+  'Buen día 💛 Estamos organizando nuevas reservas en Cataleya para talleres seleccionados. Si te interesa, te paso la info actual.',
+  'Hola, ¿cómo estás? 😊 Te escribimos desde Cataleya porque todavía hay posibilidades de sumarte a algunos talleres. Si querés, te cuento.',
+  'Buenas ✨ Seguimos con algunos lugares disponibles en talleres de Cataleya. Si te interesa, te explico cuáles están abiertos ahora.',
+  'Buen día 😊 Desde Cataleya queríamos avisarte que todavía estás a tiempo de consultar por algunos talleres. Si querés, te paso información.',
+  'Hola 💛 Te escribimos desde Cataleya porque siguen abiertas algunas inscripciones. Si te interesa, te cuento cómo podés avanzar.',
+  'Buen día ✨ En Cataleya seguimos con propuestas de talleres y todavía hay cupos en algunos casos. Si querés, te digo cuáles quedan.',
+  'Hola 😊 Queríamos acercarte esta info desde Cataleya: aún hay talleres con lugar disponible. Si te interesa, te paso el detalle.',
+  'Buenas 💛 Desde Cataleya seguimos tomando consultas para talleres. Si te interesa, te puedo pasar la información ahora mismo.',
+  'Buen día 😊 Te escribimos desde Cataleya porque quizás todavía te interese sumarte a alguno de nuestros talleres. Si querés, te paso la info.',
+  'Hola ✨ En Cataleya todavía tenemos cupos en algunos talleres. Si te interesa, te cuento opciones y cómo reservar.',
+  'Buen día 💛 Seguimos con inscripciones abiertas en Cataleya para talleres seleccionados. Si te interesa, te paso todo por acá.',
+  'Hola 😊 Desde Cataleya queríamos contarte que aún hay algunos talleres con lugar disponible. Si querés, te paso la info actualizada.',
+  'Buenas ✨ Te escribimos desde Cataleya porque seguimos con consultas e inscripciones para talleres. Si te interesa, te explico cómo sería.',
+];
+
+function broadcastNormalizeHeader(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function broadcastCleanText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function broadcastFirstName(value) {
+  const txt = broadcastCleanText(value);
+  if (!txt) return '';
+  return txt.split(' ')[0] || '';
+}
+
+function broadcastSafeJson(value, fallback) {
+  try {
+    return JSON.stringify(value ?? fallback ?? []);
+  } catch {
+    return JSON.stringify(fallback ?? []);
+  }
+}
+
+function broadcastParseJsonArray(value) {
+  if (!value) return [];
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    return Array.isArray(parsed) ? parsed.map((x) => broadcastCleanText(x)).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function broadcastLocalDateParts(date = new Date(), offsetMinutes = -180) {
+  const shifted = new Date(date.getTime() + offsetMinutes * 60000);
+  return {
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth() + 1,
+    day: shifted.getUTCDate(),
+    hour: shifted.getUTCHours(),
+    minute: shifted.getUTCMinutes(),
+  };
+}
+
+function broadcastFormatYMD(parts) {
+  const mm = String(parts.month).padStart(2, '0');
+  const dd = String(parts.day).padStart(2, '0');
+  return `${parts.year}-${mm}-${dd}`;
+}
+
+function broadcastTodayYMD() {
+  return broadcastFormatYMD(broadcastLocalDateParts(new Date(), -180));
+}
+
+function broadcastParseYMD(ymd) {
+  const m = String(ymd || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) throw new Error(`Fecha inválida: ${ymd}`);
+  return { year: Number(m[1]), month: Number(m[2]), day: Number(m[3]) };
+}
+
+function broadcastAddDaysYMD(ymd, days) {
+  const base = broadcastParseYMD(ymd);
+  const dt = new Date(Date.UTC(base.year, base.month - 1, base.day + Number(days || 0)));
+  return broadcastFormatYMD({
+    year: dt.getUTCFullYear(),
+    month: dt.getUTCMonth() + 1,
+    day: dt.getUTCDate(),
+  });
+}
+
+function broadcastUtcDateFromLocalYMDHM(ymd, hour, minute, offsetMinutes = -180) {
+  const parts = broadcastParseYMD(ymd);
+  const utcMillis = Date.UTC(parts.year, parts.month - 1, parts.day, hour, minute, 0, 0) - (offsetMinutes * 60000);
+  return new Date(utcMillis);
+}
+
+function broadcastParseHM(value) {
+  const m = String(value || '').match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) throw new Error(`Hora inválida: ${value}`);
+  return { hour: Number(m[1]), minute: Number(m[2]) };
+}
+
+function broadcastLocalMinutesOfDay(date = new Date()) {
+  const parts = broadcastLocalDateParts(date, -180);
+  return parts.hour * 60 + parts.minute;
+}
+
+function broadcastMaxWindowMinutes(windows = BROADCAST_WINDOWS) {
+  return windows.reduce((max, row) => {
+    const end = broadcastParseHM(row.end);
+    return Math.max(max, end.hour * 60 + end.minute);
+  }, 0);
+}
+
+function broadcastChooseStartYMD(startYMD = '') {
+  if (startYMD) return startYMD;
+  const today = broadcastTodayYMD();
+  const nowLocalMinutes = broadcastLocalMinutesOfDay(new Date());
+  return nowLocalMinutes > broadcastMaxWindowMinutes(BROADCAST_WINDOWS)
+    ? broadcastAddDaysYMD(today, 1)
+    : today;
+}
+
+function broadcastShuffle(array) {
+  const out = array.slice();
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+function broadcastBuildCandidateTimesForDay(ymd, minDate = null) {
+  const candidates = [];
+  for (const row of BROADCAST_WINDOWS) {
+    const start = broadcastParseHM(row.start);
+    const end = broadcastParseHM(row.end);
+    let m = start.hour * 60 + start.minute;
+    const endMinutes = end.hour * 60 + end.minute;
+    while (m <= endMinutes) {
+      const hour = Math.floor(m / 60);
+      const minute = m % 60;
+      const dt = broadcastUtcDateFromLocalYMDHM(ymd, hour, minute, -180);
+      if (!minDate || dt.getTime() > minDate.getTime()) candidates.push(dt);
+      m += BROADCAST_SLOT_GRANULARITY_MINUTES;
+    }
+  }
+  return candidates;
+}
+
+function broadcastPickRandomTimes(ymd, count, minDate = null) {
+  if (count <= 0) return [];
+  const candidates = broadcastBuildCandidateTimesForDay(ymd, minDate);
+  if (!candidates.length) return [];
+  const picks = broadcastShuffle(candidates).slice(0, Math.min(count, candidates.length));
+  return picks.sort((a, b) => a.getTime() - b.getTime());
+}
+
+function broadcastRenderMessage(template, row = {}) {
+  const name = broadcastFirstName(row.contact_name || row.profile_name || '');
+  let out = String(template || '');
+  out = out.replace(/\{nombre\}/gi, name);
+  out = out.replace(/\s+([,.!?;:])/g, '$1');
+  out = out.replace(/[ \t]+/g, ' ');
+  out = out.replace(/\n{3,}/g, '\n\n');
+  return out.trim();
+}
+
+function broadcastDefaultOfferFromRow(row = {}) {
+  const type = broadcastCleanText(row.offer_type || '').toUpperCase();
+  const selected = broadcastCleanText(row.offer_selected_name || '');
+  const items = broadcastParseJsonArray(row.offer_items_json || row.offer_items || []);
+  if (!items.length && selected) items.push(selected);
+  return { type, selectedName: selected, items };
+}
+
+function broadcastCanOperate() {
+  if (!ENABLE_DAILY_BROADCAST) return false;
+  return !!XLSX;
+}
+
+function broadcastExcelExists(excelPath = BROADCAST_EXCEL_PATH) {
+  const target = String(excelPath || '').trim();
+  if (!target) return false;
+  try {
+    return fs.existsSync(target);
+  } catch {
+    return false;
+  }
+}
+
+async function ensureBroadcastTables() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS broadcast_campaigns (
+      id BIGSERIAL PRIMARY KEY,
+      campaign_name TEXT NOT NULL UNIQUE,
+      source_file TEXT,
+      daily_pattern_json JSONB NOT NULL DEFAULT '[30,15,10]'::jsonb,
+      timezone TEXT NOT NULL DEFAULT 'America/Argentina/Salta',
+      windows_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS broadcast_queue (
+      id BIGSERIAL PRIMARY KEY,
+      campaign_name TEXT NOT NULL,
+      source_file TEXT,
+      source_row INTEGER,
+      contact_name TEXT,
+      profile_name TEXT,
+      wa_phone TEXT NOT NULL,
+      wa_id TEXT,
+      custom_message TEXT,
+      message_index INTEGER,
+      message_text TEXT,
+      offer_type TEXT,
+      offer_items_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      offer_selected_name TEXT,
+      schedule_day DATE,
+      send_at TIMESTAMPTZ,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      sent_at TIMESTAMPTZ,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT broadcast_queue_status_chk CHECK (status IN ('pending','processing','sent','error','skipped')),
+      CONSTRAINT broadcast_queue_campaign_fk FOREIGN KEY (campaign_name) REFERENCES broadcast_campaigns(campaign_name) ON DELETE CASCADE,
+      CONSTRAINT broadcast_queue_unique_contact UNIQUE (campaign_name, wa_phone)
+    )
+  `);
+
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_broadcast_queue_pending_send_at ON broadcast_queue(status, send_at)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_broadcast_queue_campaign_status ON broadcast_queue(campaign_name, status)`);
+}
+
+async function upsertBroadcastCampaign({
+  campaignName = BROADCAST_CAMPAIGN_NAME,
+  sourceFile = BROADCAST_EXCEL_PATH,
+  pattern = BROADCAST_PATTERN_SAFE,
+  isActive = true,
+} = {}) {
+  const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
+  await db.query(
+    `INSERT INTO broadcast_campaigns (campaign_name, source_file, daily_pattern_json, timezone, windows_json, is_active, updated_at)
+     VALUES ($1, $2, $3::jsonb, $4, $5::jsonb, $6, NOW())
+     ON CONFLICT (campaign_name)
+     DO UPDATE SET
+       source_file = EXCLUDED.source_file,
+       daily_pattern_json = EXCLUDED.daily_pattern_json,
+       timezone = EXCLUDED.timezone,
+       windows_json = EXCLUDED.windows_json,
+       is_active = EXCLUDED.is_active,
+       updated_at = NOW()`,
+    [
+      cleanCampaign,
+      broadcastCleanText(sourceFile),
+      broadcastSafeJson(pattern, [30, 15, 10]),
+      TIMEZONE,
+      broadcastSafeJson(BROADCAST_WINDOWS, []),
+      !!isActive,
+    ]
+  );
+  return cleanCampaign;
+}
+
+function broadcastPickColumn(row, alternatives = []) {
+  for (const key of alternatives) {
+    if (Object.prototype.hasOwnProperty.call(row, key) && row[key] !== undefined && row[key] !== null && String(row[key]).trim() !== '') {
+      return row[key];
+    }
+  }
+  return '';
+}
+
+async function importBroadcastContactsFromExcel({
+  campaignName = BROADCAST_CAMPAIGN_NAME,
+  excelPath = BROADCAST_EXCEL_PATH,
+  sourceFile = BROADCAST_EXCEL_PATH,
+  offerType = BROADCAST_OFFER_TYPE,
+  offerItems = BROADCAST_OFFER_ITEMS,
+  offerSelectedName = BROADCAST_OFFER_SELECTED_NAME,
+} = {}) {
+  if (!ENABLE_DAILY_BROADCAST) return { inserted: 0, skipped: 0, totalRows: 0, disabled: true, reason: 'feature_disabled' };
+  if (!XLSX) return { inserted: 0, skipped: 0, totalRows: 0, disabled: true, reason: 'xlsx_missing' };
+  if (!excelPath || !fs.existsSync(excelPath)) return { inserted: 0, skipped: 0, totalRows: 0, disabled: true, reason: 'excel_missing' };
+
+  const cleanCampaign = await upsertBroadcastCampaign({ campaignName, sourceFile });
+  const wb = XLSX.readFile(excelPath, { cellDates: false });
+  const firstSheet = wb.SheetNames[0];
+  if (!firstSheet) return { inserted: 0, skipped: 0, totalRows: 0, campaignName: cleanCampaign };
+
+  const rawRows = XLSX.utils.sheet_to_json(wb.Sheets[firstSheet], { defval: '' });
+  if (!rawRows.length) return { inserted: 0, skipped: 0, totalRows: 0, campaignName: cleanCampaign };
+
+  const rows = rawRows.map((row) => {
+    const obj = {};
+    for (const [key, value] of Object.entries(row)) obj[broadcastNormalizeHeader(key)] = value;
+    return obj;
+  });
+
+  let inserted = 0;
+  let skipped = 0;
+
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    const name = broadcastCleanText(broadcastPickColumn(row, ['nombre', 'name', 'contacto', 'cliente']));
+    const phoneRaw = broadcastPickColumn(row, ['numero', 'número', 'telefono', 'telefono_whatsapp', 'tel', 'celular', 'whatsapp', 'phone']);
+    const waPhone = normalizePhoneDigits(phoneRaw);
+    const profileName = broadcastCleanText(broadcastPickColumn(row, ['perfil', 'profile_name', 'nombre_perfil'])) || name;
+    const customMessage = broadcastCleanText(broadcastPickColumn(row, ['mensaje', 'message', 'custom_message']));
+    const offerTypeRow = broadcastCleanText(broadcastPickColumn(row, ['offer_type', 'tipo_oferta'])) || offerType;
+    const offerSelectedRow = broadcastCleanText(broadcastPickColumn(row, ['offer_selected_name', 'oferta_principal'])) || offerSelectedName;
+    const waId = broadcastCleanText(broadcastPickColumn(row, ['wa_id', 'whatsapp_id'])) || waPhone;
+
+    if (!waPhone) {
+      skipped += 1;
+      continue;
+    }
+
+    try {
+      const result = await db.query(
+        `INSERT INTO broadcast_queue (
+           campaign_name, source_file, source_row, contact_name, profile_name, wa_phone, wa_id,
+           custom_message, offer_type, offer_items_json, offer_selected_name, status, updated_at
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6, $7,
+           $8, $9, $10::jsonb, $11, 'pending', NOW()
+         )
+         ON CONFLICT (campaign_name, wa_phone) DO NOTHING`,
+        [
+          cleanCampaign,
+          broadcastCleanText(sourceFile || excelPath),
+          i + 2,
+          name,
+          profileName,
+          waPhone,
+          waId,
+          customMessage,
+          String(offerTypeRow || '').toUpperCase(),
+          broadcastSafeJson(offerItems, []),
+          offerSelectedRow,
+        ]
+      );
+      inserted += Number(result.rowCount || 0);
+      if (!result.rowCount) skipped += 1;
+    } catch {
+      skipped += 1;
+    }
+  }
+
+  return { inserted, skipped, totalRows: rows.length, campaignName: cleanCampaign };
+}
+
+async function getBroadcastPlanningState(campaignName) {
+  const existingDays = await db.query(
+    `SELECT schedule_day::text AS schedule_day
+       FROM broadcast_queue
+      WHERE campaign_name = $1
+        AND schedule_day IS NOT NULL
+      GROUP BY schedule_day
+      ORDER BY schedule_day ASC`,
+    [campaignName]
+  );
+
+  const maxScheduled = await db.query(
+    `SELECT MAX(schedule_day)::text AS max_day
+       FROM broadcast_queue
+      WHERE campaign_name = $1
+        AND schedule_day IS NOT NULL`,
+    [campaignName]
+  );
+
+  return {
+    existingDaysCount: existingDays.rows.length,
+    maxDay: broadcastCleanText(maxScheduled.rows?.[0]?.max_day || ''),
+  };
+}
+
+async function planBroadcastQueue({
+  campaignName = BROADCAST_CAMPAIGN_NAME,
+  startYMD = '',
+  pattern = BROADCAST_PATTERN_SAFE,
+} = {}) {
+  const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
+
+  const pending = await db.query(
+    `SELECT *
+       FROM broadcast_queue
+      WHERE campaign_name = $1
+        AND status = 'pending'
+        AND send_at IS NULL
+      ORDER BY id ASC`,
+    [cleanCampaign]
+  );
+
+  if (!pending.rows.length) {
+    return { scheduled: 0, daysUsed: 0, campaignName: cleanCampaign };
+  }
+
+  const planningState = await getBroadcastPlanningState(cleanCampaign);
+  const patternSafe = Array.isArray(pattern) && pattern.length ? pattern.map((n) => Math.max(0, Number(n || 0))).filter((n) => n > 0) : [30, 15, 10];
+
+  let dayCursor = planningState.maxDay ? broadcastAddDaysYMD(planningState.maxDay, 1) : broadcastChooseStartYMD(startYMD);
+  if (startYMD && !planningState.maxDay) dayCursor = startYMD;
+
+  let patternIndex = planningState.existingDaysCount % patternSafe.length;
+  let queueIndex = 0;
+  let daysUsed = 0;
+
+  while (queueIndex < pending.rows.length) {
+    const dayQuota = patternSafe[patternIndex % patternSafe.length];
+    let currentMinDate = null;
+    if (daysUsed === 0 && dayCursor === broadcastTodayYMD()) {
+      currentMinDate = new Date(Date.now() + 2 * 60 * 1000);
+    }
+
+    const slots = broadcastPickRandomTimes(dayCursor, dayQuota, currentMinDate);
+    if (!slots.length) {
+      dayCursor = broadcastAddDaysYMD(dayCursor, 1);
+      patternIndex += 1;
+      daysUsed += 1;
+      continue;
+    }
+
+    const batch = pending.rows.slice(queueIndex, queueIndex + slots.length);
+    for (let i = 0; i < batch.length; i += 1) {
+      const row = batch[i];
+      const slot = slots[i];
+      const messageIndex = row.message_index != null ? Number(row.message_index) : ((queueIndex + i) % BROADCAST_MESSAGES.length);
+      const baseMessage = broadcastCleanText(row.custom_message) || BROADCAST_MESSAGES[messageIndex % BROADCAST_MESSAGES.length] || '';
+      const finalMessage = broadcastRenderMessage(baseMessage, row);
+
+      await db.query(
+        `UPDATE broadcast_queue
+            SET schedule_day = $2,
+                send_at = $3,
+                message_index = $4,
+                message_text = $5,
+                updated_at = NOW()
+          WHERE id = $1`,
+        [row.id, dayCursor, slot.toISOString(), messageIndex, finalMessage]
+      );
+    }
+
+    queueIndex += batch.length;
+    dayCursor = broadcastAddDaysYMD(dayCursor, 1);
+    patternIndex += 1;
+    daysUsed += 1;
+  }
+
+  await upsertBroadcastCampaign({ campaignName: cleanCampaign, sourceFile: BROADCAST_EXCEL_PATH, pattern: patternSafe, isActive: true });
+  return { scheduled: pending.rows.length, daysUsed, campaignName: cleanCampaign };
+}
+
+async function ensureBroadcastCampaignLoaded({
+  campaignName = BROADCAST_CAMPAIGN_NAME,
+  excelPath = BROADCAST_EXCEL_PATH,
+  offerType = BROADCAST_OFFER_TYPE,
+  offerItems = BROADCAST_OFFER_ITEMS,
+  offerSelectedName = BROADCAST_OFFER_SELECTED_NAME,
+  startYMD = '',
+} = {}) {
+  if (!broadcastCanOperate()) {
+    return { ready: false, inserted: 0, skipped: 0, totalRows: 0, scheduled: 0, daysUsed: 0, reason: !ENABLE_DAILY_BROADCAST ? 'feature_disabled' : (!XLSX ? 'xlsx_missing' : 'excel_missing') };
+  }
+
+  const imported = await importBroadcastContactsFromExcel({
+    campaignName,
+    excelPath,
+    sourceFile: excelPath,
+    offerType,
+    offerItems,
+    offerSelectedName,
+  });
+
+  const planned = await planBroadcastQueue({ campaignName: imported.campaignName || campaignName, startYMD, pattern: BROADCAST_PATTERN_SAFE });
+  return { ready: true, ...imported, ...planned };
+}
+
+async function getBroadcastSummary(campaignName = BROADCAST_CAMPAIGN_NAME) {
+  const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
+  const summary = await db.query(
+    `SELECT
+        COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+        COUNT(*) FILTER (WHERE status = 'processing') AS processing,
+        COUNT(*) FILTER (WHERE status = 'sent') AS sent,
+        COUNT(*) FILTER (WHERE status = 'error') AS error,
+        COUNT(*) FILTER (WHERE status = 'skipped') AS skipped,
+        MIN(send_at) AS next_send_at,
+        MAX(send_at) AS last_send_at
+       FROM broadcast_queue
+      WHERE campaign_name = $1`,
+    [cleanCampaign]
+  );
+  return summary.rows?.[0] || {};
+}
+
+async function markBroadcastProcessing(id) {
+  const result = await db.query(
+    `UPDATE broadcast_queue
+        SET status = 'processing', attempts = attempts + 1, updated_at = NOW()
+      WHERE id = $1
+        AND status = 'pending'
+      RETURNING *`,
+    [id]
+  );
+  return result.rows[0] || null;
+}
+
+async function processBroadcastQueue() {
+  if (!broadcastCanOperate()) return { sent: 0, failed: 0, attempted: 0, ready: false };
+
+  await ensureBroadcastCampaignLoaded({
+    campaignName: BROADCAST_CAMPAIGN_NAME,
+    excelPath: BROADCAST_EXCEL_PATH,
+    offerType: BROADCAST_OFFER_TYPE,
+    offerItems: BROADCAST_OFFER_ITEMS,
+    offerSelectedName: BROADCAST_OFFER_SELECTED_NAME,
+  });
+
+  const due = await db.query(
+    `SELECT id
+       FROM broadcast_queue
+      WHERE status = 'pending'
+        AND send_at IS NOT NULL
+        AND send_at <= NOW()
+      ORDER BY send_at ASC, id ASC
+      LIMIT $1`,
+    [BROADCAST_MAX_PER_RUN]
+  );
+
+  let sent = 0;
+  let failed = 0;
+
+  for (const row of due.rows || []) {
+    const processing = await markBroadcastProcessing(row.id);
+    if (!processing) continue;
+
+    try {
+      const recipient = normalizeWhatsAppRecipient(processing.wa_phone);
+      if (!recipient) throw new Error('Número inválido');
+      const waId = broadcastCleanText(processing.wa_id) || recipient;
+      const messageText = broadcastCleanText(processing.message_text || processing.custom_message || '');
+      if (!messageText) throw new Error('Mensaje vacío');
+
+      await sendWhatsAppText(recipient, messageText);
+
+      pushHistory(waId, 'assistant', messageText);
+      updateLastCloseContext(waId, {
+        waId,
+        phone: recipient,
+        phoneRaw: processing.wa_phone,
+        name: processing.contact_name || processing.profile_name || '',
+        profileName: processing.profile_name || processing.contact_name || '',
+      });
+
+      const offer = broadcastDefaultOfferFromRow(processing);
+      if (offer.type && offer.items.length) {
+        setActiveAssistantOffer(waId, {
+          type: offer.type,
+          items: normalizeActiveOfferItems(offer.items),
+          selectedName: offer.selectedName || (offer.items.length === 1 ? offer.items[0] : ''),
+          mode: 'DETAIL',
+          questionKind: 'MANUAL_BROADCAST',
+          lastAssistantText: messageText,
+        });
+      }
+
+      await db.query(
+        `UPDATE broadcast_queue
+            SET status = 'sent', sent_at = NOW(), updated_at = NOW(), last_error = NULL
+          WHERE id = $1`,
+        [processing.id]
+      );
+      sent += 1;
+    } catch (e) {
+      await db.query(
+        `UPDATE broadcast_queue
+            SET status = 'error', last_error = $2, updated_at = NOW()
+          WHERE id = $1`,
+        [processing.id, String(e?.response?.data?.error?.message || e?.message || e).slice(0, 500)]
+      );
+      failed += 1;
+    }
+  }
+
+  return { sent, failed, attempted: due.rows.length, ready: true };
+}
+
+async function resetBroadcastErrorsToPending(campaignName = BROADCAST_CAMPAIGN_NAME) {
+  const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
+  const result = await db.query(
+    `UPDATE broadcast_queue
+        SET status = 'pending', last_error = NULL, updated_at = NOW()
+      WHERE campaign_name = $1
+        AND status = 'error'`,
+    [cleanCampaign]
+  );
+  return { restored: Number(result.rowCount || 0) };
+}
+
+async function clearBroadcastQueueForUpload(campaignName = BROADCAST_CAMPAIGN_NAME, replaceMode = 'append') {
+  const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
+  const mode = String(replaceMode || 'append').trim().toLowerCase();
+
+  if (mode === 'replace_all') {
+    const result = await db.query(`DELETE FROM broadcast_queue WHERE campaign_name = $1`, [cleanCampaign]);
+    return { deleted: Number(result.rowCount || 0), mode };
+  }
+
+  if (mode === 'replace_pending') {
+    const result = await db.query(
+      `DELETE FROM broadcast_queue
+        WHERE campaign_name = $1
+          AND status IN ('pending','processing','error','skipped')`,
+      [cleanCampaign]
+    );
+    return { deleted: Number(result.rowCount || 0), mode };
+  }
+
+  return { deleted: 0, mode: 'append' };
+}
+
 const app = express();
 app.use(express.json({ limit: "25mb" }));
+
+const broadcastUpload = multer ? multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }) : null;
+
+app.get("/broadcast/panel", (_req, res) => {
+  const actionUrl = '/broadcast/upload';
+  const html = `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Difusión Cataleya</title>
+  <style>
+    body { font-family: Arial, sans-serif; background:#f7f7f8; padding:24px; color:#111; }
+    .box { max-width: 720px; margin: 0 auto; background:#fff; border-radius:16px; padding:24px; box-shadow:0 10px 30px rgba(0,0,0,.08); }
+    h1 { margin-top:0; font-size:24px; }
+    label { display:block; margin:14px 0 6px; font-weight:600; }
+    input, select, button { width:100%; padding:12px; border-radius:10px; border:1px solid #d0d7de; box-sizing:border-box; }
+    button { background:#111827; color:#fff; border:none; cursor:pointer; margin-top:18px; }
+    .muted { color:#555; font-size:14px; }
+    .code { font-family: monospace; background:#f3f4f6; padding:3px 6px; border-radius:6px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>Subir Excel de difusión</h1>
+    <p class="muted">URL del bot: <span class="code">https://bot-cataleya.onrender.com</span></p>
+    <p class="muted">Columnas mínimas del Excel: <span class="code">Nombre</span> y <span class="code">Número</span>.</p>
+    <form action="${actionUrl}" method="post" enctype="multipart/form-data">
+      <label>Archivo Excel</label>
+      <input type="file" name="file" accept=".xlsx,.xls" required />
+
+      <label>Modo</label>
+      <select name="replace_mode">
+        <option value="append">Agregar a la cola actual</option>
+        <option value="replace_pending">Reemplazar pendientes/errores y dejar enviados</option>
+        <option value="replace_all">Borrar todo y empezar de cero</option>
+      </select>
+
+      <label>Nombre de campaña</label>
+      <input type="text" name="campaign_name" value="${BROADCAST_CAMPAIGN_NAME}" />
+
+      <button type="submit">Subir Excel</button>
+    </form>
+  </div>
+</body>
+</html>`;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  return res.status(200).send(html);
+});
+
+app.post("/broadcast/upload", (req, res, next) => {
+  if (!broadcastUpload) {
+    return res.status(500).json({ ok: false, error: 'multer_missing', message: 'Falta instalar multer: npm i multer' });
+  }
+  return broadcastUpload.single('file')(req, res, next);
+}, async (req, res) => {
+  try {
+    if (!XLSX) {
+      return res.status(500).json({ ok: false, error: 'xlsx_missing', message: 'Falta instalar xlsx: npm i xlsx' });
+    }
+    if (!req.file?.buffer || !req.file?.originalname) {
+      return res.status(400).json({ ok: false, error: 'file_missing', message: 'No recibí ningún archivo Excel.' });
+    }
+
+    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    const replaceMode = String(req.body?.replace_mode || 'append').trim().toLowerCase();
+    const tempPath = path.join(getTmpDir(), `broadcast-${Date.now()}-${req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`);
+
+    fs.writeFileSync(tempPath, req.file.buffer);
+    BROADCAST_EXCEL_PATH = tempPath;
+
+    const cleared = await clearBroadcastQueueForUpload(campaignName, replaceMode);
+    const data = await ensureBroadcastCampaignLoaded({
+      campaignName,
+      excelPath: tempPath,
+      offerType: BROADCAST_OFFER_TYPE,
+      offerItems: BROADCAST_OFFER_ITEMS,
+      offerSelectedName: BROADCAST_OFFER_SELECTED_NAME,
+    });
+
+    return res.json({
+      ok: true,
+      upload_url: 'https://bot-cataleya.onrender.com/broadcast/upload',
+      panel_url: 'https://bot-cataleya.onrender.com/broadcast/panel',
+      replace_mode: replaceMode,
+      cleared,
+      excel_path: tempPath,
+      ...data,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || 'error_broadcast_upload' });
+  }
+});
+
+app.get("/broadcast/status", async (_req, res) => {
+  try {
+    const summary = await getBroadcastSummary(BROADCAST_CAMPAIGN_NAME);
+    return res.json({
+      ok: true,
+      enabled: ENABLE_DAILY_BROADCAST,
+      ready: broadcastCanOperate(),
+      excel_path: BROADCAST_EXCEL_PATH,
+      excel_present: broadcastExcelExists(),
+      panel_url: 'https://bot-cataleya.onrender.com/broadcast/panel',
+      upload_url: 'https://bot-cataleya.onrender.com/broadcast/upload',
+      campaign_name: BROADCAST_CAMPAIGN_NAME,
+      daily_pattern: BROADCAST_PATTERN_SAFE,
+      summary,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || 'error_broadcast_status' });
+  }
+});
+
+app.post("/broadcast/import", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const excelPath = String(body.excel_path || BROADCAST_EXCEL_PATH || '').trim();
+    if (!excelPath || !fs.existsSync(excelPath)) {
+      return res.status(400).json({ ok: false, error: 'excel_missing', message: 'No hay ninguna lista de Excel cargada todavía. Subila en https://bot-cataleya.onrender.com/broadcast/panel o por POST a /broadcast/upload.' });
+    }
+
+    const data = await ensureBroadcastCampaignLoaded({
+      campaignName: String(body.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME,
+      excelPath,
+      offerType: String(body.offer_type || BROADCAST_OFFER_TYPE || '').trim().toUpperCase() || BROADCAST_OFFER_TYPE,
+      offerItems: Array.isArray(body.offer_items) && body.offer_items.length ? body.offer_items : BROADCAST_OFFER_ITEMS,
+      offerSelectedName: String(body.offer_selected_name || BROADCAST_OFFER_SELECTED_NAME || '').trim() || BROADCAST_OFFER_SELECTED_NAME,
+      startYMD: String(body.start_ymd || '').trim(),
+    });
+
+    return res.json({ ok: true, ...data });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || 'error_broadcast_import' });
+  }
+});
+
+app.post("/broadcast/retry-errors", async (req, res) => {
+  try {
+    const data = await resetBroadcastErrorsToPending(String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME);
+    return res.json({ ok: true, ...data });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || 'error_broadcast_retry' });
+  }
+});
 
 // ===================== CONFIG =====================
 const DRIVE_FOLDER_ID = "1pKCqh1HEvQaI6XQ85ST8yvzxYWRXpxM1";
@@ -923,6 +1721,30 @@ const COMMERCIAL_PROMO_DISCOUNT_PERCENT = Number(process.env.COMMERCIAL_PROMO_DI
 
 const ENABLE_BIRTHDAY_MESSAGES = String(process.env.ENABLE_BIRTHDAY_MESSAGES || "true").toLowerCase() === "true";
 const BIRTHDAY_SCAN_MS = Number(process.env.BIRTHDAY_SCAN_MS || 60 * 60 * 1000);
+
+// ===================== DIFUSIÓN DIARIA DESDE EXCEL =====================
+const ENABLE_DAILY_BROADCAST = String(process.env.ENABLE_DAILY_BROADCAST || "true").toLowerCase() === "true";
+const BROADCAST_SCAN_MS = Number(process.env.BROADCAST_SCAN_MS || 60000);
+const BROADCAST_MAX_PER_RUN = Number(process.env.BROADCAST_MAX_PER_RUN || 6);
+let BROADCAST_EXCEL_PATH = String(process.env.BROADCAST_EXCEL_PATH || path.join(__dirname, "broadcast_clientes.xlsx")).trim();
+const BROADCAST_CAMPAIGN_NAME = String(process.env.BROADCAST_CAMPAIGN_NAME || "difusion_diaria").trim() || "difusion_diaria";
+const BROADCAST_AUTO_IMPORT_ON_START = String(process.env.BROADCAST_AUTO_IMPORT_ON_START || "true").toLowerCase() === "true";
+const BROADCAST_OFFER_TYPE = String(process.env.BROADCAST_OFFER_TYPE || "COURSE").trim().toUpperCase() || "COURSE";
+const BROADCAST_OFFER_ITEMS = String(process.env.BROADCAST_OFFER_ITEMS || "Taller de Peinados|Taller de Trenzas Africanas|Taller de Pinta Caritas")
+  .split("|")
+  .map((x) => String(x || "").trim())
+  .filter(Boolean);
+const BROADCAST_OFFER_SELECTED_NAME = String(process.env.BROADCAST_OFFER_SELECTED_NAME || "Talleres Cataleya").trim();
+const BROADCAST_WINDOWS = [
+  { start: '10:15', end: '12:45' },
+  { start: '17:10', end: '21:10' },
+];
+const BROADCAST_DAILY_PATTERN = String(process.env.BROADCAST_DAILY_PATTERN || '30,15,10')
+  .split(',')
+  .map((x) => Number(String(x || '').trim()))
+  .filter((n) => Number.isFinite(n) && n > 0);
+const BROADCAST_PATTERN_SAFE = BROADCAST_DAILY_PATTERN.length ? BROADCAST_DAILY_PATTERN : [30, 15, 10];
+const BROADCAST_SLOT_GRANULARITY_MINUTES = 5;
 
 
 // ===================== HUBSPOT (CRM seguimiento) =====================
@@ -13655,6 +14477,17 @@ if (ENABLE_COMMERCIAL_FOLLOWUPS) {
   console.log("ℹ️ Follow-up comercial desactivado");
 }
 
+// ===================== DIFUSIÓN DIARIA =====================
+if (ENABLE_DAILY_BROADCAST) {
+  setInterval(() => {
+    processBroadcastQueue().catch((e) => {
+      console.error("❌ Error en el scheduler de difusión diaria:", e?.response?.data || e?.message || e);
+    });
+  }, BROADCAST_SCAN_MS);
+} else {
+  console.log("ℹ️ Difusión diaria desactivada");
+}
+
 // ===================== CUMPLEAÑOS =====================
 if (ENABLE_BIRTHDAY_MESSAGES) {
   setInterval(() => {
@@ -13675,6 +14508,7 @@ const PORT = process.env.PORT || 3000;
   await ensureCourseEnrollmentTables();
   await ensureCommercialFollowupTables();
   await ensureBirthdayMessageTables();
+  await ensureBroadcastTables();
   console.log(hasHubSpotEnabled()
     ? "✅ HubSpot CRM habilitado para seguimiento al cierre de charla"
     : "⚠️ HubSpot CRM no configurado: falta HUBSPOT_ACCESS_TOKEN / HUBSPOT_TOKEN");
@@ -13692,6 +14526,11 @@ const PORT = process.env.PORT || 3000;
   console.log(ENABLE_BIRTHDAY_MESSAGES
     ? "ℹ️ Mensajes de cumpleaños activados"
     : "ℹ️ Mensajes de cumpleaños desactivados");
+  console.log(ENABLE_DAILY_BROADCAST
+    ? (broadcastExcelExists()
+        ? `ℹ️ Difusión diaria activada con Excel cargado en: ${BROADCAST_EXCEL_PATH}`
+        : 'ℹ️ Difusión diaria lista pero sin Excel cargado todavía. Subilo en https://bot-cataleya.onrender.com/broadcast/panel')
+    : "ℹ️ Difusión diaria desactivada");
   console.log(hasGoogleContactsSyncEnabled()
     ? `ℹ️ Google Contacts sincronizado en ${GOOGLE_CONTACTS_TARGETS.map((x) => x.email).join(' y ')}`
     : "ℹ️ Google Contacts no configurado para sincronización automática");
@@ -13714,6 +14553,20 @@ const PORT = process.env.PORT || 3000;
   if (ENABLE_BIRTHDAY_MESSAGES) {
     await processBirthdayMessages().catch((e) => {
       console.error('❌ Error inicial procesando cumpleaños:', e?.response?.data || e?.message || e);
+    });
+  }
+  if (ENABLE_DAILY_BROADCAST && BROADCAST_AUTO_IMPORT_ON_START) {
+    await ensureBroadcastCampaignLoaded({
+      campaignName: BROADCAST_CAMPAIGN_NAME,
+      excelPath: BROADCAST_EXCEL_PATH,
+      offerType: BROADCAST_OFFER_TYPE,
+      offerItems: BROADCAST_OFFER_ITEMS,
+      offerSelectedName: BROADCAST_OFFER_SELECTED_NAME,
+    }).catch((e) => {
+      console.error('❌ Error inicial preparando difusión diaria:', e?.response?.data || e?.message || e);
+    });
+    await processBroadcastQueue().catch((e) => {
+      console.error('❌ Error inicial procesando difusión diaria:', e?.response?.data || e?.message || e);
     });
   }
 
