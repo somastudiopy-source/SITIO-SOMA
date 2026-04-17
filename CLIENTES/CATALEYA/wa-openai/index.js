@@ -2434,7 +2434,7 @@ const dailyLeads = new Map();
 // ===================== HISTORIAL CORTO =====================
 const conversations = new Map();
 // ✅ MEMORIA: mantener contexto por al menos 10 horas
-const CONV_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 días // 10 horas
+const CONV_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 días
 
 
 function ensureConv(waId) {
@@ -2553,7 +2553,7 @@ function scheduleInactivityFollowUp(waId, phone) {
 const lastProductByUser = new Map();
 // ✅ Contexto de producto por usuario (para continuar la charla de forma fluida)
 const lastProductContextByUser = new Map();
-const PRODUCT_CONTEXT_TTL_MS = Number(process.env.PRODUCT_CONTEXT_TTL_MS || 45 * 60 * 1000);
+const PRODUCT_CONTEXT_TTL_MS = Number(process.env.PRODUCT_CONTEXT_TTL_MS || 7 * 24 * 60 * 60 * 1000);
 
 function getLastProductContext(waId) {
   const ctx = lastProductContextByUser.get(waId);
@@ -2633,7 +2633,7 @@ function looksLikeProductPreferenceReply(text) {
 const lastServiceByUser = new Map();
 // ✅ Contexto de cursos por usuario (para no perder continuidad entre preguntas)
 const lastCourseContextByUser = new Map();
-const COURSE_CONTEXT_TTL_MS = Number(process.env.COURSE_CONTEXT_TTL_MS || 45 * 60 * 1000);
+const COURSE_CONTEXT_TTL_MS = Number(process.env.COURSE_CONTEXT_TTL_MS || 7 * 24 * 60 * 60 * 1000);
 
 function getLastCourseContext(waId) {
   const ctx = lastCourseContextByUser.get(waId);
@@ -2665,7 +2665,7 @@ function clearLastCourseContext(waId) {
 // ✅ Última oferta/respuesta activa del asistente (para interpretar mejor respuestas como
 // "pasá fotos", "quiero ese", "más info", "quiero avanzar", etc.)
 const activeAssistantOfferByUser = new Map();
-const ACTIVE_ASSISTANT_OFFER_TTL_MS = Number(process.env.ACTIVE_ASSISTANT_OFFER_TTL_MS || 90 * 60 * 1000);
+const ACTIVE_ASSISTANT_OFFER_TTL_MS = Number(process.env.ACTIVE_ASSISTANT_OFFER_TTL_MS || 7 * 24 * 60 * 60 * 1000);
 
 function normalizeActiveOfferItems(items = []) {
   const out = [];
@@ -3119,7 +3119,7 @@ function mergeCourseContextRows(freshRows = [], previousRows = [], limit = 12) {
 
 const pendingAmbiguousBeautyByUser = new Map();
 const lastResolvedBeautyByUser = new Map();
-const BEAUTY_CONTEXT_TTL_MS = Number(process.env.BEAUTY_CONTEXT_TTL_MS || 45 * 60 * 1000);
+const BEAUTY_CONTEXT_TTL_MS = Number(process.env.BEAUTY_CONTEXT_TTL_MS || 7 * 24 * 60 * 60 * 1000);
 
 function getPendingAmbiguousBeauty(waId) {
   const row = pendingAmbiguousBeautyByUser.get(waId);
