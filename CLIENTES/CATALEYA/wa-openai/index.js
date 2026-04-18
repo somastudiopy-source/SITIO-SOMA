@@ -1929,7 +1929,8 @@ app.get("/broadcast/panel", async (req, res) => {
         <div class="stat"><span>Faltan</span><strong>${remaining}</strong></div>
         <div class="stat"><span>Días restantes</span><strong>${daysLeft}</strong></div>
       </div>
-      <p class="muted" style="margin-top:14px;">Programados para hoy: <span class="code">${Number(summary?.scheduled_today || 0)}</span> | Próximo envío: <span class="code">${summary?.next_send_at || '—'}</span></p>
+      <p class="muted" style="margin-top:14px;">Programados para hoy: <span class="code">${Number(summary?.scheduled_today || 0)}</span> | Próximo envío: <span id="next-send-human" class="code">${summary?.next_send_at || '—'}</span></p>
+      <p class="muted" style="margin-top:8px;">Faltan para el próximo envío: <span id="next-send-countdown" class="code">${summary?.next_send_at ? 'calculando...' : '—'}</span></p>
     </div>
 
     <div class="row">
@@ -1982,6 +1983,65 @@ app.get("/broadcast/panel", async (req, res) => {
       </form>
     </div>
   </div>
+  <script>
+    (function(){
+      const NEXT_SEND_AT_RAW = ${summary?.next_send_at ? JSON.stringify(summary.next_send_at) : 'null'};
+      const TIMEZONE_LABEL = ${JSON.stringify(TIMEZONE)};
+      const humanEl = document.getElementById('next-send-human');
+      const countdownEl = document.getElementById('next-send-countdown');
+
+      function two(n){ return String(n).padStart(2, '0'); }
+
+      function formatNextSend(date){
+        try {
+          return new Intl.DateTimeFormat('es-AR', {
+            timeZone: TIMEZONE_LABEL,
+            weekday: 'long',
+            day: '2-digit',
+            month: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+          }).format(date);
+        } catch (_) {
+          const d = date;
+          return two(d.getDate()) + '/' + two(d.getMonth()+1) + ' ' + two(d.getHours()) + ':' + two(d.getMinutes());
+        }
+      }
+
+      function renderCountdown(){
+        if (!humanEl || !countdownEl || !NEXT_SEND_AT_RAW) {
+          if (countdownEl && !NEXT_SEND_AT_RAW) countdownEl.textContent = '—';
+          return;
+        }
+
+        const target = new Date(NEXT_SEND_AT_RAW);
+        if (Number.isNaN(target.getTime())) {
+          humanEl.textContent = '—';
+          countdownEl.textContent = '—';
+          return;
+        }
+
+        humanEl.textContent = formatNextSend(target);
+
+        const now = new Date();
+        let diff = target.getTime() - now.getTime();
+        if (diff <= 0) {
+          countdownEl.textContent = '00:00:00';
+          return;
+        }
+
+        const totalSeconds = Math.floor(diff / 1000);
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+        countdownEl.textContent = two(hours) + ':' + two(minutes) + ':' + two(seconds);
+      }
+
+      renderCountdown();
+      setInterval(renderCountdown, 1000);
+    })();
+  </script>
 </body>
 </html>`;
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
