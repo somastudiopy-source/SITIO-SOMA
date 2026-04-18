@@ -11758,6 +11758,29 @@ async function classifyAppointmentDraftControl(text, context = {}) {
   const raw = String(text || '').trim();
   if (!raw) return { action: 'UNCLEAR', reason: '', source: 'empty' };
 
+  const flowStep = String(context.flowStep || '').trim();
+  const contactInfo = extractContactInfo(raw);
+  const cleanFullName = cleanNameCandidate(raw);
+  const rawPhone = sanitizePossiblePhone(raw);
+  const hasName = !!(contactInfo.nombre || cleanFullName);
+  const hasPhone = !!(contactInfo.telefono || rawPhone);
+
+  if (flowStep === 'awaiting_name' && hasName) {
+    return { action: 'CONTINUE_APPOINTMENT', reason: 'provided_name', source: 'deterministic' };
+  }
+
+  if (flowStep === 'awaiting_phone' && hasPhone) {
+    return { action: 'CONTINUE_APPOINTMENT', reason: 'provided_phone', source: 'deterministic' };
+  }
+
+  if (flowStep === 'awaiting_contact' && (hasName || hasPhone)) {
+    return { action: 'CONTINUE_APPOINTMENT', reason: 'provided_contact', source: 'deterministic' };
+  }
+
+  if (flowStep === 'ready_to_book' && (hasName || hasPhone || isLikelyPaymentText(raw))) {
+    return { action: 'CONTINUE_APPOINTMENT', reason: 'provided_completion_data', source: 'deterministic' };
+  }
+
   try {
     const completion = await openai.chat.completions.create({
       model: PRIMARY_MODEL,
@@ -11783,6 +11806,7 @@ Importante:
 - "quiero comprar un shampoo", "tenés fotos de las camillas", "qué cursos hay", "cancelar" => SWITCH_TOPIC si además cambia a otra consulta, o PAUSE_APPOINTMENT si solo corta el turno.
 - "no gracias" puede ser PAUSE_APPOINTMENT si solo cierra el tema del turno.
 - Si manda fecha, hora, nombre, teléfono o comprobante, casi siempre es CONTINUE_APPOINTMENT.
+- Si el flujo está esperando nombre o teléfono, respuestas como "María Tolaba", "Juan Pérez" o un número de celular son CONTINUE_APPOINTMENT.
 - Respuestas como "el lunes a las 17", "lunes 17 hs", "a las 17", "el martes" o similares son CONTINUE_APPOINTMENT.
 
 Respondé SOLO JSON.`
@@ -11794,7 +11818,7 @@ Respondé SOLO JSON.`
             servicio_actual: context.serviceName || '',
             fecha_actual: context.date || '',
             hora_actual: context.time || '',
-            flujo_actual: context.flowStep || '',
+            flujo_actual: flowStep,
             historial_reciente: context.historySnippet || '',
           })
         }
