@@ -1877,7 +1877,9 @@ async function processBroadcastQueue() {
       const messageText = await broadcastRenderMessageForSend(messageTemplate, processing);
       if (!messageText) throw new Error('Mensaje vacío');
 
-      const sendResponse = await sendWhatsAppText(recipient, messageText);
+      const sendResponse = await sendWhatsAppText(recipient, messageText, {
+        disableDedup: true,
+      });
       if (sendResponse?.deduped) {
         throw new Error('Envío deduplicado, no confirmado por WhatsApp');
       }
@@ -11388,48 +11390,57 @@ Respondé SOLO JSON.`
 }
 
 // ===================== WHATSAPP SEND =====================
-async function sendWhatsAppText(to, text) {
-let body = String(text || "");
-const oneShotPrefix = consumeOneShotReplyPrefix(to);
-if (oneShotPrefix) {
-  body = body ? `${oneShotPrefix}
+async function sendWhatsAppText(to, text, options = {}) {
+  const opts = (options && typeof options === 'object') ? options : {};
+  const disableDedup = !!opts.disableDedup;
+  const applyPrefix = opts.applyPrefix !== false;
 
-${body}`.trim() : String(oneShotPrefix || '').trim();
-}
-const dedupKey = `${to}::${body}`;
-const now = Date.now();
-const prevTs = lastSentOutByPeer.get(dedupKey) || 0;
-if (body && (now - prevTs) < OUT_DEDUP_MS) {
-  // No reenviar el mismo texto en ventana corta
-  return { deduped: true };
-}
-lastSentOutByPeer.set(dedupKey, now);
+  let body = String(text || "");
+  const oneShotPrefix = applyPrefix ? consumeOneShotReplyPrefix(to) : "";
+  if (oneShotPrefix) {
+    body = body ? `${oneShotPrefix}\n\n${body}`.trim() : String(oneShotPrefix || '').trim();
+  }
 
-  const resp = await axios.post(
-    `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
-    { messaging_product: "whatsapp", to, text: { body } },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-    }
-  );
+  const dedupKey = `${to}::${body}`;
+  const now = Date.now();
+  const prevTs = lastSentOutByPeer.get(dedupKey) || 0;
+  if (!disableDedup && body && (now - prevTs) < OUT_DEDUP_MS) {
+    return { deduped: true };
+  }
 
-  const wa_msg_id = resp?.data?.messages?.[0]?.id || null;
+  try {
+    const resp = await axios.post(
+      `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to, text: { body } },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
 
-  // ✅ Guardar mensaje SALIENTE (OUT) para que el panel lo vea
-  await dbInsertMessage({
-    direction: "out",
-    wa_peer: to,
-    name: null,
-    text: body,
-    msg_type: "text",
-    wa_msg_id,
-    raw: resp?.data || {},
-  });
+    // Solo marcamos dedupe local si Meta aceptó el envío.
+    if (body) lastSentOutByPeer.set(dedupKey, now);
 
-  return { ...(resp?.data || {}), wa_msg_id };
+    const wa_msg_id = resp?.data?.messages?.[0]?.id || null;
+
+    await dbInsertMessage({
+      direction: "out",
+      wa_peer: to,
+      name: null,
+      text: body,
+      msg_type: "text",
+      wa_msg_id,
+      raw: resp?.data || {},
+    });
+
+    return { ...(resp?.data || {}), wa_msg_id };
+  } catch (err) {
+    // Si falló, no dejamos bloqueado el reintento por dedupe local.
+    if (body) lastSentOutByPeer.delete(dedupKey);
+    throw err;
+  }
 }
 
 
@@ -11443,7 +11454,6 @@ async function sendWhatsAppTemplate(to, templateName, bodyVars = [], meta = {}) 
   const now = Date.now();
   const prevTs = lastSentOutByPeer.get(dedupKey) || 0;
   if ((now - prevTs) < OUT_DEDUP_MS) return { deduped: true };
-  lastSentOutByPeer.set(dedupKey, now);
 
   const components = body.length
     ? [{
@@ -11463,16 +11473,23 @@ async function sendWhatsAppTemplate(to, templateName, bodyVars = [], meta = {}) 
     },
   };
 
-  const resp = await axios.post(
-    `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
-    payload,
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-    }
-  );
+  let resp;
+  try {
+    resp = await axios.post(
+      `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      payload,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+    lastSentOutByPeer.set(dedupKey, now);
+  } catch (err) {
+    lastSentOutByPeer.delete(dedupKey);
+    throw err;
+  }
 
   const wa_msg_id = resp?.data?.messages?.[0]?.id || null;
   await dbInsertMessage({
