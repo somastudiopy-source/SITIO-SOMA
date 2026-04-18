@@ -1324,13 +1324,13 @@ async function ensureBroadcastTables() {
   await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS api_accepted_at TIMESTAMPTZ`);
   await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ`);
   await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ`);
-  await db.query(`UPDATE broadcast_queue SET status = 'sent_api' WHERE status = 'sent'`);
   await db.query(`ALTER TABLE broadcast_queue DROP CONSTRAINT IF EXISTS broadcast_queue_status_chk`);
   await db.query(`
     ALTER TABLE broadcast_queue
     ADD CONSTRAINT broadcast_queue_status_chk
     CHECK (status IN ('pending','processing','sent','sent_api','delivered','read','error','skipped'))
   `);
+  await db.query(`UPDATE broadcast_queue SET status = 'sent_api' WHERE status = 'sent'`);
   await db.query(`CREATE INDEX IF NOT EXISTS idx_broadcast_queue_pending_send_at ON broadcast_queue(status, send_at)`);
   await db.query(`CREATE INDEX IF NOT EXISTS idx_broadcast_queue_campaign_status ON broadcast_queue(campaign_name, status)`);
   await db.query(`CREATE INDEX IF NOT EXISTS idx_broadcast_queue_wa_message_id ON broadcast_queue(wa_message_id)`);
