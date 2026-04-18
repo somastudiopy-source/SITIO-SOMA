@@ -1296,6 +1296,8 @@ async function ensureBroadcastTables() {
       custom_message TEXT,
       message_index INTEGER,
       message_text TEXT,
+      wa_message_id TEXT,
+      delivery_status TEXT,
       offer_type TEXT,
       offer_items_json JSONB NOT NULL DEFAULT '[]'::jsonb,
       offer_selected_name TEXT,
@@ -1303,19 +1305,35 @@ async function ensureBroadcastTables() {
       send_at TIMESTAMPTZ,
       status TEXT NOT NULL DEFAULT 'pending',
       attempts INTEGER NOT NULL DEFAULT 0,
+      api_accepted_at TIMESTAMPTZ,
       sent_at TIMESTAMPTZ,
+      delivered_at TIMESTAMPTZ,
+      read_at TIMESTAMPTZ,
       last_error TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      CONSTRAINT broadcast_queue_status_chk CHECK (status IN ('pending','processing','sent','error','skipped')),
+      CONSTRAINT broadcast_queue_status_chk CHECK (status IN ('pending','processing','sent','sent_api','delivered','read','error','skipped')),
       CONSTRAINT broadcast_queue_campaign_fk FOREIGN KEY (campaign_name) REFERENCES broadcast_campaigns(campaign_name) ON DELETE CASCADE,
       CONSTRAINT broadcast_queue_unique_contact UNIQUE (campaign_name, wa_phone)
     )
   `);
 
   await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS messages_json JSONB NOT NULL DEFAULT '[]'::jsonb`);
+  await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS wa_message_id TEXT`);
+  await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS delivery_status TEXT`);
+  await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS api_accepted_at TIMESTAMPTZ`);
+  await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ`);
+  await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ`);
+  await db.query(`UPDATE broadcast_queue SET status = 'sent_api' WHERE status = 'sent'`);
+  await db.query(`ALTER TABLE broadcast_queue DROP CONSTRAINT IF EXISTS broadcast_queue_status_chk`);
+  await db.query(`
+    ALTER TABLE broadcast_queue
+    ADD CONSTRAINT broadcast_queue_status_chk
+    CHECK (status IN ('pending','processing','sent','sent_api','delivered','read','error','skipped'))
+  `);
   await db.query(`CREATE INDEX IF NOT EXISTS idx_broadcast_queue_pending_send_at ON broadcast_queue(status, send_at)`);
   await db.query(`CREATE INDEX IF NOT EXISTS idx_broadcast_queue_campaign_status ON broadcast_queue(campaign_name, status)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_broadcast_queue_wa_message_id ON broadcast_queue(wa_message_id)`);
 }
 
 async function upsertBroadcastCampaign({
@@ -1681,7 +1699,9 @@ async function getBroadcastSummary(campaignName = BROADCAST_CAMPAIGN_NAME) {
         COUNT(*) AS total,
         COUNT(*) FILTER (WHERE status = 'pending') AS pending,
         COUNT(*) FILTER (WHERE status = 'processing') AS processing,
-        COUNT(*) FILTER (WHERE status = 'sent') AS sent,
+        COUNT(*) FILTER (WHERE status IN ('sent','sent_api','delivered','read')) AS sent_api,
+        COUNT(*) FILTER (WHERE status IN ('delivered','read')) AS delivered,
+        COUNT(*) FILTER (WHERE status = 'read') AS read,
         COUNT(*) FILTER (WHERE status = 'error') AS error,
         COUNT(*) FILTER (WHERE status = 'skipped') AS skipped,
         COUNT(*) FILTER (WHERE status = 'pending' AND schedule_day = CURRENT_DATE) AS scheduled_today,
@@ -1699,7 +1719,9 @@ async function getBroadcastSummary(campaignName = BROADCAST_CAMPAIGN_NAME) {
     total: Number(base.total || 0),
     pending: Number(base.pending || 0),
     processing: Number(base.processing || 0),
-    sent: Number(base.sent || 0),
+    sent_api: Number(base.sent_api || 0),
+    delivered: Number(base.delivered || 0),
+    read: Number(base.read || 0),
     error: Number(base.error || 0),
     skipped: Number(base.skipped || 0),
     scheduled_today: Number(base.scheduled_today || 0),
@@ -1724,12 +1746,100 @@ async function markBroadcastProcessing(id) {
   return result.rows[0] || null;
 }
 
+
+function broadcastExtractWaMessageId(sendResponse = null) {
+  if (!sendResponse || typeof sendResponse !== 'object') return '';
+  return String(sendResponse?.wa_msg_id || sendResponse?.messages?.[0]?.id || '').trim();
+}
+
+function broadcastStatusTimestampToIso(timestampValue = '') {
+  const raw = String(timestampValue || '').trim();
+  if (!raw) return new Date().toISOString();
+  if (/^\d+$/.test(raw)) {
+    const num = Number(raw);
+    if (Number.isFinite(num) && num > 0) {
+      const ms = raw.length >= 13 ? num : num * 1000;
+      return new Date(ms).toISOString();
+    }
+  }
+  const dt = new Date(raw);
+  return Number.isNaN(dt.getTime()) ? new Date().toISOString() : dt.toISOString();
+}
+
+async function updateBroadcastDeliveryFromWebhook(statusObj = {}) {
+  const waMessageId = String(statusObj?.id || '').trim();
+  if (!waMessageId) return { matched: 0, ignored: true, reason: 'missing_id' };
+
+  const rawStatus = String(statusObj?.status || '').trim().toLowerCase();
+  const statusIso = broadcastStatusTimestampToIso(statusObj?.timestamp);
+
+  if (rawStatus === 'delivered') {
+    const result = await db.query(
+      `UPDATE broadcast_queue
+          SET status = 'delivered',
+              delivery_status = 'delivered',
+              delivered_at = COALESCE(delivered_at, $2::timestamptz),
+              updated_at = NOW(),
+              last_error = NULL
+        WHERE wa_message_id = $1`,
+      [waMessageId, statusIso]
+    );
+    return { matched: Number(result.rowCount || 0), status: 'delivered' };
+  }
+
+  if (rawStatus === 'read') {
+    const result = await db.query(
+      `UPDATE broadcast_queue
+          SET status = 'read',
+              delivery_status = 'read',
+              delivered_at = COALESCE(delivered_at, $2::timestamptz),
+              read_at = COALESCE(read_at, $2::timestamptz),
+              updated_at = NOW(),
+              last_error = NULL
+        WHERE wa_message_id = $1`,
+      [waMessageId, statusIso]
+    );
+    return { matched: Number(result.rowCount || 0), status: 'read' };
+  }
+
+  if (rawStatus === 'failed') {
+    const failureText = String(statusObj?.errors?.[0]?.message || statusObj?.errors?.[0]?.title || 'delivery_failed').slice(0, 500);
+    const result = await db.query(
+      `UPDATE broadcast_queue
+          SET status = 'error',
+              delivery_status = 'failed',
+              last_error = $2,
+              updated_at = NOW()
+        WHERE wa_message_id = $1`,
+      [waMessageId, failureText]
+    );
+    return { matched: Number(result.rowCount || 0), status: 'failed' };
+  }
+
+  if (rawStatus === 'sent') {
+    const result = await db.query(
+      `UPDATE broadcast_queue
+          SET status = CASE WHEN status IN ('delivered','read') THEN status ELSE 'sent_api' END,
+              delivery_status = 'sent',
+              api_accepted_at = COALESCE(api_accepted_at, $2::timestamptz),
+              sent_at = COALESCE(sent_at, $2::timestamptz),
+              updated_at = NOW(),
+              last_error = NULL
+        WHERE wa_message_id = $1`,
+      [waMessageId, statusIso]
+    );
+    return { matched: Number(result.rowCount || 0), status: 'sent' };
+  }
+
+  return { matched: 0, ignored: true, reason: 'unsupported_status', status: rawStatus };
+}
+
 async function processBroadcastQueue() {
-  if (!broadcastCanOperate()) return { sent: 0, failed: 0, attempted: 0, ready: false };
+  if (!broadcastCanOperate()) return { sent_api: 0, failed: 0, attempted: 0, ready: false };
 
   const campaignConfig = await getBroadcastCampaignConfig(BROADCAST_CAMPAIGN_NAME);
   if (campaignConfig.exists && !campaignConfig.isActive) {
-    return { sent: 0, failed: 0, attempted: 0, ready: true, paused: true };
+    return { sent_api: 0, failed: 0, attempted: 0, ready: true, paused: true };
   }
 
   await ensureBroadcastCampaignLoaded({
@@ -1751,7 +1861,7 @@ async function processBroadcastQueue() {
     [BROADCAST_MAX_PER_RUN]
   );
 
-  let sent = 0;
+  let sentApi = 0;
   let failed = 0;
 
   for (const row of due.rows || []) {
@@ -1767,7 +1877,14 @@ async function processBroadcastQueue() {
       const messageText = await broadcastRenderMessageForSend(messageTemplate, processing);
       if (!messageText) throw new Error('Mensaje vacío');
 
-      await sendWhatsAppText(recipient, messageText);
+      const sendResponse = await sendWhatsAppText(recipient, messageText);
+      if (sendResponse?.deduped) {
+        throw new Error('Envío deduplicado, no confirmado por WhatsApp');
+      }
+      const waMessageId = broadcastExtractWaMessageId(sendResponse);
+      if (!waMessageId) {
+        throw new Error('WhatsApp no devolvió ID de mensaje');
+      }
 
       pushHistory(waId, 'assistant', messageText);
       updateLastCloseContext(waId, {
@@ -1792,11 +1909,18 @@ async function processBroadcastQueue() {
 
       await db.query(
         `UPDATE broadcast_queue
-            SET status = 'sent', sent_at = NOW(), updated_at = NOW(), last_error = NULL, message_text = $2
+            SET status = 'sent_api',
+                delivery_status = 'sent',
+                wa_message_id = $2,
+                api_accepted_at = NOW(),
+                sent_at = NOW(),
+                updated_at = NOW(),
+                last_error = NULL,
+                message_text = $3
           WHERE id = $1`,
-        [processing.id, messageText]
+        [processing.id, waMessageId, messageText]
       );
-      sent += 1;
+      sentApi += 1;
     } catch (e) {
       await db.query(
         `UPDATE broadcast_queue
@@ -1808,7 +1932,7 @@ async function processBroadcastQueue() {
     }
   }
 
-  return { sent, failed, attempted: due.rows.length, ready: true };
+  return { sent_api: sentApi, failed, attempted: due.rows.length, ready: true };
 }
 
 async function resetBroadcastErrorsToPending(campaignName = BROADCAST_CAMPAIGN_NAME) {
@@ -1877,7 +2001,9 @@ app.get("/broadcast/panel", async (req, res) => {
   const activeValue = summary?.is_active === false ? 'resume' : 'pause';
   const pending = Number(summary?.pending || 0);
   const processing = Number(summary?.processing || 0);
-  const sent = Number(summary?.sent || 0);
+  const sentApi = Number(summary?.sent_api || 0);
+  const delivered = Number(summary?.delivered || 0);
+  const readCount = Number(summary?.read || 0);
   const error = Number(summary?.error || 0);
   const skipped = Number(summary?.skipped || 0);
   const total = Number(summary?.total || 0);
@@ -1923,7 +2049,9 @@ app.get("/broadcast/panel", async (req, res) => {
       ${errMsg ? `<div class="error">${errMsg}</div>` : ''}
       <div class="grid">
         <div class="stat"><span>Total cargados</span><strong>${total}</strong></div>
-        <div class="stat"><span>Enviados</span><strong>${sent}</strong></div>
+        <div class="stat"><span>Enviados a Meta</span><strong>${sentApi}</strong></div>
+        <div class="stat"><span>Entregados</span><strong>${delivered}</strong></div>
+        <div class="stat"><span>Leídos</span><strong>${readCount}</strong></div>
         <div class="stat"><span>Pendientes</span><strong>${pending}</strong></div>
         <div class="stat"><span>Errores</span><strong>${error}</strong></div>
         <div class="stat"><span>Faltan</span><strong>${remaining}</strong></div>
@@ -1970,6 +2098,7 @@ app.get("/broadcast/panel", async (req, res) => {
         </div>
         <p class="muted" style="margin-top:12px;">Excel actual: <span class="code">${campaign.sourceFile || BROADCAST_EXCEL_PATH || 'Sin archivo cargado todavía'}</span></p>
         <p class="muted">Si pausás la difusión, el bot no envía nada aunque haya pendientes. Al prenderla otra vez, sigue donde estaba.</p>
+        <p class="muted">Importante: <span class="code">Enviados a Meta</span> significa que WhatsApp aceptó el mensaje. <span class="code">Entregados</span> y <span class="code">Leídos</span> se actualizan cuando llega el estado real por webhook.</p>
       </div>
     </div>
 
@@ -11291,7 +11420,7 @@ lastSentOutByPeer.set(dedupKey, now);
     raw: resp?.data || {},
   });
 
-  return resp.data;
+  return { ...(resp?.data || {}), wa_msg_id };
 }
 
 
@@ -12388,6 +12517,17 @@ app.post("/webhook", async (req, res) => {
 
   try {
     const value = req.body.entry?.[0]?.changes?.[0]?.value;
+    const statuses = Array.isArray(value?.statuses) ? value.statuses : [];
+    if (statuses.length) {
+      for (const statusObj of statuses) {
+        try {
+          await updateBroadcastDeliveryFromWebhook(statusObj);
+        } catch (statusErr) {
+          console.error('❌ Error actualizando estado de difusión por webhook:', statusErr?.response?.data || statusErr?.message || statusErr);
+        }
+      }
+    }
+
     const msg = value?.messages?.[0];
     const contact = value?.contacts?.[0];
     if (!msg) return;
