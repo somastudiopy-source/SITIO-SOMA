@@ -950,15 +950,6 @@ function broadcastCleanText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
-function escapeHtml(value = '') {
-  return String(value || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
 function broadcastFirstName(value) {
   const txt = broadcastCleanText(value);
   if (!txt) return '';
@@ -1089,139 +1080,21 @@ function broadcastParseJsonArray(value) {
   }
 }
 
-function broadcastParseMessagesInput(value = '') {
-  return String(value || '')
-    .split(/\r?\n/)
-    .map((x) => broadcastCleanText(x))
-    .filter(Boolean);
-}
-
-
-function normalizeBroadcastCampaignType(value = '') {
-  const t = String(value || '').trim().toUpperCase();
-  return ['PRODUCT', 'SERVICE', 'COURSE', 'OTHER'].includes(t) ? t : '';
-}
-
-function broadcastNormalizeLocalDateTimeInput(value = '') {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(raw)) return raw;
-  const d = new Date(raw);
-  if (Number.isNaN(d.getTime())) return '';
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return `${y}-${m}-${day}T${hh}:${mm}`;
-}
-
-function broadcastFormatValidUntilHuman(value = '') {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  const d = new Date(raw);
-  if (Number.isNaN(d.getTime())) return '';
+function broadcastParseJsonAnyArray(value) {
+  if (!value) return [];
   try {
-    return new Intl.DateTimeFormat('es-AR', {
-      timeZone: TIMEZONE,
-      day: '2-digit',
-      month: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    }).format(d);
-  } catch {
-    return raw;
-  }
-}
-
-function broadcastNormalizeMediaItems(items = []) {
-  return (Array.isArray(items) ? items : []).map((row) => {
-    const mediaId = String(row?.mediaId || row?.media_id || '').trim();
-    const mediaType = String(row?.mediaType || row?.media_type || '').trim().toLowerCase();
-    const filename = String(row?.filename || '').trim();
-    const mimeType = String(row?.mimeType || row?.mime_type || '').trim().toLowerCase();
-    const caption = String(row?.caption || '').trim();
-    if (!mediaId || !mediaType) return null;
-    return { mediaId, mediaType, filename, mimeType, caption };
-  }).filter(Boolean);
-}
-
-function broadcastContextLooksLikeFollowup(text = '') {
-  const t = normalize(text || '');
-  if (!t) return false;
-  if (looksLikeActiveOfferFollowup(text)) return true;
-  return /(me interesa|pasame info|pásame info|quiero saber|contame|cuentame|más info|mas info|hay cuotas|cuotas|medidas|materiales|entrega|envio|envío|como hago|cómo hago|quiero reservar|quiero avanzar|quiero anotarme|quiero inscribirme|precio|fotos|foto|stock|colores|formas de pago)/i.test(t);
-}
-
-function broadcastLooksLikeExplicitTopicSwitch(text = '', activeOffer = null, campaignConfig = null) {
-  const raw = String(text || '').trim();
-  if (!raw) return false;
-  const t = normalize(raw);
-  const activeType = normalizeBroadcastCampaignType(activeOffer?.campaignType || activeOffer?.type || campaignConfig?.campaignType || '');
-  if (!activeType) return false;
-
-  const explicitCourse = detectCourseIntentFromContext(raw, { lastCourseContext: getLastCourseContext(activeOffer?.waId || '') });
-  const explicitProduct = isExplicitProductIntent(raw) || detectProductDomain(raw, detectFurnitureFamily(raw) || detectProductFamily(raw));
-  const explicitService = isExplicitServiceIntent(raw) || /turno|reserv\w+|agend\w+|cita|servicio/.test(t);
-
-  if (activeType === 'COURSE' && (explicitProduct || explicitService) && !broadcastContextLooksLikeFollowup(raw)) return true;
-  if (activeType === 'PRODUCT' && (explicitCourse.isCourse || explicitService) && !broadcastContextLooksLikeFollowup(raw)) return true;
-  if (activeType === 'SERVICE' && (explicitCourse.isCourse || explicitProduct) && !broadcastContextLooksLikeFollowup(raw)) return true;
-
-  if (/(otra consulta|otra cosa|aparte|por otro lado|consultarte otra cosa|queria preguntarte otra cosa|quería preguntarte otra cosa)/i.test(t)) return true;
-  return false;
-}
-
-async function getBroadcastMediaItemsForCampaign(campaignName = BROADCAST_CAMPAIGN_NAME) {
-  const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
-  try {
-    const result = await db.query(
-      `SELECT media_items_json
-         FROM broadcast_campaigns
-        WHERE campaign_name = $1
-        LIMIT 1`,
-      [cleanCampaign]
-    );
-    return broadcastNormalizeMediaItems(result.rows?.[0]?.media_items_json || []);
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
 }
 
-async function sendBroadcastMediaItem(recipient = '', item = {}) {
-  const to = normalizeWhatsAppRecipient(recipient);
-  const mediaId = String(item?.mediaId || '').trim();
-  const mediaType = String(item?.mediaType || '').trim().toLowerCase();
-  if (!to || !mediaId || !mediaType) return false;
-  const caption = String(item?.caption || '').trim();
-  if (mediaType === 'image') {
-    await sendWhatsAppImageById(to, mediaId, caption);
-    return true;
-  }
-  if (mediaType === 'video') {
-    await sendWhatsAppVideoById(to, mediaId, caption);
-    return true;
-  }
-  await sendWhatsAppDocumentById(to, mediaId, String(item?.filename || '').trim(), caption);
-  return true;
-}
-
-async function sendBroadcastCampaignMediaItems(recipient = '', items = []) {
-  const mediaItems = broadcastNormalizeMediaItems(items);
-  if (!mediaItems.length) return { sent: 0 };
-  let sent = 0;
-  for (const item of mediaItems) {
-    try {
-      await sendBroadcastMediaItem(recipient, item);
-      sent += 1;
-      await sleep(500);
-    } catch (e) {
-      console.error('❌ Error enviando media de difusión:', e?.response?.data || e?.message || e);
-      throw e;
-    }
-  }
-  return { sent };
+function broadcastParseMessagesInput(value = '') {
+  return String(value || '')
+    .split(/\r?\n/)
+    .map((x) => broadcastCleanText(x))
+    .filter(Boolean);
 }
 
 function broadcastLocalDateParts(date = new Date(), offsetMinutes = -180) {
@@ -1389,234 +1262,6 @@ function broadcastDefaultOfferFromRow(row = {}) {
   return { type, selectedName: selected, items };
 }
 
-async function broadcastHasRecentPhoneActivity(waPhone = '', excludeId = null, minutes = BROADCAST_PHONE_COOLDOWN_MINUTES) {
-  const recipient = normalizeWhatsAppRecipient(waPhone);
-  const cooldown = Math.max(0, Number(minutes || 0));
-  if (!recipient || cooldown <= 0) return false;
-
-  const params = [recipient, cooldown];
-  let sql = `SELECT 1
-               FROM broadcast_queue
-              WHERE wa_phone = $1
-                AND status IN ('processing','sent_api','delivered','read')
-                AND COALESCE(api_accepted_at, sent_at, updated_at) >= NOW() - ($2::int * INTERVAL '1 minute')`;
-  if (excludeId != null) {
-    params.push(Number(excludeId));
-    sql += `
-                AND id <> $3`;
-  }
-  sql += `
-              LIMIT 1`;
-
-  const r = await db.query(sql, params);
-  return !!r.rows?.length;
-}
-
-async function broadcastReschedulePhoneCooldown(rowId, minutes = BROADCAST_PHONE_COOLDOWN_MINUTES) {
-  const delayMinutes = Math.max(1, Number(minutes || 1));
-  await db.query(
-    `UPDATE broadcast_queue
-        SET status = 'pending',
-            send_at = NOW() + ($2::int * INTERVAL '1 minute'),
-            updated_at = NOW(),
-            last_error = 'Reprogramado para evitar mensajes repetidos al mismo número'
-      WHERE id = $1`,
-    [rowId, delayMinutes]
-  );
-}
-
-function applyBroadcastOfferContext(waId, offer = {}, courseMatches = []) {
-  const type = String(offer?.type || '').trim().toUpperCase();
-  if (!waId || !type) return;
-
-  if (type === 'COURSE') {
-    clearProductMemory(waId);
-    const previousRecent = Array.isArray(getLastCourseContext(waId)?.recentCourses) ? getLastCourseContext(waId).recentCourses : [];
-    const recentCourses = mergeCourseContextRows(Array.isArray(courseMatches) ? courseMatches : [], previousRecent);
-    const selectedName = String(offer?.selectedName || (courseMatches.length === 1 ? courseMatches[0]?.nombre || '' : '')).trim();
-    setLastCourseContext(waId, {
-      query: selectedName || 'cursos',
-      selectedName,
-      currentCourseName: selectedName,
-      lastOptions: (courseMatches.length ? courseMatches.map((x) => x?.nombre).filter(Boolean) : normalizeActiveOfferItems(offer?.items || [])).slice(0, 10),
-      recentCourses: recentCourses.length ? recentCourses : normalizeActiveOfferItems(offer?.items || []).map((nombre) => ({ nombre })),
-    });
-    return;
-  }
-
-  if (type === 'PRODUCT') {
-    clearLastCourseContext(waId);
-    return;
-  }
-
-  if (type === 'SERVICE') {
-    clearProductMemory(waId);
-    clearLastCourseContext(waId);
-  }
-}
-
-async function buildBroadcastStructuredKnowledge(activeOffer = {}) {
-  const type = String(activeOffer?.type || activeOffer?.campaignType || '').trim().toUpperCase();
-  const itemNames = normalizeActiveOfferItems(activeOffer?.items || []);
-  if (!type || !itemNames.length) return [];
-
-  try {
-    if (type === 'COURSE') {
-      const recent = Array.isArray(getLastCourseContext(activeOffer?.waId || '')?.recentCourses)
-        ? getLastCourseContext(activeOffer?.waId || '').recentCourses
-        : [];
-      const courses = recent.length ? recent : resolveCoursesByNames(await getCoursesCatalog(), itemNames);
-      return courses.slice(0, 8).map((row) => broadcastFormatStructuredKnowledge(row, 'COURSE')).filter(Boolean);
-    }
-    if (type === 'SERVICE') {
-      const services = resolveServicesByNames(await getServicesCatalog(), itemNames);
-      return services.slice(0, 8).map((row) => broadcastFormatStructuredKnowledge(row, 'SERVICE')).filter(Boolean);
-    }
-    const products = resolveProductsByNames(filterSellableCatalogRows(await getStockCatalog(), { includeOutOfStock: true }), itemNames);
-    return products.slice(0, 8).map((row) => broadcastFormatStructuredKnowledge(row, 'PRODUCT')).filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-async function resolveBroadcastReplyIntentWithAI(text = '', activeOffer = {}, campaignConfig = {}, historySnippet = '') {
-  const raw = String(text || '').trim();
-  if (!raw || !activeOffer?.type) return { action: 'NONE' };
-  const itemNames = normalizeActiveOfferItems(activeOffer?.items || []);
-  const fallback = { action: broadcastContextLooksLikeFollowup(raw) ? 'CONTINUE_BROADCAST' : 'NONE', reason: 'fallback' };
-
-  try {
-    const completion = await openai.chat.completions.create({
-      model: PRIMARY_MODEL,
-      temperature: 0,
-      messages: [
-        {
-          role: 'system',
-          content:
-`Analizá si el mensaje del cliente responde a una difusión activa enviada por WhatsApp.
-Devolvé SOLO JSON válido con:
-- action: CONTINUE_BROADCAST | SWITCH_TOPIC | ASK_CLARIFY | NONE
-- target_type: PRODUCT | COURSE | SERVICE | OTHER
-- target_name: string
-- user_goal: INFO | PRICE | PHOTOS | SCHEDULE | SIGNUP | BOOK | RESERVE | PAYMENT | MEASURES | MATERIALS | DELIVERY | GENERAL | NONE
-
-Reglas:
-- Priorizá la última difusión activa.
-- "me interesa", "pasame info", "quiero saber", "dale", "hay cuotas", "medidas", "cómo hago", "quiero reservar" suelen ser CONTINUE_BROADCAST.
-- Solo marcá SWITCH_TOPIC si claramente cambió a otra cosa distinta.
-- No inventes nombres de productos/cursos/servicios.`
-        },
-        {
-          role: 'user',
-          content: JSON.stringify({
-            mensaje_cliente: raw,
-            tipo_difusion: activeOffer?.campaignType || activeOffer?.type || '',
-            items_ofrecidos: itemNames,
-            item_seleccionado: activeOffer?.selectedName || '',
-            mensaje_de_difusion: activeOffer?.lastAssistantText || '',
-            contexto_base: campaignConfig?.aiBrief || '',
-            reglas: campaignConfig?.aiRules || '',
-            objetivo: campaignConfig?.aiGoal || '',
-            historial_reciente: historySnippet || '',
-          })
-        }
-      ],
-      response_format: { type: 'json_object' },
-    });
-    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
-    return {
-      action: String(obj?.action || fallback.action || 'NONE').trim().toUpperCase(),
-      target_type: String(obj?.target_type || activeOffer?.campaignType || activeOffer?.type || '').trim().toUpperCase(),
-      target_name: String(obj?.target_name || activeOffer?.selectedName || '').trim(),
-      user_goal: String(obj?.user_goal || 'GENERAL').trim().toUpperCase(),
-    };
-  } catch {
-    return fallback;
-  }
-}
-
-async function buildBroadcastAiReply({ text = '', waId = '', activeOffer = {}, campaignConfig = {}, historySnippet = '' } = {}) {
-  const structuredKnowledge = await buildBroadcastStructuredKnowledge({ ...activeOffer, waId });
-  const firstName = await broadcastResolveDisplayNameForRow({ contact_name: activeOffer?.contactName || '', profile_name: activeOffer?.profileName || '', wa_phone: activeOffer?.phone || '', wa_id: waId });
-  const validUntilText = campaignConfig?.validUntil ? new Intl.DateTimeFormat('es-AR', { timeZone: TIMEZONE, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(campaignConfig.validUntil)) : '';
-
-  const completion = await openai.chat.completions.create({
-    model: PRIMARY_MODEL,
-    temperature: 0.45,
-    messages: [
-      {
-        role: 'system',
-        content:
-`Sos la asistente oficial de Cataleya por WhatsApp.
-Estás respondiendo a una persona que contestó una difusión activa.
-Tu tarea es continuar ESA charla con criterio humano, comercial y natural.
-
-Reglas obligatorias:
-- Respondé solo sobre la difusión activa y su contexto.
-- No inventes datos, cursos, productos, servicios, precios, stock, medidas ni plazos.
-- Si falta un dato concreto, decí que lo confirmás o que le pasás más detalle enseguida.
-- Respetá especialmente la lista de cosas que no debés inventar si fue cargada en el contexto.
-- Soná cálida, breve y conversacional. No robot.
-- Cerrá con una sola pregunta simple para avanzar.
-- Si la persona pide info general, explicá lo ofrecido con criterio.
-- Si pide reservar, inscribirse o avanzar, guiála con el siguiente paso.
-- Si la promo tiene vencimiento, mencionála solo si ayuda.
-- No menciones que usás IA ni que seguís instrucciones internas.`
-      },
-      {
-        role: 'user',
-        content: JSON.stringify({
-          cliente_mensaje: String(text || '').trim(),
-          nombre_cliente: firstName || '',
-          tipo_difusion: activeOffer?.campaignType || activeOffer?.type || '',
-          mensaje_que_se_envio: activeOffer?.lastAssistantText || '',
-          items_ofrecidos: normalizeActiveOfferItems(activeOffer?.items || []),
-          item_seleccionado: activeOffer?.selectedName || '',
-          contexto_base: campaignConfig?.aiBrief || '',
-          reglas_de_respuesta: campaignConfig?.aiRules || '',
-          no_inventar: campaignConfig?.aiDontInvent || '',
-          objetivo_de_la_campana: campaignConfig?.aiGoal || '',
-          promo_vigente_hasta: validUntilText || '',
-          conocimiento_estructurado: structuredKnowledge,
-          historial_reciente: historySnippet || '',
-        })
-      }
-    ]
-  });
-
-  return String(completion.choices?.[0]?.message?.content || '').trim();
-}
-
-async function maybeHandleBroadcastAiFollowup({ text = '', waId = '', phone = '', activeOffer = null, historySnippet = '' } = {}) {
-  if (!activeOffer?.isBroadcastCampaign) return { handled: false };
-
-  const campaignConfig = await getBroadcastCampaignConfig(activeOffer?.campaignName || BROADCAST_CAMPAIGN_NAME);
-  if (broadcastLooksLikeExplicitTopicSwitch(text, activeOffer, campaignConfig)) return { handled: false };
-  if (!broadcastContextLooksLikeFollowup(text)) return { handled: false };
-
-  const intent = await resolveBroadcastReplyIntentWithAI(text, activeOffer, campaignConfig, historySnippet);
-  if (intent?.action === 'SWITCH_TOPIC' || intent?.action === 'NONE') return { handled: false };
-
-  const reply = await buildBroadcastAiReply({ text, waId, activeOffer, campaignConfig, historySnippet });
-  const cleanReply = String(reply || '').trim();
-  if (!cleanReply) return { handled: false };
-
-  setActiveAssistantOffer(waId, {
-    ...activeOffer,
-    type: normalizeBroadcastCampaignType(activeOffer?.campaignType || activeOffer?.type || '') || activeOffer?.type || '',
-    campaignType: normalizeBroadcastCampaignType(activeOffer?.campaignType || activeOffer?.type || '') || activeOffer?.type || '',
-    selectedName: intent?.target_name || activeOffer?.selectedName || '',
-    questionKind: intent?.user_goal || activeOffer?.questionKind || '',
-    lastAssistantText: cleanReply,
-    ts: Date.now(),
-  });
-
-  pushHistory(waId, 'assistant', cleanReply);
-  await sendWhatsAppText(phone, cleanReply);
-  scheduleInactivityFollowUp(waId, phone);
-  return { handled: true, message: cleanReply };
-}
-
 function broadcastCanOperate() {
   if (!ENABLE_DAILY_BROADCAST) return false;
   return !!XLSX;
@@ -1642,6 +1287,13 @@ async function ensureBroadcastTables() {
       timezone TEXT NOT NULL DEFAULT 'America/Argentina/Salta',
       windows_json JSONB NOT NULL DEFAULT '[]'::jsonb,
       messages_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      campaign_type TEXT NOT NULL DEFAULT 'OTHER',
+      ai_context TEXT,
+      ai_response_style TEXT,
+      ai_guardrails TEXT,
+      ai_cta TEXT,
+      valid_until TEXT,
+      assets_json JSONB NOT NULL DEFAULT '[]'::jsonb,
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1684,13 +1336,13 @@ async function ensureBroadcastTables() {
   `);
 
   await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS messages_json JSONB NOT NULL DEFAULT '[]'::jsonb`);
-  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS campaign_type TEXT`);
-  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS ai_brief TEXT`);
-  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS ai_rules TEXT`);
-  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS ai_goal TEXT`);
-  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS ai_dont_invent TEXT`);
-  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS media_items_json JSONB NOT NULL DEFAULT '[]'::jsonb`);
-  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS valid_until TIMESTAMPTZ`);
+  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS campaign_type TEXT NOT NULL DEFAULT 'OTHER'`);
+  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS ai_context TEXT`);
+  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS ai_response_style TEXT`);
+  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS ai_guardrails TEXT`);
+  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS ai_cta TEXT`);
+  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS valid_until TEXT`);
+  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS assets_json JSONB NOT NULL DEFAULT '[]'::jsonb`);
   await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS wa_message_id TEXT`);
   await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS delivery_status TEXT`);
   await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS api_accepted_at TIMESTAMPTZ`);
@@ -1714,19 +1366,16 @@ async function upsertBroadcastCampaign({
   pattern = BROADCAST_PATTERN_SAFE,
   messages = null,
   isActive = true,
-  campaignType = '',
-  aiBrief = null,
-  aiRules = null,
-  aiGoal = null,
-  aiDontInvent = null,
-  mediaItems = null,
+  campaignType = null,
+  aiContext = null,
+  aiResponseStyle = null,
+  aiGuardrails = null,
+  aiCta = null,
   validUntil = null,
+  assets = null,
 } = {}) {
   const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
   const cleanMessages = Array.isArray(messages) ? messages.map((x) => broadcastCleanText(x)).filter(Boolean) : null;
-  const normalizedCampaignType = normalizeBroadcastCampaignType(campaignType);
-  const normalizedValidUntil = validUntil ? broadcastNormalizeLocalDateTimeInput(validUntil) || String(validUntil || '').trim() : null;
-  const normalizedMediaItems = mediaItems != null ? broadcastNormalizeMediaItems(mediaItems) : null;
 
   let finalIsActive = typeof isActive === 'boolean' ? isActive : true;
   if (typeof isActive !== 'boolean') {
@@ -1745,11 +1394,13 @@ async function upsertBroadcastCampaign({
   await db.query(
     `INSERT INTO broadcast_campaigns (
        campaign_name, source_file, daily_pattern_json, timezone, windows_json, messages_json,
-       campaign_type, ai_brief, ai_rules, ai_goal, ai_dont_invent, media_items_json, valid_until, is_active, updated_at
+       campaign_type, ai_context, ai_response_style, ai_guardrails, ai_cta, valid_until, assets_json,
+       is_active, updated_at
      )
      VALUES (
        $1, $2, $3::jsonb, $4, $5::jsonb, COALESCE($6::jsonb, '[]'::jsonb),
-       NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, ''), COALESCE($12::jsonb, '[]'::jsonb), NULLIF($13, '')::timestamptz, $14, NOW()
+       COALESCE($7, 'OTHER'), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), COALESCE($13::jsonb, '[]'::jsonb),
+       $14, NOW()
      )
      ON CONFLICT (campaign_name)
      DO UPDATE SET
@@ -1759,12 +1410,12 @@ async function upsertBroadcastCampaign({
        windows_json = EXCLUDED.windows_json,
        messages_json = COALESCE(EXCLUDED.messages_json, broadcast_campaigns.messages_json),
        campaign_type = COALESCE(EXCLUDED.campaign_type, broadcast_campaigns.campaign_type),
-       ai_brief = COALESCE(EXCLUDED.ai_brief, broadcast_campaigns.ai_brief),
-       ai_rules = COALESCE(EXCLUDED.ai_rules, broadcast_campaigns.ai_rules),
-       ai_goal = COALESCE(EXCLUDED.ai_goal, broadcast_campaigns.ai_goal),
-       ai_dont_invent = COALESCE(EXCLUDED.ai_dont_invent, broadcast_campaigns.ai_dont_invent),
-       media_items_json = COALESCE(EXCLUDED.media_items_json, broadcast_campaigns.media_items_json),
+       ai_context = COALESCE(EXCLUDED.ai_context, broadcast_campaigns.ai_context),
+       ai_response_style = COALESCE(EXCLUDED.ai_response_style, broadcast_campaigns.ai_response_style),
+       ai_guardrails = COALESCE(EXCLUDED.ai_guardrails, broadcast_campaigns.ai_guardrails),
+       ai_cta = COALESCE(EXCLUDED.ai_cta, broadcast_campaigns.ai_cta),
        valid_until = COALESCE(EXCLUDED.valid_until, broadcast_campaigns.valid_until),
+       assets_json = COALESCE(EXCLUDED.assets_json, broadcast_campaigns.assets_json),
        is_active = EXCLUDED.is_active,
        updated_at = NOW()`,
     [
@@ -1774,13 +1425,13 @@ async function upsertBroadcastCampaign({
       TIMEZONE,
       broadcastSafeJson(BROADCAST_WINDOWS, []),
       cleanMessages ? broadcastSafeJson(cleanMessages, []) : null,
-      normalizedCampaignType || '',
-      aiBrief != null ? String(aiBrief || '').trim() : '',
-      aiRules != null ? String(aiRules || '').trim() : '',
-      aiGoal != null ? String(aiGoal || '').trim() : '',
-      aiDontInvent != null ? String(aiDontInvent || '').trim() : '',
-      normalizedMediaItems != null ? broadcastSafeJson(normalizedMediaItems, []) : null,
-      normalizedValidUntil || '',
+      campaignType ? String(campaignType).trim().toUpperCase() : null,
+      broadcastCleanText(aiContext),
+      broadcastCleanText(aiResponseStyle),
+      broadcastCleanText(aiGuardrails),
+      broadcastCleanText(aiCta),
+      broadcastCleanText(validUntil),
+      Array.isArray(assets) ? broadcastSafeJson(assets, []) : null,
       !!finalIsActive,
     ]
   );
@@ -1810,7 +1461,7 @@ async function getBroadcastCampaignConfig(campaignName = BROADCAST_CAMPAIGN_NAME
   try {
     const result = await db.query(
       `SELECT campaign_name, source_file, daily_pattern_json, messages_json, is_active, timezone,
-              campaign_type, ai_brief, ai_rules, ai_goal, ai_dont_invent, media_items_json, valid_until
+              campaign_type, ai_context, ai_response_style, ai_guardrails, ai_cta, valid_until, assets_json
          FROM broadcast_campaigns
         WHERE campaign_name = $1
         LIMIT 1`,
@@ -1827,13 +1478,13 @@ async function getBroadcastCampaignConfig(campaignName = BROADCAST_CAMPAIGN_NAME
       messages: messages.length ? messages : BROADCAST_MESSAGES,
       pattern: pattern.length ? pattern : BROADCAST_PATTERN_SAFE,
       timezone: broadcastCleanText(row?.timezone || TIMEZONE),
-      campaignType: normalizeBroadcastCampaignType(row?.campaign_type || ''),
-      aiBrief: String(row?.ai_brief || '').trim(),
-      aiRules: String(row?.ai_rules || '').trim(),
-      aiGoal: String(row?.ai_goal || '').trim(),
-      aiDontInvent: String(row?.ai_dont_invent || '').trim(),
-      mediaItems: broadcastNormalizeMediaItems(row?.media_items_json || []),
-      validUntil: row?.valid_until || null,
+      campaignType: String(row?.campaign_type || 'OTHER').trim().toUpperCase() || 'OTHER',
+      aiContext: String(row?.ai_context || '').trim(),
+      aiResponseStyle: String(row?.ai_response_style || '').trim(),
+      aiGuardrails: String(row?.ai_guardrails || '').trim(),
+      aiCta: String(row?.ai_cta || '').trim(),
+      validUntil: String(row?.valid_until || '').trim(),
+      assets: broadcastParseJsonAnyArray(row?.assets_json || []),
     };
   } catch {
     return {
@@ -1844,15 +1495,104 @@ async function getBroadcastCampaignConfig(campaignName = BROADCAST_CAMPAIGN_NAME
       messages: BROADCAST_MESSAGES,
       pattern: BROADCAST_PATTERN_SAFE,
       timezone: TIMEZONE,
-      campaignType: '',
-      aiBrief: '',
-      aiRules: '',
-      aiGoal: '',
-      aiDontInvent: '',
-      mediaItems: [],
-      validUntil: null,
+      campaignType: 'OTHER',
+      aiContext: '',
+      aiResponseStyle: '',
+      aiGuardrails: '',
+      aiCta: '',
+      validUntil: '',
+      assets: [],
     };
   }
+}
+
+
+async function getBroadcastAssetsForCampaign(campaignName = BROADCAST_CAMPAIGN_NAME) {
+  const cfg = await getBroadcastCampaignConfig(campaignName);
+  return Array.isArray(cfg.assets) ? cfg.assets : [];
+}
+
+async function sendBroadcastAssetsToRecipient(recipient = '', assets = []) {
+  const rows = Array.isArray(assets) ? assets : [];
+  let sent = 0;
+  for (const asset of rows.slice(0, 5)) {
+    const mediaId = String(asset?.mediaId || asset?.media_id || '').trim();
+    const mimeType = String(asset?.mimeType || asset?.mime_type || '').trim();
+    const filename = String(asset?.filename || '').trim();
+    const caption = String(asset?.caption || '').trim();
+    if (!mediaId) continue;
+    if (isBroadcastAssetImage(mimeType, filename)) {
+      await sendWhatsAppImageById(recipient, mediaId, caption);
+    } else {
+      await sendWhatsAppDocumentById(recipient, mediaId, filename || `archivo-${mediaId}`, caption);
+    }
+    sent += 1;
+  }
+  return sent;
+}
+
+async function saveBroadcastCampaignContext({
+  campaignName = BROADCAST_CAMPAIGN_NAME,
+  campaignType = 'OTHER',
+  aiContext = '',
+  aiResponseStyle = '',
+  aiGuardrails = '',
+  aiCta = '',
+  validUntil = '',
+} = {}) {
+  const current = await getBroadcastCampaignConfig(campaignName);
+  await upsertBroadcastCampaign({
+    campaignName,
+    sourceFile: current.sourceFile || BROADCAST_EXCEL_PATH,
+    pattern: current.pattern || BROADCAST_PATTERN_SAFE,
+    messages: current.messages || BROADCAST_MESSAGES,
+    isActive: current.isActive,
+    campaignType,
+    aiContext,
+    aiResponseStyle,
+    aiGuardrails,
+    aiCta,
+    validUntil,
+    assets: current.assets || [],
+  });
+}
+
+function looksLikeDifferentTopicThanActiveBroadcast(text = '', activeOffer = null) {
+  const activeType = String(activeOffer?.type || '').trim().toUpperCase();
+  if (!activeType) return false;
+
+  const courseIntent = detectCourseIntentFromContext(text, { lastCourseContext: getLastCourseContext(activeOffer?.waId || '') });
+  const explicitProduct = isExplicitProductIntent(text);
+  const explicitService = isExplicitServiceIntent(text);
+  const explicitCourse = !!courseIntent?.isCourse;
+
+  if (activeType === 'COURSE') return explicitProduct || explicitService;
+  if (activeType === 'PRODUCT') return explicitCourse || explicitService;
+  if (activeType === 'SERVICE') return explicitCourse || explicitProduct;
+  return false;
+}
+
+function isAmbiguousBroadcastFollowup(text = '') {
+  const t = normalizeShortReply(text || '');
+  if (!t) return false;
+  return /^(me interesa|interesante|pasame info|pasame mas info|pasa info|info|quiero info|quiero saber|dale|ok|oka|si|sí|bueno|genial|perfecto|quiero mas|quiero más|como hago|cómo hago|precio|horarios|cupos|requisitos|hay cuotas|cuotas|me interesa pasame info)$/.test(t);
+}
+
+async function buildAssistantMessagesForBroadcastCampaign(waId = '', activeOffer = null) {
+  const campaignName = String(activeOffer?.campaignName || '').trim();
+  if (!campaignName) return [];
+  const cfg = await getBroadcastCampaignConfig(campaignName);
+  const pieces = [];
+  if (cfg.campaignType) pieces.push(`Tipo de difusión activa: ${cfg.campaignType}.`);
+  if (cfg.aiContext) pieces.push(`Contexto de la difusión activa: ${cfg.aiContext}`);
+  if (cfg.aiResponseStyle) pieces.push(`Cómo debe responder la IA: ${cfg.aiResponseStyle}`);
+  if (cfg.aiGuardrails) pieces.push(`No debe inventar: ${cfg.aiGuardrails}`);
+  if (cfg.aiCta) pieces.push(`Objetivo de respuesta: ${cfg.aiCta}`);
+  if (cfg.validUntil) pieces.push(`Vigencia de la difusión: ${cfg.validUntil}`);
+  if (Array.isArray(activeOffer?.items) && activeOffer.items.length) {
+    pieces.push(`Opciones activas ofrecidas: ${activeOffer.items.slice(0, 10).join(' | ')}`);
+  }
+  return pieces.length ? [{ role: 'system', content: pieces.join('\n') }] : [];
 }
 
 async function updateBroadcastPendingMessages(campaignName = BROADCAST_CAMPAIGN_NAME, messages = []) {
@@ -2117,15 +1857,14 @@ async function getBroadcastSummary(campaignName = BROADCAST_CAMPAIGN_NAME) {
         COUNT(*) FILTER (WHERE status = 'pending') AS pending,
         COUNT(*) FILTER (WHERE status = 'processing') AS processing,
         COUNT(*) FILTER (WHERE status IN ('sent','sent_api','delivered','read')) AS sent_api,
-        COUNT(*) FILTER (WHERE status = 'sent_api') AS awaiting_delivery,
         COUNT(*) FILTER (WHERE status IN ('delivered','read')) AS delivered,
         COUNT(*) FILTER (WHERE status = 'read') AS read,
         COUNT(*) FILTER (WHERE status = 'error') AS error,
         COUNT(*) FILTER (WHERE status = 'skipped') AS skipped,
         COUNT(*) FILTER (WHERE status = 'pending' AND schedule_day = CURRENT_DATE) AS scheduled_today,
-        COUNT(DISTINCT schedule_day) FILTER (WHERE status IN ('pending','processing','sent_api','error','skipped') AND schedule_day IS NOT NULL) AS remaining_days,
+        COUNT(DISTINCT schedule_day) FILTER (WHERE status IN ('pending','processing','error','skipped') AND schedule_day IS NOT NULL) AS remaining_days,
         MIN(send_at) FILTER (WHERE status = 'pending') AS next_send_at,
-        MAX(send_at) FILTER (WHERE status IN ('pending','processing','sent_api','error','skipped')) AS last_send_at
+        MAX(send_at) FILTER (WHERE status IN ('pending','processing','error','skipped')) AS last_send_at
        FROM broadcast_queue
       WHERE campaign_name = $1`,
     [cleanCampaign]
@@ -2138,7 +1877,6 @@ async function getBroadcastSummary(campaignName = BROADCAST_CAMPAIGN_NAME) {
     pending: Number(base.pending || 0),
     processing: Number(base.processing || 0),
     sent_api: Number(base.sent_api || 0),
-    awaiting_delivery: Number(base.awaiting_delivery || 0),
     delivered: Number(base.delivered || 0),
     read: Number(base.read || 0),
     error: Number(base.error || 0),
@@ -2253,62 +1991,6 @@ async function updateBroadcastDeliveryFromWebhook(statusObj = {}) {
   return { matched: 0, ignored: true, reason: 'unsupported_status', status: rawStatus };
 }
 
-async function recycleStaleBroadcastUnconfirmed(campaignName = BROADCAST_CAMPAIGN_NAME) {
-  const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
-  const staleMinutes = Math.max(10, Number(BROADCAST_CONFIRM_TIMEOUT_MINUTES || 90));
-  const maxAttempts = Math.max(1, Number(BROADCAST_CONFIRM_MAX_ATTEMPTS || 3));
-  const retryDelay = Math.max(1, Number(BROADCAST_CONFIRM_RETRY_DELAY_MINUTES || 15));
-
-  const rows = await db.query(
-    `SELECT id, attempts
-       FROM broadcast_queue
-      WHERE campaign_name = $1
-        AND status = 'sent_api'
-        AND COALESCE(api_accepted_at, sent_at, updated_at) <= NOW() - ($2::int * INTERVAL '1 minute')
-      ORDER BY COALESCE(api_accepted_at, sent_at, updated_at) ASC, id ASC`,
-    [cleanCampaign, staleMinutes]
-  );
-
-  let retried = 0;
-  let markedError = 0;
-
-  for (const row of (rows.rows || [])) {
-    const attempts = Number(row.attempts || 0);
-    if (attempts >= maxAttempts) {
-      const result = await db.query(
-        `UPDATE broadcast_queue
-            SET status = 'error',
-                delivery_status = COALESCE(delivery_status, 'unconfirmed'),
-                last_error = COALESCE(last_error, 'Sin confirmación de entrega en el tiempo esperado'),
-                updated_at = NOW()
-          WHERE id = $1
-            AND status = 'sent_api'`,
-        [row.id]
-      );
-      markedError += Number(result.rowCount || 0);
-      continue;
-    }
-
-    const result = await db.query(
-      `UPDATE broadcast_queue
-          SET status = 'pending',
-              send_at = NOW() + ($2::int * INTERVAL '1 minute'),
-              wa_message_id = NULL,
-              delivery_status = NULL,
-              api_accepted_at = NULL,
-              sent_at = NULL,
-              last_error = 'Reintento automático por falta de confirmación de entrega',
-              updated_at = NOW()
-        WHERE id = $1
-          AND status = 'sent_api'`,
-      [row.id, retryDelay]
-    );
-    retried += Number(result.rowCount || 0);
-  }
-
-  return { retried, marked_error: markedError };
-}
-
 async function processBroadcastQueue() {
   if (!broadcastCanOperate()) return { sent_api: 0, failed: 0, attempted: 0, ready: false };
 
@@ -2325,9 +2007,33 @@ async function processBroadcastQueue() {
     offerSelectedName: BROADCAST_OFFER_SELECTED_NAME,
   });
 
-  await recycleStaleBroadcastUnconfirmed(BROADCAST_CAMPAIGN_NAME).catch((e) => {
-    console.error('❌ Error reciclando difusión sin confirmar:', e?.response?.data || e?.message || e);
-  });
+  await db.query(
+    `UPDATE broadcast_queue
+        SET status = 'pending',
+            send_at = NOW() + ($2 || ' minutes')::interval,
+            updated_at = NOW(),
+            last_error = COALESCE(last_error, 'Sin confirmación de entrega. Reprogramado automáticamente.')
+      WHERE campaign_name = $1
+        AND status = 'sent_api'
+        AND api_accepted_at IS NOT NULL
+        AND api_accepted_at < NOW() - ($3 || ' minutes')::interval
+        AND attempts < $4`,
+    [BROADCAST_CAMPAIGN_NAME, Math.max(2, Math.floor(BROADCAST_SAME_RECIPIENT_GAP_MS / 60000)), Math.max(2, Math.floor(BROADCAST_SENT_API_STALE_MS / 60000)), BROADCAST_MAX_CONFIRM_RETRIES]
+  );
+
+  await db.query(
+    `UPDATE broadcast_queue
+        SET status = 'error',
+            delivery_status = 'failed',
+            updated_at = NOW(),
+            last_error = COALESCE(last_error, 'Sin confirmación de entrega luego de varios intentos.')
+      WHERE campaign_name = $1
+        AND status = 'sent_api'
+        AND attempts >= $2
+        AND api_accepted_at IS NOT NULL
+        AND api_accepted_at < NOW() - ($3 || ' minutes')::interval`,
+    [BROADCAST_CAMPAIGN_NAME, BROADCAST_MAX_CONFIRM_RETRIES, Math.max(2, Math.floor(BROADCAST_SENT_API_STALE_MS / 60000))]
+  );
 
   const due = await db.query(
     `SELECT id
@@ -2351,9 +2057,28 @@ async function processBroadcastQueue() {
       const recipient = normalizeWhatsAppRecipient(processing.wa_phone);
       if (!recipient) throw new Error('Número inválido');
 
-      const hasRecentPhoneActivity = await broadcastHasRecentPhoneActivity(recipient, processing.id, BROADCAST_PHONE_COOLDOWN_MINUTES);
-      if (hasRecentPhoneActivity) {
-        await broadcastReschedulePhoneCooldown(processing.id, BROADCAST_PHONE_COOLDOWN_MINUTES);
+      const recentForRecipient = await db.query(
+        `SELECT sent_at
+           FROM broadcast_queue
+          WHERE wa_phone = $1
+            AND sent_at IS NOT NULL
+            AND status IN ('sent_api','delivered','read')
+            AND id <> $2
+          ORDER BY sent_at DESC
+          LIMIT 1`,
+        [processing.wa_phone, processing.id]
+      );
+      const recentSentAt = recentForRecipient.rows?.[0]?.sent_at ? new Date(recentForRecipient.rows[0].sent_at) : null;
+      if (recentSentAt && (Date.now() - recentSentAt.getTime()) < BROADCAST_SAME_RECIPIENT_GAP_MS) {
+        await db.query(
+          `UPDATE broadcast_queue
+              SET status = 'pending',
+                  send_at = $2,
+                  updated_at = NOW(),
+                  last_error = 'Reprogramado para no enviar mensajes pegados al mismo número.'
+            WHERE id = $1`,
+          [processing.id, new Date(recentSentAt.getTime() + BROADCAST_SAME_RECIPIENT_GAP_MS).toISOString()]
+        );
         continue;
       }
 
@@ -2362,6 +2087,12 @@ async function processBroadcastQueue() {
       if (!messageTemplate) throw new Error('Mensaje vacío');
       const messageText = await broadcastRenderMessageForSend(messageTemplate, processing);
       if (!messageText) throw new Error('Mensaje vacío');
+
+      const currentCampaign = await getBroadcastCampaignConfig(processing.campaign_name || BROADCAST_CAMPAIGN_NAME);
+      const campaignAssets = Array.isArray(currentCampaign.assets) ? currentCampaign.assets : [];
+      if (campaignAssets.length) {
+        await sendBroadcastAssetsToRecipient(recipient, campaignAssets);
+      }
 
       const sendResponse = await sendWhatsAppText(recipient, messageText, { disableDedup: true });
       const waMessageId = broadcastExtractWaMessageId(sendResponse);
@@ -2378,41 +2109,31 @@ async function processBroadcastQueue() {
         profileName: processing.profile_name || processing.contact_name || '',
       });
 
-      const rowCampaignConfig = await getBroadcastCampaignConfig(processing.campaign_name || BROADCAST_CAMPAIGN_NAME);
-      if (Array.isArray(rowCampaignConfig?.mediaItems) && rowCampaignConfig.mediaItems.length) {
-        await sendBroadcastCampaignMediaItems(recipient, rowCampaignConfig.mediaItems);
-      }
-
       const offer = broadcastDefaultOfferFromRow(processing);
-      if (!offer.type && rowCampaignConfig?.campaignType) offer.type = rowCampaignConfig.campaignType;
-      if (offer.type || rowCampaignConfig?.aiBrief || rowCampaignConfig?.mediaItems?.length) {
-        let offerCourseMatches = [];
-        if ((rowCampaignConfig?.campaignType || offer.type) === 'COURSE') {
-          const broadcastCourses = await getCoursesCatalog();
-          offerCourseMatches = resolveCoursesByNames(broadcastCourses, offer.items);
-        }
-
+      if (offer.type && offer.items.length) {
+        if (offer.type === 'COURSE') clearProductMemory(waId);
+        if (offer.type === 'PRODUCT') clearLastCourseContext(waId);
         setActiveAssistantOffer(waId, {
           type: offer.type,
-          campaignType: normalizeBroadcastCampaignType(rowCampaignConfig?.campaignType || offer.type) || offer.type,
           items: normalizeActiveOfferItems(offer.items),
           selectedName: offer.selectedName || (offer.items.length === 1 ? offer.items[0] : ''),
           mode: 'DETAIL',
           questionKind: 'MANUAL_BROADCAST',
           lastAssistantText: messageText,
-          isBroadcastCampaign: true,
-          campaignName: processing.campaign_name || BROADCAST_CAMPAIGN_NAME,
-          campaignBrief: rowCampaignConfig?.aiBrief || '',
-          campaignRules: rowCampaignConfig?.aiRules || '',
-          campaignDontInvent: rowCampaignConfig?.aiDontInvent || '',
-          campaignGoal: rowCampaignConfig?.aiGoal || '',
-          campaignValidUntil: rowCampaignConfig?.validUntil || null,
-          campaignMediaItems: Array.isArray(rowCampaignConfig?.mediaItems) ? rowCampaignConfig.mediaItems : [],
-          phone: recipient,
-          contactName: processing.contact_name || '',
-          profileName: processing.profile_name || '',
+          campaignName: processing.campaign_name || currentCampaign.campaignName || BROADCAST_CAMPAIGN_NAME,
+          campaignType: currentCampaign.campaignType || offer.type,
         });
-        applyBroadcastOfferContext(waId, offer, offerCourseMatches);
+        if (offer.type === 'COURSE') {
+          const courseRows = (offer.items || []).map((nombre) => ({ nombre }));
+          setLastCourseContext(waId, {
+            query: offer.selectedName || offer.items[0] || 'cursos',
+            selectedName: offer.selectedName || offer.items[0] || '',
+            currentCourseName: offer.selectedName || offer.items[0] || '',
+            lastOptions: normalizeActiveOfferItems(offer.items).slice(0, 10),
+            recentCourses: mergeCourseContextRows(courseRows, []),
+            requestedInterest: buildHubSpotCourseInterestLabel(offer.selectedName || offer.items[0] || 'cursos'),
+          });
+        }
       }
 
       await db.query(
@@ -2430,11 +2151,15 @@ async function processBroadcastQueue() {
       );
       sentApi += 1;
     } catch (e) {
+      const errText = String(e?.response?.data?.error?.message || e?.message || e).slice(0, 500);
       await db.query(
         `UPDATE broadcast_queue
-            SET status = 'error', last_error = $2, updated_at = NOW()
+            SET status = CASE WHEN attempts < $3 THEN 'pending' ELSE 'error' END,
+                send_at = CASE WHEN attempts < $3 THEN NOW() + ($4 || ' minutes')::interval ELSE send_at END,
+                last_error = $2,
+                updated_at = NOW()
           WHERE id = $1`,
-        [processing.id, String(e?.response?.data?.error?.message || e?.message || e).slice(0, 500)]
+        [processing.id, errText, BROADCAST_MAX_CONFIRM_RETRIES, Math.max(2, Math.floor(BROADCAST_SAME_RECIPIENT_GAP_MS / 60000))]
       );
       failed += 1;
     }
@@ -2499,18 +2224,13 @@ app.get("/broadcast/panel", async (req, res) => {
     isActive: true,
     messages: BROADCAST_MESSAGES,
     pattern: BROADCAST_PATTERN_SAFE,
-    campaignType: '',
-    aiBrief: '',
-    aiRules: '',
-    aiDontInvent: '',
-    aiGoal: '',
-    mediaItems: [],
-    validUntil: null,
   }));
 
   const okMsg = broadcastCleanText(req.query?.ok || '');
   const errMsg = broadcastCleanText(req.query?.error || '');
-  const messagesText = (Array.isArray(campaign.messages) && campaign.messages.length ? campaign.messages : BROADCAST_MESSAGES).join('\\n');
+  const messagesText = (Array.isArray(campaign.messages) && campaign.messages.length ? campaign.messages : BROADCAST_MESSAGES).join('\n');
+  const campaignType = campaign.campaignType || 'OTHER';
+  const campaignAssets = Array.isArray(campaign.assets) ? campaign.assets : [];
   const replaceDefault = String(req.query?.replace_mode || 'replace_pending').trim().toLowerCase();
   const activeLabel = summary?.is_active === false ? 'Prender difusión' : 'Pausar difusión';
   const activeValue = summary?.is_active === false ? 'resume' : 'pause';
@@ -2524,23 +2244,6 @@ app.get("/broadcast/panel", async (req, res) => {
   const total = Number(summary?.total || 0);
   const remaining = pending + processing + error + skipped;
   const daysLeft = Number(summary?.remaining_days || 0);
-  const mediaItems = Array.isArray(campaign.mediaItems) ? campaign.mediaItems : [];
-  const validUntilInput = campaign.validUntil ? broadcastNormalizeLocalDateTimeInput(campaign.validUntil) : '';
-
-  const mediaHtml = mediaItems.length
-    ? mediaItems.map((item, idx) => `
-      <div class="media-row">
-        <div>
-          <strong>${String(item.filename || `Adjunto ${idx + 1}`).replace(/</g, '&lt;')}</strong>
-          <div class="muted">${String(item.mediaType || '').toUpperCase()}${item.caption ? ` · ${String(item.caption).replace(/</g, '&lt;')}` : ''}</div>
-        </div>
-        <form action="/broadcast/media/delete" method="post">
-          <input type="hidden" name="campaign_name" value="${campaignName}" />
-          <input type="hidden" name="media_id" value="${String(item.mediaId || '')}" />
-          <button type="submit" class="danger">Quitar</button>
-        </form>
-      </div>`).join('')
-    : '<p class="muted">Todavía no hay fotos o archivos cargados para esta difusión.</p>';
 
   const html = `<!doctype html>
 <html lang="es">
@@ -2550,26 +2253,23 @@ app.get("/broadcast/panel", async (req, res) => {
   <title>Difusión Cataleya</title>
   <style>
     body { font-family: Arial, sans-serif; background:#f7f7f8; padding:24px; color:#111; }
-    .wrap { max-width: 1180px; margin: 0 auto; display:grid; gap:18px; }
+    .wrap { max-width: 1080px; margin: 0 auto; display:grid; gap:18px; }
     .box { background:#fff; border-radius:16px; padding:24px; box-shadow:0 10px 30px rgba(0,0,0,.08); }
     h1, h2, h3 { margin-top:0; }
     label { display:block; margin:14px 0 6px; font-weight:600; }
     input, select, textarea, button { width:100%; padding:12px; border-radius:10px; border:1px solid #d0d7de; box-sizing:border-box; font:inherit; }
     button { background:#111827; color:#fff; border:none; cursor:pointer; margin-top:12px; }
-    .danger { background:#7f1d1d; }
     .muted { color:#555; font-size:14px; }
     .code { font-family: monospace; background:#f3f4f6; padding:3px 6px; border-radius:6px; }
     .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap:12px; }
     .stat { background:#f9fafb; border:1px solid #e5e7eb; border-radius:14px; padding:14px; }
     .stat strong { display:block; font-size:26px; margin-top:6px; }
     .row { display:grid; grid-template-columns: 1fr 1fr; gap:18px; }
-    .actions { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+    .pill { display:inline-block; padding:6px 10px; border-radius:999px; background:#eef2ff; font-size:13px; }
     .ok { background:#ecfdf5; color:#065f46; padding:12px 14px; border-radius:12px; margin-bottom:12px; }
     .error { background:#fef2f2; color:#991b1b; padding:12px 14px; border-radius:12px; margin-bottom:12px; }
-    .pill { display:inline-block; padding:6px 10px; border-radius:999px; background:#eef2ff; font-size:13px; }
-    .media-row { display:flex; justify-content:space-between; gap:14px; align-items:center; border:1px solid #e5e7eb; border-radius:12px; padding:12px; margin:10px 0; }
-    .media-row form { min-width: 140px; }
-    @media (max-width: 900px) { .row, .actions { grid-template-columns: 1fr; } .media-row { flex-direction:column; align-items:flex-start; } .media-row form { width:100%; } }
+    .actions { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+    @media (max-width: 800px) { .row, .actions { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -2603,14 +2303,17 @@ app.get("/broadcast/panel", async (req, res) => {
         <form action="/broadcast/upload" method="post" enctype="multipart/form-data">
           <label>Archivo Excel</label>
           <input type="file" name="file" accept=".xlsx,.xls" required />
+
           <label>Modo</label>
           <select name="replace_mode">
             <option value="append" ${replaceDefault === 'append' ? 'selected' : ''}>Agregar a la cola actual</option>
             <option value="replace_pending" ${replaceDefault === 'replace_pending' ? 'selected' : ''}>Reemplazar pendientes/errores y dejar enviados</option>
             <option value="replace_all" ${replaceDefault === 'replace_all' ? 'selected' : ''}>Borrar todo y empezar de cero</option>
           </select>
+
           <label>Nombre de campaña</label>
           <input type="text" name="campaign_name" value="${campaignName}" />
+
           <button type="submit">Subir Excel</button>
         </form>
       </div>
@@ -2629,70 +2332,75 @@ app.get("/broadcast/panel", async (req, res) => {
           </form>
         </div>
         <p class="muted" style="margin-top:12px;">Excel actual: <span class="code">${campaign.sourceFile || BROADCAST_EXCEL_PATH || 'Sin archivo cargado todavía'}</span></p>
-        <p class="muted">La IA solo toma la difusión como contexto si el cliente realmente responde a esa campaña. Si cambia claramente de tema, vuelve al flujo normal del bot.</p>
+        <p class="muted">Si pausás la difusión, el bot no envía nada aunque haya pendientes. Al prenderla otra vez, sigue donde estaba.</p>
+        <p class="muted">Importante: <span class="code">Enviados a Meta</span> significa que WhatsApp aceptó el mensaje. <span class="code">Entregados</span> y <span class="code">Leídos</span> se actualizan cuando llega el estado real por webhook.</p>
       </div>
     </div>
 
     <div class="box">
       <h2>Mensajes de difusión</h2>
-      <p class="muted">Escribilos <strong>uno por línea</strong>. Podés usar <span class="code">{saludo}</span> y <span class="code">{nombre}</span>.</p>
+      <p class="muted">Escribilos <strong>uno por línea</strong>. Podés usar <span class="code">{saludo}</span> y <span class="code">{nombre}</span>. Si el nombre no es real o no está bien detectado, el bot no lo pone. Si la persona responde y no tiene nombre válido, el bot le pide el nombre y actualiza el contacto con tu flujo actual.</p>
       <form action="/broadcast/messages" method="post">
         <input type="hidden" name="campaign_name" value="${campaignName}" />
-        <textarea name="broadcast_messages" rows="12">${messagesText}</textarea>
+        <textarea name="broadcast_messages" rows="14">${messagesText}</textarea>
         <button type="submit">Guardar mensajes</button>
       </form>
     </div>
 
-    <div class="box">
-      <h2>Contexto IA de la difusión</h2>
-      <p class="muted">Acá le explicás a OpenAI de qué trata la campaña, cómo debe responder y qué no tiene que inventar. Si la persona responde a esta difusión, la IA va a usar esto antes de contestar.</p>
-      <form action="/broadcast/context" method="post">
-        <input type="hidden" name="campaign_name" value="${campaignName}" />
-        <label>Tipo de campaña</label>
-        <select name="campaign_type">
-          <option value="" ${!campaign.campaignType ? 'selected' : ''}>Sin definir</option>
-          <option value="PRODUCT" ${campaign.campaignType === 'PRODUCT' ? 'selected' : ''}>PRODUCT / Muebles / Equipamiento / Productos</option>
-          <option value="SERVICE" ${campaign.campaignType === 'SERVICE' ? 'selected' : ''}>SERVICE / Servicios</option>
-          <option value="COURSE" ${campaign.campaignType === 'COURSE' ? 'selected' : ''}>COURSE / Cursos</option>
-          <option value="OTHER" ${campaign.campaignType === 'OTHER' ? 'selected' : ''}>OTHER / Otro</option>
-        </select>
-        <label>De qué trata la difusión / info base</label>
-        <textarea name="ai_brief" rows="5">${String(campaign.aiBrief || '').replace(/</g, '&lt;')}</textarea>
-        <label>Cómo debe responder la IA</label>
-        <textarea name="ai_rules" rows="4">${String(campaign.aiRules || '').replace(/</g, '&lt;')}</textarea>
-        <label>Qué no debe inventar</label>
-        <textarea name="ai_dont_invent" rows="4">${String(campaign.aiDontInvent || '').replace(/</g, '&lt;')}</textarea>
-        <label>Objetivo / CTA</label>
-        <textarea name="ai_goal" rows="3">${String(campaign.aiGoal || '').replace(/</g, '&lt;')}</textarea>
-        <label>Válido hasta (opcional)</label>
-        <input type="datetime-local" name="valid_until" value="${validUntilInput}" />
-        <button type="submit">Guardar contexto IA</button>
-      </form>
-    </div>
+    <div class="row">
+      <div class="box">
+        <h2>Contexto IA de la difusión</h2>
+        <form action="/broadcast/context" method="post">
+          <input type="hidden" name="campaign_name" value="${campaignName}" />
+          <label>Tipo de campaña</label>
+          <select name="campaign_type">
+            <option value="OTHER" ${campaignType === 'OTHER' ? 'selected' : ''}>OTHER</option>
+            <option value="PRODUCT" ${campaignType === 'PRODUCT' ? 'selected' : ''}>PRODUCT</option>
+            <option value="SERVICE" ${campaignType === 'SERVICE' ? 'selected' : ''}>SERVICE</option>
+            <option value="COURSE" ${campaignType === 'COURSE' ? 'selected' : ''}>COURSE</option>
+          </select>
 
-    <div class="box">
-      <h2>Fotos o archivos de la campaña</h2>
-      <p class="muted">Podés subir una foto, varias fotos o archivos. Se van a adjuntar a cada difusión de esta campaña.</p>
-      <form action="/broadcast/media/upload" method="post" enctype="multipart/form-data">
-        <input type="hidden" name="campaign_name" value="${campaignName}" />
-        <label>Archivos</label>
-        <input type="file" name="media_files" accept=".png,.jpg,.jpeg,.webp,.pdf,.mp4,.mov" multiple required />
-        <label>Texto opcional para el archivo</label>
-        <input type="text" name="caption" value="" />
-        <button type="submit">Subir archivos</button>
-      </form>
-      <div style="margin-top:14px;">
-        ${mediaHtml}
+          <label>De qué trata la difusión</label>
+          <textarea name="ai_context" rows="4">${campaign.aiContext || ''}</textarea>
+
+          <label>Cómo debe responder la IA</label>
+          <textarea name="ai_response_style" rows="4">${campaign.aiResponseStyle || ''}</textarea>
+
+          <label>Qué no debe inventar</label>
+          <textarea name="ai_guardrails" rows="4">${campaign.aiGuardrails || ''}</textarea>
+
+          <label>Objetivo / CTA</label>
+          <textarea name="ai_cta" rows="3">${campaign.aiCta || ''}</textarea>
+
+          <label>Vigente hasta</label>
+          <input type="text" name="valid_until" value="${campaign.validUntil || ''}" />
+          <button type="submit">Guardar contexto IA</button>
+        </form>
+      </div>
+
+      <div class="box">
+        <h2>Fotos / archivos de la campaña</h2>
+        <p class="muted">Si subís imágenes o documentos, se envían antes del texto de difusión.</p>
+        <form action="/broadcast/assets" method="post" enctype="multipart/form-data">
+          <input type="hidden" name="campaign_name" value="${campaignName}" />
+          <label>Archivos</label>
+          <input type="file" name="files" accept=".png,.jpg,.jpeg,.webp,.pdf" multiple />
+          <button type="submit">Subir archivos</button>
+        </form>
+        <p class="muted" style="margin-top:12px;">Adjuntos cargados: <span class="code">${campaignAssets.length}</span></p>
+        ${campaignAssets.length ? `<ul>${campaignAssets.map((a) => `<li class="muted">${a.filename || a.mediaId || 'archivo'}</li>`).join('')}</ul>` : '<p class="muted">No hay archivos cargados.</p>'}
       </div>
     </div>
   </div>
   <script>
     (function(){
       const NEXT_SEND_AT_RAW = ${summary?.next_send_at ? JSON.stringify(summary.next_send_at) : 'null'};
-      const TIMEZONE_LABEL = ${json.dumps("America/Argentina/Salta")};
+      const TIMEZONE_LABEL = ${JSON.stringify(TIMEZONE)};
       const humanEl = document.getElementById('next-send-human');
       const countdownEl = document.getElementById('next-send-countdown');
+
       function two(n){ return String(n).padStart(2, '0'); }
+
       function formatNextSend(date){
         try {
           return new Intl.DateTimeFormat('es-AR', {
@@ -2705,23 +2413,40 @@ app.get("/broadcast/panel", async (req, res) => {
             hour12: false
           }).format(date);
         } catch (_) {
-          return two(date.getDate()) + '/' + two(date.getMonth()+1) + ' ' + two(date.getHours()) + ':' + two(date.getMinutes());
+          const d = date;
+          return two(d.getDate()) + '/' + two(d.getMonth()+1) + ' ' + two(d.getHours()) + ':' + two(d.getMinutes());
         }
       }
+
       function renderCountdown(){
-        if (!humanEl || !countdownEl || !NEXT_SEND_AT_RAW) { if (countdownEl && !NEXT_SEND_AT_RAW) countdownEl.textContent = '—'; return; }
+        if (!humanEl || !countdownEl || !NEXT_SEND_AT_RAW) {
+          if (countdownEl && !NEXT_SEND_AT_RAW) countdownEl.textContent = '—';
+          return;
+        }
+
         const target = new Date(NEXT_SEND_AT_RAW);
-        if (Number.isNaN(target.getTime())) { humanEl.textContent = '—'; countdownEl.textContent = '—'; return; }
+        if (Number.isNaN(target.getTime())) {
+          humanEl.textContent = '—';
+          countdownEl.textContent = '—';
+          return;
+        }
+
         humanEl.textContent = formatNextSend(target);
+
         const now = new Date();
         let diff = target.getTime() - now.getTime();
-        if (diff <= 0) { countdownEl.textContent = '00:00:00'; return; }
+        if (diff <= 0) {
+          countdownEl.textContent = '00:00:00';
+          return;
+        }
+
         const totalSeconds = Math.floor(diff / 1000);
         const hours = Math.floor(totalSeconds / 3600);
         const minutes = Math.floor((totalSeconds % 3600) / 60);
         const seconds = totalSeconds % 60;
         countdownEl.textContent = two(hours) + ':' + two(minutes) + ':' + two(seconds);
       }
+
       renderCountdown();
       setInterval(renderCountdown, 1000);
     })();
@@ -2732,6 +2457,72 @@ app.get("/broadcast/panel", async (req, res) => {
   return res.status(200).send(html);
 });
 
+
+app.post("/broadcast/context", async (req, res) => {
+  try {
+    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    await saveBroadcastCampaignContext({
+      campaignName,
+      campaignType: String(req.body?.campaign_type || 'OTHER').trim().toUpperCase() || 'OTHER',
+      aiContext: req.body?.ai_context || '',
+      aiResponseStyle: req.body?.ai_response_style || '',
+      aiGuardrails: req.body?.ai_guardrails || '',
+      aiCta: req.body?.ai_cta || '',
+      validUntil: req.body?.valid_until || '',
+    });
+    return broadcastPanelRedirect(res, 'Contexto IA guardado correctamente.');
+  } catch (e) {
+    return broadcastPanelRedirect(res, e?.message || 'No pude guardar el contexto IA.', true);
+  }
+});
+
+app.post("/broadcast/assets", (req, res, next) => {
+  if (!broadcastUpload) {
+    return res.status(500).json({ ok: false, error: 'multer_missing', message: 'Falta instalar multer: npm i multer' });
+  }
+  return broadcastUpload.array('files', 6)(req, res, next);
+}, async (req, res) => {
+  try {
+    const files = Array.isArray(req.files) ? req.files : [];
+    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    if (!files.length) return broadcastPanelRedirect(res, 'No recibí archivos para subir.', true);
+
+    const current = await getBroadcastCampaignConfig(campaignName);
+    const assets = Array.isArray(current.assets) ? current.assets.slice() : [];
+    for (const file of files) {
+      const safeName = String(file.originalname || `archivo-${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, '_');
+      const tmpPath = path.join(getTmpDir(), `broadcast-asset-${Date.now()}-${safeName}`);
+      fs.writeFileSync(tmpPath, file.buffer);
+      const mimeType = String(file.mimetype || guessMimeTypeFromFilename(safeName) || 'application/octet-stream');
+      const mediaId = await uploadMediaToWhatsApp(tmpPath, mimeType);
+      assets.push({
+        filename: safeName,
+        mimeType,
+        mediaId,
+        uploadedAt: new Date().toISOString(),
+      });
+    }
+
+    await upsertBroadcastCampaign({
+      campaignName,
+      sourceFile: current.sourceFile || BROADCAST_EXCEL_PATH,
+      pattern: current.pattern || BROADCAST_PATTERN_SAFE,
+      messages: current.messages || BROADCAST_MESSAGES,
+      isActive: current.isActive,
+      campaignType: current.campaignType,
+      aiContext: current.aiContext,
+      aiResponseStyle: current.aiResponseStyle,
+      aiGuardrails: current.aiGuardrails,
+      aiCta: current.aiCta,
+      validUntil: current.validUntil,
+      assets,
+    });
+
+    return broadcastPanelRedirect(res, `Archivos cargados correctamente: ${files.length}.`);
+  } catch (e) {
+    return broadcastPanelRedirect(res, e?.message || 'No pude subir los archivos de la campaña.', true);
+  }
+});
 
 app.post("/broadcast/messages", async (req, res) => {
   try {
@@ -2753,131 +2544,6 @@ app.post("/broadcast/messages", async (req, res) => {
     return broadcastPanelRedirect(res, 'Mensajes guardados correctamente.');
   } catch (e) {
     return broadcastPanelRedirect(res, e?.message || 'No pude guardar los mensajes.', true);
-  }
-});
-
-
-app.post("/broadcast/context", async (req, res) => {
-  try {
-    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
-    const current = await getBroadcastCampaignConfig(campaignName);
-    await upsertBroadcastCampaign({
-      campaignName,
-      sourceFile: current.sourceFile || BROADCAST_EXCEL_PATH,
-      pattern: current.pattern || BROADCAST_PATTERN_SAFE,
-      messages: current.messages?.length ? current.messages : BROADCAST_MESSAGES,
-      isActive: current.isActive,
-      campaignType: req.body?.campaign_type || current.campaignType || '',
-      aiBrief: req.body?.ai_brief ?? current.aiBrief ?? '',
-      aiRules: req.body?.ai_rules ?? current.aiRules ?? '',
-      aiDontInvent: req.body?.ai_dont_invent ?? current.aiDontInvent ?? '',
-      aiGoal: req.body?.ai_goal ?? current.aiGoal ?? '',
-      validUntil: req.body?.valid_until ?? current.validUntil ?? '',
-      mediaItems: current.mediaItems || [],
-    });
-    return broadcastPanelRedirect(res, 'Contexto IA guardado correctamente.');
-  } catch (e) {
-    return broadcastPanelRedirect(res, e?.message || 'No pude guardar el contexto IA.', true);
-  }
-});
-
-app.post("/broadcast/media/upload", (req, res, next) => {
-  if (!broadcastUpload) {
-    return res.status(500).json({ ok: false, error: 'multer_missing', message: 'Falta instalar multer: npm i multer' });
-  }
-  return broadcastUpload.array('media_files', 10)(req, res, next);
-}, async (req, res) => {
-  try {
-    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
-    const files = Array.isArray(req.files) ? req.files : [];
-    if (!files.length) return broadcastPanelRedirect(res, 'Tenés que elegir al menos un archivo.', true);
-
-    const current = await getBroadcastCampaignConfig(campaignName);
-    const existingItems = Array.isArray(current.mediaItems) ? current.mediaItems : [];
-    const uploadedItems = [];
-
-    for (const file of files) {
-      const savedName = String(file.originalname || `media-${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, '_');
-      const tmpPath = path.join(getTmpDir(), `broadcast-media-${Date.now()}-${savedName}`);
-      fs.writeFileSync(tmpPath, file.buffer);
-      const mimeType = String(file.mimetype || guessMimeTypeFromFilename(savedName) || 'application/octet-stream');
-      const mediaId = await uploadMediaToWhatsApp(tmpPath, mimeType);
-      const mediaType = mimeType.startsWith('image/') ? 'image' : (mimeType.startsWith('video/') ? 'video' : 'document');
-      uploadedItems.push({
-        mediaId,
-        mediaType,
-        filename: savedName,
-        mimeType,
-        caption: String(req.body?.caption || '').trim(),
-      });
-    }
-
-    await upsertBroadcastCampaign({
-      campaignName,
-      sourceFile: current.sourceFile || BROADCAST_EXCEL_PATH,
-      pattern: current.pattern || BROADCAST_PATTERN_SAFE,
-      messages: current.messages?.length ? current.messages : BROADCAST_MESSAGES,
-      isActive: current.isActive,
-      campaignType: current.campaignType || '',
-      aiBrief: current.aiBrief || '',
-      aiRules: current.aiRules || '',
-      aiDontInvent: current.aiDontInvent || '',
-      aiGoal: current.aiGoal || '',
-      validUntil: current.validUntil || '',
-      mediaItems: [...existingItems, ...uploadedItems],
-    });
-
-    return broadcastPanelRedirect(res, `Archivos cargados correctamente: ${uploadedItems.length}.`);
-  } catch (e) {
-    return broadcastPanelRedirect(res, e?.message || 'No pude subir los archivos.', true);
-  }
-});
-
-app.post("/broadcast/media/delete", async (req, res) => {
-  try {
-    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
-    const mediaId = String(req.body?.media_id || '').trim();
-    const current = await getBroadcastCampaignConfig(campaignName);
-    const nextItems = (Array.isArray(current.mediaItems) ? current.mediaItems : []).filter((item) => String(item?.mediaId || '').trim() !== mediaId);
-    await upsertBroadcastCampaign({
-      campaignName,
-      sourceFile: current.sourceFile || BROADCAST_EXCEL_PATH,
-      pattern: current.pattern || BROADCAST_PATTERN_SAFE,
-      messages: current.messages?.length ? current.messages : BROADCAST_MESSAGES,
-      isActive: current.isActive,
-      campaignType: current.campaignType || '',
-      aiBrief: current.aiBrief || '',
-      aiRules: current.aiRules || '',
-      aiDontInvent: current.aiDontInvent || '',
-      aiGoal: current.aiGoal || '',
-      validUntil: current.validUntil || '',
-      mediaItems: nextItems,
-    });
-    return broadcastPanelRedirect(res, 'Archivo quitado de la campaña.');
-  } catch (e) {
-    return broadcastPanelRedirect(res, e?.message || 'No pude quitar el archivo.', true);
-  }
-});
-
-app.post("/broadcast/context", async (req, res) => {
-  try {
-    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
-    const current = await getBroadcastCampaignConfig(campaignName);
-    await upsertBroadcastCampaign({
-      campaignName,
-      sourceFile: current.sourceFile || BROADCAST_EXCEL_PATH,
-      pattern: current.pattern || BROADCAST_PATTERN_SAFE,
-      messages: current.messages?.length ? current.messages : null,
-      isActive: current.isActive,
-      campaignType: req.body?.campaign_type || current.campaignType || '',
-      aiBrief: req.body?.campaign_brief || current.aiBrief || '',
-      aiRules: req.body?.campaign_rules || current.aiRules || '',
-      aiGoal: req.body?.campaign_goal || current.aiGoal || '',
-      validUntil: req.body?.campaign_valid_until || current.validUntil || '',
-    });
-    return broadcastPanelRedirect(res, 'Contexto IA guardado correctamente.');
-  } catch (e) {
-    return broadcastPanelRedirect(res, e?.message || 'No pude guardar el contexto IA.', true);
   }
 });
 
@@ -2919,6 +2585,20 @@ app.post("/broadcast/upload", (req, res, next) => {
 
     fs.writeFileSync(tempPath, req.file.buffer);
     BROADCAST_EXCEL_PATH = tempPath;
+    await upsertBroadcastCampaign({
+      campaignName,
+      sourceFile: tempPath,
+      pattern: current.pattern || BROADCAST_PATTERN_SAFE,
+      messages: current.messages || BROADCAST_MESSAGES,
+      isActive: current.isActive,
+      campaignType: current.campaignType,
+      aiContext: current.aiContext,
+      aiResponseStyle: current.aiResponseStyle,
+      aiGuardrails: current.aiGuardrails,
+      aiCta: current.aiCta,
+      validUntil: current.validUntil,
+      assets: current.assets || [],
+    });
 
     const cleared = await clearBroadcastQueueForUpload(campaignName, replaceMode);
     const data = await ensureBroadcastCampaignLoaded({
@@ -2942,8 +2622,6 @@ app.post("/broadcast/upload", (req, res, next) => {
       cleared,
       excel_path: tempPath,
       messages_count: current.messages?.length || BROADCAST_MESSAGES.length,
-      campaign_type: current.campaignType || '',
-      media_items_count: Array.isArray(current.mediaItems) ? current.mediaItems.length : 0,
       ...data,
     });
   } catch (e) {
@@ -2970,11 +2648,13 @@ app.get("/broadcast/status", async (_req, res) => {
       daily_pattern: campaign.pattern || BROADCAST_PATTERN_SAFE,
       messages_count: campaign.messages?.length || BROADCAST_MESSAGES.length,
       is_active: !!campaign.isActive,
-      campaign_type: campaign.campaignType || '',
-      ai_brief: campaign.aiBrief || '',
-      ai_rules: campaign.aiRules || '',
-      ai_goal: campaign.aiGoal || '',
-      valid_until: campaign.validUntil || null,
+      campaign_type: campaign.campaignType || 'OTHER',
+      ai_context: campaign.aiContext || '',
+      ai_response_style: campaign.aiResponseStyle || '',
+      ai_guardrails: campaign.aiGuardrails || '',
+      ai_cta: campaign.aiCta || '',
+      valid_until: campaign.validUntil || '',
+      assets_count: Array.isArray(campaign.assets) ? campaign.assets.length : 0,
       summary,
     });
   } catch (e) {
@@ -3005,36 +2685,6 @@ app.post("/broadcast/import", async (req, res) => {
     return res.json({ ok: true, ...data });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e?.message || 'error_broadcast_import' });
-  }
-});
-
-app.post("/broadcast/retry-unconfirmed", async (req, res) => {
-  try {
-    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
-    const delayMinutes = Math.max(1, Number(req.body?.delay_minutes || 1));
-    const result = await db.query(
-      `UPDATE broadcast_queue
-          SET status = 'pending',
-              send_at = NOW() + ($2::int * INTERVAL '1 minute'),
-              wa_message_id = NULL,
-              delivery_status = NULL,
-              api_accepted_at = NULL,
-              sent_at = NULL,
-              last_error = 'Reintento manual de mensaje sin confirmar',
-              updated_at = NOW()
-        WHERE campaign_name = $1
-          AND status = 'sent_api'`,
-      [campaignName, delayMinutes]
-    );
-    if (req.headers.accept && String(req.headers.accept).includes('text/html')) {
-      return broadcastPanelRedirect(res, `Mensajes sin confirmar pasados a pendiente: ${Number(result.rowCount || 0)}.`);
-    }
-    return res.json({ ok: true, restored: Number(result.rowCount || 0) });
-  } catch (e) {
-    if (req.headers.accept && String(req.headers.accept).includes('text/html')) {
-      return broadcastPanelRedirect(res, e?.message || 'No pude restaurar los mensajes sin confirmar.', true);
-    }
-    return res.status(500).json({ ok: false, error: e?.message || 'error_broadcast_retry_unconfirmed' });
   }
 });
 
@@ -3102,10 +2752,17 @@ const BROADCAST_DAILY_PATTERN = String(process.env.BROADCAST_DAILY_PATTERN || '3
 const BROADCAST_PATTERN_SAFE = BROADCAST_DAILY_PATTERN.length ? BROADCAST_DAILY_PATTERN : [30, 15, 10];
 const BROADCAST_SLOT_GRANULARITY_MINUTES = 5;
 const BROADCAST_MIN_GAP_MINUTES = 20;
-const BROADCAST_CONFIRM_TIMEOUT_MINUTES = Number(process.env.BROADCAST_CONFIRM_TIMEOUT_MINUTES || 90);
-const BROADCAST_CONFIRM_MAX_ATTEMPTS = Number(process.env.BROADCAST_CONFIRM_MAX_ATTEMPTS || 3);
-const BROADCAST_CONFIRM_RETRY_DELAY_MINUTES = Number(process.env.BROADCAST_CONFIRM_RETRY_DELAY_MINUTES || 15);
-const BROADCAST_PHONE_COOLDOWN_MINUTES = Number(process.env.BROADCAST_PHONE_COOLDOWN_MINUTES || 5);
+
+const BROADCAST_SAME_RECIPIENT_GAP_MS = Number(process.env.BROADCAST_SAME_RECIPIENT_GAP_MS || 5 * 60 * 1000);
+const BROADCAST_SENT_API_STALE_MS = Number(process.env.BROADCAST_SENT_API_STALE_MS || 8 * 60 * 1000);
+const BROADCAST_MAX_CONFIRM_RETRIES = Number(process.env.BROADCAST_MAX_CONFIRM_RETRIES || 3);
+
+function isBroadcastAssetImage(mimeType = '', filename = '') {
+  const mime = String(mimeType || '').toLowerCase();
+  if (mime.startsWith('image/')) return true;
+  const lower = String(filename || '').toLowerCase();
+  return /\.(png|jpe?g|webp)$/i.test(lower);
+}
 
 
 // ===================== HUBSPOT (CRM seguimiento) =====================
@@ -5267,13 +4924,6 @@ function rememberAssistantServiceOffer(waId, rows = [], extra = {}) {
     questionKind: extra.questionKind || '',
     lastAssistantText: extra.lastAssistantText || '',
   });
-}
-
-
-function resolveServicesByNames(rows = [], names = []) {
-  const wanted = new Set(normalizeActiveOfferItems(names).map((x) => normalize(cleanServiceName(x))));
-  if (!wanted.size) return [];
-  return (Array.isArray(rows) ? rows : []).filter((row) => wanted.has(normalize(cleanServiceName(row?.nombre || ''))));
 }
 
 function looksLikeActiveOfferFollowup(text = '') {
@@ -11012,22 +10662,6 @@ function findCourseByContextName(rows, courseName) {
     || null;
 }
 
-function resolveCoursesByNames(rows, names = []) {
-  const list = Array.isArray(rows) ? rows.filter((x) => x?.nombre) : [];
-  const wanted = normalizeActiveOfferItems(names);
-  if (!list.length || !wanted.length) return [];
-  const out = [];
-  const seen = new Set();
-  for (const name of wanted) {
-    const row = findCourseByContextName(list, name);
-    const key = normalize(row?.nombre || '');
-    if (!row || !key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(row);
-  }
-  return out;
-}
-
 
 const COURSE_REFERENCE_STOPWORDS = new Set([
   'curso', 'cursos', 'clase', 'clases', 'capacitacion', 'capacitaciones', 'taller', 'talleres',
@@ -12134,9 +11768,8 @@ Respondé SOLO JSON.`
 
 // ===================== WHATSAPP SEND =====================
 async function sendWhatsAppText(to, text, options = {}) {
-  const recipient = normalizeWhatsAppRecipient(to) || String(to || '').trim();
   let body = String(text || "");
-  const oneShotPrefix = consumeOneShotReplyPrefix(recipient || to);
+  const oneShotPrefix = consumeOneShotReplyPrefix(to);
   if (oneShotPrefix) {
     body = body ? `${oneShotPrefix}
 
@@ -12144,21 +11777,16 @@ ${body}`.trim() : String(oneShotPrefix || '').trim();
   }
 
   const disableDedup = !!options?.disableDedup;
-  const dedupKey = `${recipient}::${body}`;
+  const dedupKey = `${to}::${body}`;
   const now = Date.now();
   const prevTs = lastSentOutByPeer.get(dedupKey) || 0;
   if (!disableDedup && body && (now - prevTs) < OUT_DEDUP_MS) {
-    return { deduped: true, wa_msg_id: null };
+    return { deduped: true };
   }
 
   const resp = await axios.post(
     `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: "whatsapp",
-      to: recipient,
-      type: "text",
-      text: { body }
-    },
+    { messaging_product: "whatsapp", to, text: { body } },
     {
       headers: {
         Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
@@ -12167,15 +11795,17 @@ ${body}`.trim() : String(oneShotPrefix || '').trim();
     }
   );
 
-  const wa_msg_id = resp?.data?.messages?.[0]?.id || null;
-
-  if (!disableDedup && body && wa_msg_id) {
+  if (!disableDedup && body) {
     lastSentOutByPeer.set(dedupKey, now);
   }
 
+  if (!disableDedup) lastSentOutByPeer.set(dedupKey, now);
+
+  const wa_msg_id = resp?.data?.messages?.[0]?.id || null;
+
   await dbInsertMessage({
     direction: "out",
-    wa_peer: recipient,
+    wa_peer: to,
     name: null,
     text: body,
     msg_type: "text",
@@ -12197,7 +11827,7 @@ async function sendWhatsAppTemplate(to, templateName, bodyVars = [], meta = {}, 
   const dedupKey = `${recipient}::template::${templateName}::${body.join('|')}`;
   const now = Date.now();
   const prevTs = lastSentOutByPeer.get(dedupKey) || 0;
-  if (!disableDedup && (now - prevTs) < OUT_DEDUP_MS) return { deduped: true, wa_msg_id: null };
+  if (!disableDedup && (now - prevTs) < OUT_DEDUP_MS) return { deduped: true };
 
   const components = body.length
     ? [{
@@ -12229,10 +11859,6 @@ async function sendWhatsAppTemplate(to, templateName, bodyVars = [], meta = {}, 
   );
 
   const wa_msg_id = resp?.data?.messages?.[0]?.id || null;
-  if (!disableDedup && wa_msg_id) {
-    lastSentOutByPeer.set(dedupKey, now);
-  }
-
   await dbInsertMessage({
     direction: 'out',
     wa_peer: recipient,
@@ -13484,42 +13110,32 @@ lastCloseContext.set(waId, {
     pushHistory(waId, "user", text);
 
     const activeOfferForReview = getActiveAssistantOffer(waId);
-    const pendingDraftForAiReview = await getAppointmentDraft(waId);
-    const lastCourseContextForReview = getLastCourseContext(waId);
-    const aiHistorySnippet = buildConversationHistorySnippet(ensureConv(waId).messages || [], 12, 1600);
-
-    if (activeOfferForReview?.isBroadcastCampaign) {
-      const broadcastHandled = await maybeHandleBroadcastAiFollowup({
-        text,
-        waId,
-        phone,
+    if (activeOfferForReview && !looksLikeDifferentTopicThanActiveBroadcast(text, activeOfferForReview) && (looksLikeActiveOfferFollowup(text) || isAmbiguousBroadcastFollowup(text))) {
+      const forcedResolution = await resolveReplyToActiveAssistantOfferWithAI(text, {
         activeOffer: activeOfferForReview,
-        historySnippet: aiHistorySnippet,
-      });
-      if (broadcastHandled?.handled) return;
-    }
-
-    let preResolvedActiveOffer = null;
-
-    if (activeOfferForReview && looksLikeActiveOfferFollowup(text)) {
-      preResolvedActiveOffer = await resolveReplyToActiveAssistantOfferWithAI(text, {
-        activeOffer: activeOfferForReview,
-        lastServiceName: getLastKnownService(waId, pendingDraftForAiReview)?.nombre || '',
-        lastCourseName: lastCourseContextForReview?.selectedName || lastCourseContextForReview?.query || '',
-        historySnippet: aiHistorySnippet,
         force: true,
+        lastServiceName: getLastKnownService(waId, await getAppointmentDraft(waId))?.nombre || '',
+        lastCourseName: getLastCourseContext(waId)?.selectedName || getLastCourseContext(waId)?.query || '',
+        historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 12, 1400),
       });
-
-      if (preResolvedActiveOffer?.action === 'CONTINUE_ACTIVE_OFFER') {
-        const preTargetType = String(preResolvedActiveOffer.target_type || activeOfferForReview?.type || '').trim().toUpperCase();
-        if (preTargetType === 'COURSE') clearProductMemory(waId);
-        if (preTargetType === 'PRODUCT') clearLastCourseContext(waId);
-
-        const syntheticFromPreResolvedOffer = buildSyntheticTextFromActiveOfferResolution(preResolvedActiveOffer, activeOfferForReview);
-        if (syntheticFromPreResolvedOffer) {
-          text = syntheticFromPreResolvedOffer;
-          userIntentText = syntheticFromPreResolvedOffer;
-          updateLastCloseContext(waId, { lastUserText: syntheticFromPreResolvedOffer });
+      if (forcedResolution?.action === 'CONTINUE_ACTIVE_OFFER') {
+        const syntheticEarly = buildSyntheticTextFromActiveOfferResolution(forcedResolution, activeOfferForReview);
+        if (syntheticEarly) {
+          text = syntheticEarly;
+          userIntentText = syntheticEarly;
+          updateLastCloseContext(waId, { lastUserText: syntheticEarly });
+          if (String(activeOfferForReview?.type || '').toUpperCase() === 'COURSE') {
+            const seededCourses = (activeOfferForReview.items || []).map((nombre) => ({ nombre }));
+            setLastCourseContext(waId, {
+              query: activeOfferForReview.selectedName || activeOfferForReview.items?.[0] || 'cursos',
+              selectedName: activeOfferForReview.selectedName || activeOfferForReview.items?.[0] || '',
+              currentCourseName: activeOfferForReview.selectedName || activeOfferForReview.items?.[0] || '',
+              lastOptions: normalizeActiveOfferItems(activeOfferForReview.items || []).slice(0, 10),
+              recentCourses: mergeCourseContextRows(seededCourses, getLastCourseContext(waId)?.recentCourses || []),
+              requestedInterest: buildHubSpotCourseInterestLabel(activeOfferForReview.selectedName || activeOfferForReview.items?.[0] || 'cursos'),
+            });
+            clearProductMemory(waId);
+          }
         }
       }
     }
@@ -13530,16 +13146,16 @@ lastCloseContext.set(waId, {
       activeAssistantOfferFamily: activeOfferForReview?.family || '',
       activeAssistantOfferItems: Array.isArray(activeOfferForReview?.items) ? activeOfferForReview.items.slice(0, 12) : [],
       activeAssistantOfferSelectedName: activeOfferForReview?.selectedName || '',
-      hasDraft: !!pendingDraftForAiReview,
-      pendingDraft: pendingDraftForAiReview,
-      flowStep: pendingDraftForAiReview?.flow_step || '',
-      lastService: getLastKnownService(waId, pendingDraftForAiReview),
-      lastServiceName: getLastKnownService(waId, pendingDraftForAiReview)?.nombre || '',
+      hasDraft: !!(await getAppointmentDraft(waId)),
+      pendingDraft: await getAppointmentDraft(waId),
+      flowStep: (await getAppointmentDraft(waId))?.flow_step || '',
+      lastService: getLastKnownService(waId, await getAppointmentDraft(waId)),
+      lastServiceName: getLastKnownService(waId, await getAppointmentDraft(waId))?.nombre || '',
       lastProductName: lastProductByUser.get(waId)?.nombre || '',
-      lastCourseContext: lastCourseContextForReview,
-      lastCourseName: lastCourseContextForReview?.selectedName || lastCourseContextForReview?.query || '',
-      hasCourseContext: !!lastCourseContextForReview,
-      historySnippet: aiHistorySnippet,
+      lastCourseContext: getLastCourseContext(waId),
+      lastCourseName: getLastCourseContext(waId)?.selectedName || getLastCourseContext(waId)?.query || '',
+      hasCourseContext: !!getLastCourseContext(waId),
+      historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 12, 1600),
     });
 
     if (firstAiReview?.topic_changed) {
@@ -13692,81 +13308,21 @@ updateLastCloseContext(waId, {
     const shouldReviewActiveOffer = !!(
       activeAssistantOffer
       && (
-        preResolvedActiveOffer?.action === 'CONTINUE_ACTIVE_OFFER'
-        || firstAiReview?.follows_active_offer
+        firstAiReview?.follows_active_offer
         || (!firstAiReview?.topic_changed && (firstAiReview?.type === 'OTHER' || !firstAiReview?.type))
       )
     );
 
-    const activeOfferResolution = preResolvedActiveOffer
-      || (shouldReviewActiveOffer
-        ? await resolveReplyToActiveAssistantOfferWithAI(text, {
-            activeOffer: activeAssistantOffer,
-            lastServiceName: getLastKnownService(waId, pendingDraftForAiReview)?.nombre || '',
-            lastCourseName: getLastCourseContext(waId)?.selectedName || getLastCourseContext(waId)?.query || '',
-            historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 12, 1400),
-            force: true,
-          })
-        : (firstAiReview?.topic_changed ? { action: 'SWITCH_TOPIC' } : null));
+    const activeOfferResolution = shouldReviewActiveOffer
+      ? await resolveReplyToActiveAssistantOfferWithAI(text, {
+          activeOffer: activeAssistantOffer,
+          lastServiceName: getLastKnownService(waId, await getAppointmentDraft(waId))?.nombre || '',
+          lastCourseName: getLastCourseContext(waId)?.selectedName || getLastCourseContext(waId)?.query || '',
+          historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 12, 1400),
+        })
+      : (firstAiReview?.topic_changed ? { action: 'SWITCH_TOPIC' } : null);
 
     if (activeOfferResolution?.action === 'CONTINUE_ACTIVE_OFFER') {
-      if (activeOfferResolution.target_type === 'COURSE') {
-        const courseCatalogForActiveOffer = await getCoursesCatalog();
-        const activeCourseNames = normalizeActiveOfferItems(
-          activeOfferResolution.wants_all_items
-            ? (activeAssistantOffer?.items || [])
-            : [
-                activeOfferResolution.target_name || '',
-                activeAssistantOffer?.selectedName || '',
-                ...(Array.isArray(activeAssistantOffer?.items) ? activeAssistantOffer.items.slice(0, 6) : []),
-              ]
-        );
-        let activeCourses = resolveCoursesByNames(courseCatalogForActiveOffer, activeCourseNames);
-        if (!activeCourses.length && Array.isArray(activeAssistantOffer?.items) && activeAssistantOffer.items.length) {
-          activeCourses = resolveCoursesByNames(courseCatalogForActiveOffer, activeAssistantOffer.items);
-        }
-
-        if (activeCourses.length) {
-          const previousRecentCourses = Array.isArray(getLastCourseContext(waId)?.recentCourses) ? getLastCourseContext(waId).recentCourses : [];
-          const detailGoal = String(activeOfferResolution.goal || 'DETAIL').trim().toUpperCase();
-          const selectedCourse = findCourseByContextName(activeCourses, activeOfferResolution.target_name || activeAssistantOffer?.selectedName || '')
-            || (activeCourses.length === 1 ? activeCourses[0] : null);
-          const shouldListCourses = activeOfferResolution.wants_all_items || (!selectedCourse && activeCourses.length > 1);
-
-          setLastCourseContext(waId, {
-            query: selectedCourse?.nombre || activeAssistantOffer?.selectedName || 'cursos',
-            selectedName: selectedCourse?.nombre || activeAssistantOffer?.selectedName || '',
-            currentCourseName: selectedCourse?.nombre || activeAssistantOffer?.selectedName || '',
-            lastOptions: activeCourses.map((x) => x.nombre).filter(Boolean).slice(0, 10),
-            recentCourses: mergeCourseContextRows(activeCourses, previousRecentCourses),
-          });
-          clearProductMemory(waId);
-
-          if (shouldListCourses) {
-            await sendCourseCatalogResponses(phone, waId, activeCourses, 'LIST');
-            scheduleInactivityFollowUp(waId, phone);
-            return;
-          }
-
-          if (selectedCourse && detailGoal !== 'MATERIAL') {
-            const naturalGoal = detailGoal === 'NONE' ? 'DETAIL' : detailGoal;
-            const naturalCourseReply = formatNaturalCourseFollowupReply(selectedCourse, naturalGoal);
-            if (naturalCourseReply) {
-              rememberAssistantCourseOffer(waId, [selectedCourse], {
-                mode: 'DETAIL',
-                selectedName: selectedCourse?.nombre || '',
-                questionKind: naturalGoal,
-                lastAssistantText: naturalCourseReply,
-              });
-              pushHistory(waId, 'assistant', naturalCourseReply);
-              await sendWhatsAppText(phone, naturalCourseReply);
-              scheduleInactivityFollowUp(waId, phone);
-              return;
-            }
-          }
-        }
-      }
-
       if (activeOfferResolution.target_type === 'PRODUCT') {
         const stockForActiveOffer = filterSellableCatalogRows(await getStockCatalog(), { includeOutOfStock: false });
         const activeProductNames = normalizeActiveOfferItems(
@@ -13788,7 +13344,6 @@ updateLastCloseContext(waId, {
             lastOptions: activeProducts.map((x) => x.nombre).slice(0, 10),
           });
           if (activeProducts.length === 1) lastProductByUser.set(waId, activeProducts[0]);
-          clearLastCourseContext(waId);
 
           if (activeOfferResolution.goal === 'PHOTO') {
             const sent = activeOfferResolution.wants_all_items || activeProducts.length > 1
@@ -15913,8 +15468,11 @@ Si quiere, le paso información de cualquiera de esos 😊`;
     // fallback
     const model = pickModelForText(text);
 
+    const activeCampaignMessages = await buildAssistantMessagesForBroadcastCampaign(waId, getActiveAssistantOffer(waId));
+
     const messages = [
       { role: "system", content: SYSTEM_PROMPT },
+      ...activeCampaignMessages,
       { role: "system", content: `Fecha y hora actual: ${nowARString()} (${TIMEZONE}).` },
       { role: "system", content: `Contexto del turno actual: ${JSON.stringify({
         servicio_actual: pendingDraft?.servicio || lastKnownService?.nombre || '',
