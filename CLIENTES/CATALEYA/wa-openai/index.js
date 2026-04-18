@@ -4806,7 +4806,8 @@ Hablás en español rioplatense, con mensajes cortos y naturales. Profesional, c
 ESTILO:
 - Soná como una asistente real del salón: cercana, amable y simple.
 - Mensajes cortos, claros y por etapas. Evitá bloques largos.
-- Si inicia con “hola”, responder saludo + “¿en qué puedo ayudarte?” solamente.
+- Si el cliente manda solo un saludo y NO hay un tema activo reciente, respondé con saludo breve + “¿en qué puedo ayudarte?”.
+- Si ya venían hablando de algo, un “hola”, “holaa”, “chau”, “gracias”, “ok” o saludo corto NO reinicia la conversación: seguí el tema activo.
 - Emojis suaves y lindos cuando sumen claridad: ✨😊📅🕐💳📩
 - Cuando des datos sensibles, presentalos en líneas separadas y prolijas.
 - Si ya venían hablando de un tema, no vuelvas a preguntar lo mismo. Continuá desde el contexto.
@@ -9865,6 +9866,23 @@ function detectRowProductDomain(row) {
   return 'hair';
 }
 
+function isGenericProductQuery(query) {
+  const q = normalizeCatalogSearchText(query || '');
+  if (!q) return false;
+
+  const activeDomain = detectProductDomain(q);
+  const family = activeDomain === 'furniture'
+    ? detectFurnitureFamily(q)
+    : detectProductFamily(q);
+
+  const tokens = tokenize(q, { expandSynonyms: false }).filter(Boolean);
+  const asksForList = /(\b(lista|opciones|catalogo|catálogo|stock|productos|todo|todas|todos|tenes|tenés|hay|disponible|disponibles|mostrame|mostrarme|mandame|pasame)\b)/i.test(q);
+
+  if (asksForList) return true;
+  if (!family) return false;
+  return tokens.length <= 4;
+}
+
 function buildProductFollowupQuestion({ domain = '', familyLabel = '', useType = '' } = {}) {
   const readableFamily = familyLabel ? (domain === 'furniture' ? (getFurnitureFamilyDef(familyLabel)?.label || familyLabel) : getProductFamilyLabel(familyLabel)) : '';
   if (domain === 'furniture') {
@@ -11839,6 +11857,70 @@ function isGreetingOnly(text) {
   return !t;
 }
 
+function stripSoftConversationPrefix(text) {
+  const original = String(text || '').trim();
+  if (!original) return '';
+
+  let out = original;
+  const patterns = [
+    /^(?:hola+|holaa+|holi+|holis+|buenas+|buen dia|buen día|buenos dias|buenos días|buenas tardes|buenas noches|hey|ey)\b[,!\s.:-]*/i,
+    /^(?:chau+|chao+|gracias+|oka+y?|ok+|dale+|perfecto+|bueno+)\b[,!\s.:-]*/i,
+  ];
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const rx of patterns) {
+      const candidate = out.replace(rx, '').trim();
+      if (candidate && candidate !== out) {
+        out = candidate;
+        changed = true;
+      }
+    }
+  }
+
+  return out;
+}
+
+function hasRecentConversationContext(waId) {
+  if (!waId) return false;
+  return !!(
+    getActiveAssistantOffer(waId)
+    || getLastProductContext(waId)
+    || getLastCourseContext(waId)
+    || getPendingAmbiguousBeauty(waId)
+    || getLastResolvedBeauty(waId)
+    || getLastKnownService(waId, null)
+  );
+}
+
+function buildContextualGreetingReply(waId) {
+  const activeOffer = getActiveAssistantOffer(waId);
+  if (activeOffer?.type === 'PRODUCT') {
+    return 'Hola 😊 Seguimos con lo que veníamos viendo. Decime qué necesitás sobre esos productos y te ayudo.';
+  }
+  if (activeOffer?.type === 'COURSE') {
+    return 'Hola 😊 Seguimos con lo que veníamos viendo del curso. Decime qué querés saber y te ayudo.';
+  }
+  if (activeOffer?.type === 'SERVICE' || getLastKnownService(waId, null)) {
+    return 'Hola 😊 Seguimos con lo que veníamos viendo. Decime qué necesitás y te ayudo.';
+  }
+  if (getLastCourseContext(waId)) {
+    return 'Hola 😊 Seguimos con lo que veníamos viendo del curso. Decime qué necesitás y te ayudo.';
+  }
+  if (getLastProductContext(waId)) {
+    return 'Hola 😊 Seguimos con lo que veníamos viendo. Contame qué buscás y te ayudo a elegir.';
+  }
+  return '¡Hola! 😊 ¿En qué puedo ayudarte?';
+}
+
+function looksLikeHairCareConsultation(text = '') {
+  const t = normalize(text || '');
+  if (!t) return false;
+  if (/(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b|cuanto dura|cuánto dura|cuanto demora|cuánto demora)/i.test(t)) return false;
+  return /(pelo|cabello|seco|reseco|dañado|danado|quebrado|frizz|rulos|graso|caida|caída|hidrat|repar|nutric|acondicionador|bano de crema|baño de crema|mascara|máscara|mascarilla|ampolla|serum|sérum|shampoo|matizador|qué es mejor|que es mejor|como es el tema|cómo es el tema|me recomendas|me recomendás|cual me conviene|cuál me conviene)/i.test(t);
+}
+
 function hasConcreteCommercialContext(text) {
   const t = normalize(text || '');
   if (!t) return false;
@@ -13264,8 +13346,10 @@ lastCloseContext.set(waId, {
     const mergedInbound = consumeInboundMergeChunk(waId, inboundVersion);
     if (!mergedInbound) return;
 
-    text = String(mergedInbound.text || '').trim();
-    userIntentText = String(mergedInbound.userIntentText || userIntentText || text).trim();
+    const mergedTextRaw = String(mergedInbound.text || '').trim();
+    const mergedIntentRaw = String(mergedInbound.userIntentText || userIntentText || mergedTextRaw).trim();
+    text = stripSoftConversationPrefix(mergedTextRaw) || mergedTextRaw;
+    userIntentText = stripSoftConversationPrefix(mergedIntentRaw) || mergedIntentRaw || text;
     mediaMeta = mergedInbound.mediaMeta || mediaMeta || null;
     contactInfoFromText = extractContactInfo(text);
 
@@ -13490,6 +13574,16 @@ lastCloseContext.set(waId, {
       const askNameMsg = buildContactAskNameMessage(deferredText || text);
       pushHistory(waId, "assistant", askNameMsg);
       await sendWhatsAppText(phone, askNameMsg);
+      scheduleInactivityFollowUp(waId, phone);
+      return;
+    }
+
+    if (isGreetingOnly(text)) {
+      const greetingReply = hasRecentConversationContext(waId)
+        ? buildContextualGreetingReply(waId)
+        : '¡Hola! 😊 ¿En qué puedo ayudarte?';
+      pushHistory(waId, 'assistant', greetingReply);
+      await sendWhatsAppText(phone, greetingReply);
       scheduleInactivityFollowUp(waId, phone);
       return;
     }
@@ -14892,12 +14986,19 @@ Si después necesita algo, estoy acá ✨`;
         })
       : null;
 
-    const shouldTreatAsProduct = intent.type === 'PRODUCT' || (
-      intent.type !== 'SERVICE' &&
-      intent.type !== 'COURSE' &&
-      (
-        !!productAI?.is_product_query ||
-        (!!lastProductCtx && ((lastProductCtx?.domain === 'furniture' && looksLikeFurniturePreferenceReply(text)) || (lastProductCtx?.domain !== 'furniture' && looksLikeProductPreferenceReply(text))))
+    const shouldTreatAsProduct = (
+      intent.type === 'PRODUCT'
+      || (
+        intent.type !== 'COURSE'
+        && !looksLikeAppointmentIntent(text, {
+          pendingDraft: pendingDraft || null,
+          lastService: lastKnownService || null,
+        })
+        && (
+          !!productAI?.is_product_query
+          || looksLikeHairCareConsultation(text)
+          || (!!lastProductCtx && ((lastProductCtx?.domain === 'furniture' && looksLikeFurniturePreferenceReply(text)) || (lastProductCtx?.domain !== 'furniture' && looksLikeProductPreferenceReply(text))))
+        )
       )
     );
 
@@ -15415,6 +15516,8 @@ Si después necesita algo, estoy acá ✨`;
       // ✅ Evitar inventar servicios: si no está en el Excel, lo decimos y mostramos opciones reales
       const some = services.slice(0, 12).map(s => `${getCatalogItemEmoji(cleanServiceName(s.nombre), { kind: 'service' })} ${cleanServiceName(s.nombre)}`).join("\n");
       const msgNo = `No encuentro ese servicio en nuestra lista.
+
+Si su consulta era por *cuidado capilar o productos*, también la puedo orientar por ahí 😊
 
 Servicios disponibles (algunos):
 ${some}
