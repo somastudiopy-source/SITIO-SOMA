@@ -903,37 +903,38 @@ async function dbInsertMessage({ direction, wa_peer, name, text, msg_type, wa_ms
 
 // ===================== DIFUSIÓN DIARIA (EXCEL -> COLA -> ENVÍO) =====================
 const BROADCAST_MESSAGES = [
-  'Buen día 😊 Desde Cataleya queríamos avisarte que seguimos con lugares disponibles en nuestros talleres de peinados, trenzas africanas y pinta caritas. Si te interesa, te paso la info.',
-  'Hola 😊 Te escribimos desde Cataleya porque esta semana seguimos tomando inscripciones para nuestros talleres. Si querés, te cuento cuáles están disponibles ahora.',
-  'Buen día ✨ Estamos organizando nuevas inscripciones en Cataleya para talleres de peinados, trenzas africanas y pinta caritas. Si querés avanzar, te paso toda la info.',
-  'Hola, ¿cómo estás? 😊 Desde Cataleya queríamos contarte que seguimos con cupos para algunos talleres. Si te interesa, te digo cuáles quedan disponibles.',
-  'Buenas 😊 Te escribimos desde Cataleya porque aún hay lugares en algunos de nuestros talleres. Si querés, te cuento opciones y cómo reservar.',
-  'Buen día 💛 Queríamos avisarte que en Cataleya seguimos con inscripciones abiertas en talleres seleccionados. Si te interesa, te paso más información.',
-  'Hola 😊 Desde Cataleya queríamos acercarte esta info: todavía hay cupos en algunos talleres y si querés te orientamos según lo que más te interese.',
-  'Buen día ✨ Seguimos sumando inscripciones en Cataleya para distintos talleres. Si querés, te paso la propuesta disponible en este momento.',
-  'Hola, ¿cómo estás? 😊 Te escribimos desde Cataleya porque quizá te interese saber que todavía hay algunos cupos en talleres. Si querés, te cuento.',
-  'Buenas 💛 Desde Cataleya queríamos consultarte si seguís interesada en nuestros talleres. Si te interesa, te paso la info actualizada.',
-  'Buen día 😊 En Cataleya seguimos con consultas e inscripciones para talleres de peinados, trenzas africanas y pinta caritas. Si querés, te explico cómo sería.',
-  'Hola ✨ Te escribimos desde Cataleya porque todavía tenemos lugares en algunos talleres. Si te interesa, te paso toda la información sin compromiso.',
-  'Buen día 😊 Queríamos avisarte que en Cataleya siguen disponibles algunos talleres y si querés te puedo orientar con el que más te convenga.',
-  'Hola 💛 Desde Cataleya seguimos con cupos en talleres seleccionados. Si te interesa, te paso cuáles están disponibles y cómo reservar lugar.',
-  'Buenas 😊 Te escribimos porque en Cataleya todavía quedan lugares en algunos talleres. Si querés, te paso info y opciones para avanzar.',
-  'Buen día ✨ Queríamos comentarte que en Cataleya seguimos con inscripciones para talleres. Si querés, te paso lo disponible y te explico.',
-  'Hola 😊 Desde Cataleya queríamos acercarte esta propuesta porque aún hay cupos para algunos talleres. Si te interesa, te digo cuáles.',
-  'Buen día 💛 Estamos organizando nuevas reservas en Cataleya para talleres seleccionados. Si te interesa, te paso la info actual.',
-  'Hola, ¿cómo estás? 😊 Te escribimos desde Cataleya porque todavía hay posibilidades de sumarte a algunos talleres. Si querés, te cuento.',
-  'Buenas ✨ Seguimos con algunos lugares disponibles en talleres de Cataleya. Si te interesa, te explico cuáles están abiertos ahora.',
-  'Buen día 😊 Desde Cataleya queríamos avisarte que todavía estás a tiempo de consultar por algunos talleres. Si querés, te paso información.',
-  'Hola 💛 Te escribimos desde Cataleya porque siguen abiertas algunas inscripciones. Si te interesa, te cuento cómo podés avanzar.',
-  'Buen día ✨ En Cataleya seguimos con propuestas de talleres y todavía hay cupos en algunos casos. Si querés, te digo cuáles quedan.',
-  'Hola 😊 Queríamos acercarte esta info desde Cataleya: aún hay talleres con lugar disponible. Si te interesa, te paso el detalle.',
-  'Buenas 💛 Desde Cataleya seguimos tomando consultas para talleres. Si te interesa, te puedo pasar la información ahora mismo.',
-  'Buen día 😊 Te escribimos desde Cataleya porque quizás todavía te interese sumarte a alguno de nuestros talleres. Si querés, te paso la info.',
-  'Hola ✨ En Cataleya todavía tenemos cupos en algunos talleres. Si te interesa, te cuento opciones y cómo reservar.',
-  'Buen día 💛 Seguimos con inscripciones abiertas en Cataleya para talleres seleccionados. Si te interesa, te paso todo por acá.',
-  'Hola 😊 Desde Cataleya queríamos contarte que aún hay algunos talleres con lugar disponible. Si querés, te paso la info actualizada.',
-  'Buenas ✨ Te escribimos desde Cataleya porque seguimos con consultas e inscripciones para talleres. Si te interesa, te explico cómo sería.',
+  '{saludo} {nombre} 😊 Desde Cataleya queríamos avisarte que seguimos con lugares disponibles en nuestros talleres. Si te interesa, te paso la info.',
+  '{saludo} {nombre} 💛 Te escribimos desde Cataleya porque esta semana seguimos tomando inscripciones para nuestros talleres. Si querés, te cuento cuáles están disponibles.',
+  '{saludo} {nombre} ✨ Estamos organizando nuevas inscripciones en Cataleya para talleres de peinados, trenzas africanas y pinta caritas. Si querés avanzar, te paso toda la info.',
+  '{saludo} {nombre} 😊 Desde Cataleya queríamos contarte que seguimos con cupos para algunos talleres. Si te interesa, te digo cuáles quedan disponibles.',
+  '{saludo} {nombre} 💛 Te escribimos desde Cataleya porque aún hay lugares en algunos de nuestros talleres. Si querés, te cuento opciones y cómo reservar.',
+  '{saludo} {nombre} 😊 Queríamos avisarte que en Cataleya seguimos con inscripciones abiertas en talleres seleccionados. Si te interesa, te paso más información.',
+  '{saludo} {nombre} ✨ Desde Cataleya queríamos acercarte esta info: todavía hay cupos en algunos talleres y si querés te orientamos según lo que más te interese.',
+  '{saludo} {nombre} 😊 Seguimos sumando inscripciones en Cataleya para distintos talleres. Si querés, te paso la propuesta disponible en este momento.',
+  '{saludo} {nombre} 💛 Te escribimos desde Cataleya porque quizá te interese saber que todavía hay algunos cupos en talleres. Si querés, te cuento.',
+  '{saludo} {nombre} 😊 Desde Cataleya queríamos consultarte si seguís interesada en nuestros talleres. Si te interesa, te paso la info actualizada.',
+  '{saludo} {nombre} ✨ En Cataleya seguimos con consultas e inscripciones para talleres de peinados, trenzas africanas y pinta caritas. Si querés, te explico cómo sería.',
+  '{saludo} {nombre} 😊 Te escribimos desde Cataleya porque todavía tenemos lugares en algunos talleres. Si te interesa, te paso toda la información sin compromiso.',
+  '{saludo} {nombre} 💛 Queríamos avisarte que en Cataleya siguen disponibles algunos talleres y si querés te puedo orientar con el que más te convenga.',
+  '{saludo} {nombre} 😊 Desde Cataleya seguimos con cupos en talleres seleccionados. Si te interesa, te paso cuáles están disponibles y cómo reservar lugar.',
+  '{saludo} {nombre} ✨ Te escribimos porque en Cataleya todavía quedan lugares en algunos talleres. Si querés, te paso info y opciones para avanzar.',
+  '{saludo} {nombre} 😊 Queríamos comentarte que en Cataleya seguimos con inscripciones para talleres. Si querés, te paso lo disponible y te explico.',
+  '{saludo} {nombre} 💛 Desde Cataleya queríamos acercarte esta propuesta porque aún hay cupos para algunos talleres. Si te interesa, te digo cuáles.',
+  '{saludo} {nombre} 😊 Estamos organizando nuevas reservas en Cataleya para talleres seleccionados. Si te interesa, te paso la info actual.',
+  '{saludo} {nombre} ✨ Te escribimos desde Cataleya porque todavía hay posibilidades de sumarte a algunos talleres. Si querés, te cuento.',
+  '{saludo} {nombre} 😊 Seguimos con algunos lugares disponibles en talleres de Cataleya. Si te interesa, te explico cuáles están abiertos ahora.',
+  '{saludo} {nombre} 💛 Desde Cataleya queríamos avisarte que todavía estás a tiempo de consultar por algunos talleres. Si querés, te paso información.',
+  '{saludo} {nombre} 😊 Te escribimos desde Cataleya porque siguen abiertas algunas inscripciones. Si te interesa, te cuento cómo podés avanzar.',
+  '{saludo} {nombre} ✨ En Cataleya seguimos con propuestas de talleres y todavía hay cupos en algunos casos. Si querés, te digo cuáles quedan.',
+  '{saludo} {nombre} 😊 Queríamos acercarte esta info desde Cataleya: aún hay talleres con lugar disponible. Si te interesa, te paso el detalle.',
+  '{saludo} {nombre} 💛 Desde Cataleya seguimos tomando consultas para talleres. Si te interesa, te puedo pasar la información ahora mismo.',
+  '{saludo} {nombre} 😊 Te escribimos desde Cataleya porque quizás todavía te interese sumarte a alguno de nuestros talleres. Si querés, te paso la info.',
+  '{saludo} {nombre} ✨ En Cataleya todavía tenemos cupos en algunos talleres. Si te interesa, te cuento opciones y cómo reservar.',
+  '{saludo} {nombre} 😊 Seguimos con inscripciones abiertas en Cataleya para talleres seleccionados. Si te interesa, te paso todo por acá.',
+  '{saludo} {nombre} 💛 Desde Cataleya queríamos contarte que aún hay algunos talleres con lugar disponible. Si querés, te paso la info actualizada.',
+  '{saludo} {nombre} 😊 Te escribimos desde Cataleya porque seguimos con consultas e inscripciones para talleres. Si te interesa, te explico cómo sería.',
 ];
+const broadcastAiNameCache = new Map();
 
 function broadcastNormalizeHeader(value) {
   return String(value || '')
@@ -955,6 +956,112 @@ function broadcastFirstName(value) {
   return txt.split(' ')[0] || '';
 }
 
+function broadcastGreetingForDate(date = new Date()) {
+  const parts = broadcastLocalDateParts(date, -180);
+  if (parts.hour < 13) return 'Buen día';
+  if (parts.hour < 20) return 'Buenas tardes';
+  return 'Buenas noches';
+}
+
+function broadcastCleanupRenderedMessage(value = '', saludo = '') {
+  let out = String(value || '');
+  out = out.replace(/[ \t]+/g, ' ');
+  out = out.replace(/\s+([,.;:!?])/g, '$1');
+  out = out.replace(/([¡¿])\s+/g, '$1');
+  out = out.replace(/,\s*,+/g, ', ');
+  out = out.replace(/\n{3,}/g, '\n\n');
+  if (saludo) {
+    const escaped = saludo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`(${escaped})\s*,`, 'gi'), '$1');
+  }
+  out = out.replace(/\b(Hola|Buenas|Buen día|Buenas tardes|Buenas noches)\s+(?=[,.;:!?]|$)/gi, '$1');
+  out = out.replace(/\s{2,}/g, ' ').trim();
+  out = out.replace(/^,\s*/, '').trim();
+  return out;
+}
+
+async function broadcastDetectRealNameWithAI(rawCandidate = '') {
+  const raw = broadcastCleanText(rawCandidate);
+  if (!raw) return '';
+  const cacheKey = normalize(raw);
+  if (broadcastAiNameCache.has(cacheKey)) return broadcastAiNameCache.get(cacheKey) || '';
+
+  let resolved = '';
+  const cleaned = cleanNameCandidate(raw);
+  if (cleaned && !isLikelyGenericContactName(cleaned)) {
+    resolved = cleaned;
+  } else {
+    try {
+      const completion = await openai.chat.completions.create({
+        model: PRIMARY_MODEL || 'gpt-4.1-mini',
+        temperature: 0,
+        messages: [
+          {
+            role: 'system',
+            content:
+`Analizá un texto corto que podría ser el nombre de una persona en WhatsApp.
+Devolvé SOLO JSON válido con estas claves:
+- is_real_name: boolean
+- normalized_name: string
+
+Reglas:
+- normalized_name debe contener solo un nombre real natural, con mayúsculas correctas.
+- Si el texto es genérico, comercial, un saludo, una frase, un apodo no claro, o algo como "cliente", "beauty", "ventas", "info", "Cataleya", entonces is_real_name=false.
+- No inventes nombres.
+- No devuelvas explicación.`
+          },
+          {
+            role: 'user',
+            content: JSON.stringify({ candidate: raw.slice(0, 80) }),
+          }
+        ],
+        response_format: { type: 'json_object' },
+      });
+      const parsed = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+      const aiName = cleanNameCandidate(parsed?.normalized_name || '');
+      if (parsed?.is_real_name && aiName && !isLikelyGenericContactName(aiName)) {
+        resolved = aiName;
+      }
+    } catch {}
+  }
+
+  broadcastAiNameCache.set(cacheKey, resolved || '');
+  return resolved || '';
+}
+
+async function broadcastResolveDisplayNameForRow(row = {}) {
+  const directCandidates = [
+    row.contact_name,
+    row.profile_name,
+  ].map((x) => broadcastCleanText(x)).filter(Boolean);
+
+  for (const candidate of directCandidates) {
+    const clean = cleanNameCandidate(candidate);
+    if (clean && !isLikelyGenericContactName(clean)) {
+      return broadcastFirstName(clean);
+    }
+  }
+
+  try {
+    const knownIdentity = await resolveKnownContactIdentity({
+      waId: broadcastCleanText(row.wa_id || row.wa_phone || ''),
+      phoneRaw: broadcastCleanText(row.wa_phone || ''),
+      profileName: broadcastCleanText(row.profile_name || row.contact_name || ''),
+    });
+    const known = cleanNameCandidate(knownIdentity?.bestName || '');
+    if (known && !isLikelyGenericContactName(known)) {
+      return broadcastFirstName(known);
+    }
+  } catch {}
+
+  const aiCandidate = directCandidates[0] || '';
+  if (aiCandidate) {
+    const aiName = await broadcastDetectRealNameWithAI(aiCandidate);
+    if (aiName) return broadcastFirstName(aiName);
+  }
+
+  return '';
+}
 function broadcastSafeJson(value, fallback) {
   try {
     return JSON.stringify(value ?? fallback ?? []);
@@ -1083,32 +1190,35 @@ function broadcastPickRandomTimes(ymd, count, minDate = null) {
   if (!candidates.length) return [];
 
   const target = Math.min(count, candidates.length);
+  const minGapMs = BROADCAST_MIN_GAP_MINUTES * 60000;
   const picks = [];
   const usedIndexes = new Set();
 
   for (let i = 0; i < target; i += 1) {
-    let startIdx = Math.floor((i * candidates.length) / target);
+    const startIdx = Math.floor((i * candidates.length) / target);
     let endIdx = Math.floor(((i + 1) * candidates.length) / target) - 1;
     if (endIdx < startIdx) endIdx = startIdx;
 
-    const segment = [];
+    const segmentIndexes = [];
     for (let idx = startIdx; idx <= endIdx; idx += 1) {
-      if (!usedIndexes.has(idx)) segment.push(idx);
+      if (usedIndexes.has(idx)) continue;
+      const dt = candidates[idx];
+      const tooClose = picks.some((picked) => Math.abs(dt.getTime() - picked.getTime()) < minGapMs);
+      if (!tooClose) segmentIndexes.push(idx);
     }
 
     let chosenIdx = -1;
-    if (segment.length) {
-      chosenIdx = segment[Math.floor(Math.random() * segment.length)];
+    if (segmentIndexes.length) {
+      chosenIdx = segmentIndexes[Math.floor(Math.random() * segmentIndexes.length)];
     } else {
+      const fallbackIndexes = [];
       for (let idx = 0; idx < candidates.length; idx += 1) {
-        if (!usedIndexes.has(idx)) {
-          chosenIdx = idx;
-          break;
-        }
+        if (!usedIndexes.has(idx)) fallbackIndexes.push(idx);
       }
+      if (!fallbackIndexes.length) break;
+      chosenIdx = fallbackIndexes[Math.floor(Math.random() * fallbackIndexes.length)];
     }
 
-    if (chosenIdx === -1) break;
     usedIndexes.add(chosenIdx);
     picks.push(candidates[chosenIdx]);
   }
@@ -1117,13 +1227,21 @@ function broadcastPickRandomTimes(ymd, count, minDate = null) {
 }
 
 function broadcastRenderMessage(template, row = {}) {
-  const name = broadcastFirstName(row.contact_name || row.profile_name || '');
+  const saludo = broadcastGreetingForDate(new Date());
+  const name = broadcastFirstName(cleanNameCandidate(row.contact_name || row.profile_name || ''));
   let out = String(template || '');
+  out = out.replace(/\{saludo\}/gi, saludo);
   out = out.replace(/\{nombre\}/gi, name);
-  out = out.replace(/\s+([,.!?;:])/g, '$1');
-  out = out.replace(/[ \t]+/g, ' ');
-  out = out.replace(/\n{3,}/g, '\n\n');
-  return out.trim();
+  return broadcastCleanupRenderedMessage(out, saludo);
+}
+
+async function broadcastRenderMessageForSend(template, row = {}) {
+  const saludo = broadcastGreetingForDate(new Date());
+  const name = await broadcastResolveDisplayNameForRow(row);
+  let out = String(template || '');
+  out = out.replace(/\{saludo\}/gi, saludo);
+  out = out.replace(/\{nombre\}/gi, name);
+  return broadcastCleanupRenderedMessage(out, saludo);
 }
 
 function broadcastDefaultOfferFromRow(row = {}) {
@@ -1209,6 +1327,21 @@ async function upsertBroadcastCampaign({
 } = {}) {
   const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
   const cleanMessages = Array.isArray(messages) ? messages.map((x) => broadcastCleanText(x)).filter(Boolean) : null;
+
+  let finalIsActive = typeof isActive === 'boolean' ? isActive : true;
+  if (typeof isActive !== 'boolean') {
+    try {
+      const existing = await db.query(
+        `SELECT is_active
+           FROM broadcast_campaigns
+          WHERE campaign_name = $1
+          LIMIT 1`,
+        [cleanCampaign]
+      );
+      if (existing.rows?.length) finalIsActive = !!existing.rows[0].is_active;
+    } catch {}
+  }
+
   await db.query(
     `INSERT INTO broadcast_campaigns (campaign_name, source_file, daily_pattern_json, timezone, windows_json, messages_json, is_active, updated_at)
      VALUES ($1, $2, $3::jsonb, $4, $5::jsonb, COALESCE($6::jsonb, '[]'::jsonb), $7, NOW())
@@ -1228,7 +1361,7 @@ async function upsertBroadcastCampaign({
       TIMEZONE,
       broadcastSafeJson(BROADCAST_WINDOWS, []),
       cleanMessages ? broadcastSafeJson(cleanMessages, []) : null,
-      !!isActive,
+      !!finalIsActive,
     ]
   );
   return cleanCampaign;
@@ -1250,6 +1383,75 @@ async function getBroadcastMessagesForCampaign(campaignName = BROADCAST_CAMPAIGN
   } catch {
     return BROADCAST_MESSAGES;
   }
+}
+
+async function getBroadcastCampaignConfig(campaignName = BROADCAST_CAMPAIGN_NAME) {
+  const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
+  try {
+    const result = await db.query(
+      `SELECT campaign_name, source_file, daily_pattern_json, messages_json, is_active, timezone
+         FROM broadcast_campaigns
+        WHERE campaign_name = $1
+        LIMIT 1`,
+      [cleanCampaign]
+    );
+    const row = result.rows?.[0] || null;
+    const messages = broadcastParseJsonArray(row?.messages_json || []);
+    const pattern = Array.isArray(row?.daily_pattern_json) ? row.daily_pattern_json.map((x) => Number(x || 0)).filter((n) => Number.isFinite(n) && n > 0) : BROADCAST_PATTERN_SAFE;
+    return {
+      exists: !!row,
+      campaignName: cleanCampaign,
+      sourceFile: broadcastCleanText(row?.source_file || ''),
+      isActive: row ? !!row.is_active : true,
+      messages: messages.length ? messages : BROADCAST_MESSAGES,
+      pattern: pattern.length ? pattern : BROADCAST_PATTERN_SAFE,
+      timezone: broadcastCleanText(row?.timezone || TIMEZONE),
+    };
+  } catch {
+    return {
+      exists: false,
+      campaignName: cleanCampaign,
+      sourceFile: '',
+      isActive: true,
+      messages: BROADCAST_MESSAGES,
+      pattern: BROADCAST_PATTERN_SAFE,
+      timezone: TIMEZONE,
+    };
+  }
+}
+
+async function updateBroadcastPendingMessages(campaignName = BROADCAST_CAMPAIGN_NAME, messages = []) {
+  const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
+  const messagePool = Array.isArray(messages) && messages.length ? messages.map((x) => broadcastCleanText(x)).filter(Boolean) : BROADCAST_MESSAGES;
+  if (!messagePool.length) return { updated: 0 };
+
+  const rows = await db.query(
+    `SELECT id, custom_message, message_index
+       FROM broadcast_queue
+      WHERE campaign_name = $1
+        AND status IN ('pending','error','skipped')
+      ORDER BY COALESCE(send_at, created_at) ASC, id ASC`,
+    [cleanCampaign]
+  );
+
+  let updated = 0;
+  for (let i = 0; i < rows.rows.length; i += 1) {
+    const row = rows.rows[i];
+    if (broadcastCleanText(row.custom_message)) continue;
+    const idx = row.message_index != null ? Number(row.message_index) : (i % messagePool.length);
+    const template = messagePool[((idx % messagePool.length) + messagePool.length) % messagePool.length] || messagePool[0];
+    const result = await db.query(
+      `UPDATE broadcast_queue
+          SET message_index = $2,
+              message_text = $3,
+              updated_at = NOW()
+        WHERE id = $1`,
+      [row.id, idx, template]
+    );
+    updated += Number(result.rowCount || 0);
+  }
+
+  return { updated };
 }
 
 function broadcastPickColumn(row, alternatives = []) {
@@ -1421,7 +1623,7 @@ async function planBroadcastQueue({
       const messagePool = Array.isArray(campaignMessages) && campaignMessages.length ? campaignMessages : BROADCAST_MESSAGES;
       const messageIndex = row.message_index != null ? Number(row.message_index) : ((queueIndex + i) % messagePool.length);
       const baseMessage = broadcastCleanText(row.custom_message) || messagePool[messageIndex % messagePool.length] || '';
-      const finalMessage = broadcastRenderMessage(baseMessage, row);
+      const scheduledTemplate = broadcastCleanText(baseMessage);
 
       await db.query(
         `UPDATE broadcast_queue
@@ -1431,7 +1633,7 @@ async function planBroadcastQueue({
                 message_text = $5,
                 updated_at = NOW()
           WHERE id = $1`,
-        [row.id, dayCursor, slot.toISOString(), messageIndex, finalMessage]
+        [row.id, dayCursor, slot.toISOString(), messageIndex, scheduledTemplate]
       );
     }
 
@@ -1441,7 +1643,7 @@ async function planBroadcastQueue({
     daysUsed += 1;
   }
 
-  await upsertBroadcastCampaign({ campaignName: cleanCampaign, sourceFile: BROADCAST_EXCEL_PATH, pattern: patternSafe, isActive: true });
+  await upsertBroadcastCampaign({ campaignName: cleanCampaign, sourceFile: BROADCAST_EXCEL_PATH, pattern: patternSafe, isActive: undefined });
   return { scheduled: pending.rows.length, daysUsed, campaignName: cleanCampaign };
 }
 
@@ -1482,13 +1684,32 @@ async function getBroadcastSummary(campaignName = BROADCAST_CAMPAIGN_NAME) {
         COUNT(*) FILTER (WHERE status = 'sent') AS sent,
         COUNT(*) FILTER (WHERE status = 'error') AS error,
         COUNT(*) FILTER (WHERE status = 'skipped') AS skipped,
-        MIN(send_at) AS next_send_at,
-        MAX(send_at) AS last_send_at
+        COUNT(*) FILTER (WHERE status = 'pending' AND schedule_day = CURRENT_DATE) AS scheduled_today,
+        COUNT(DISTINCT schedule_day) FILTER (WHERE status IN ('pending','processing','error','skipped') AND schedule_day IS NOT NULL) AS remaining_days,
+        MIN(send_at) FILTER (WHERE status = 'pending') AS next_send_at,
+        MAX(send_at) FILTER (WHERE status IN ('pending','processing','error','skipped')) AS last_send_at
        FROM broadcast_queue
       WHERE campaign_name = $1`,
     [cleanCampaign]
   );
-  return summary.rows?.[0] || {};
+  const base = summary.rows?.[0] || {};
+  const campaign = await getBroadcastCampaignConfig(cleanCampaign);
+  return {
+    campaign_name: cleanCampaign,
+    total: Number(base.total || 0),
+    pending: Number(base.pending || 0),
+    processing: Number(base.processing || 0),
+    sent: Number(base.sent || 0),
+    error: Number(base.error || 0),
+    skipped: Number(base.skipped || 0),
+    scheduled_today: Number(base.scheduled_today || 0),
+    remaining_days: Number(base.remaining_days || 0),
+    next_send_at: base.next_send_at || null,
+    last_send_at: base.last_send_at || null,
+    is_active: !!campaign.isActive,
+    messages_count: Array.isArray(campaign.messages) ? campaign.messages.length : 0,
+    source_file: campaign.sourceFile || BROADCAST_EXCEL_PATH,
+  };
 }
 
 async function markBroadcastProcessing(id) {
@@ -1505,6 +1726,11 @@ async function markBroadcastProcessing(id) {
 
 async function processBroadcastQueue() {
   if (!broadcastCanOperate()) return { sent: 0, failed: 0, attempted: 0, ready: false };
+
+  const campaignConfig = await getBroadcastCampaignConfig(BROADCAST_CAMPAIGN_NAME);
+  if (campaignConfig.exists && !campaignConfig.isActive) {
+    return { sent: 0, failed: 0, attempted: 0, ready: true, paused: true };
+  }
 
   await ensureBroadcastCampaignLoaded({
     campaignName: BROADCAST_CAMPAIGN_NAME,
@@ -1536,7 +1762,9 @@ async function processBroadcastQueue() {
       const recipient = normalizeWhatsAppRecipient(processing.wa_phone);
       if (!recipient) throw new Error('Número inválido');
       const waId = broadcastCleanText(processing.wa_id) || recipient;
-      const messageText = broadcastCleanText(processing.message_text || processing.custom_message || '');
+      const messageTemplate = broadcastCleanText(processing.custom_message || processing.message_text || '');
+      if (!messageTemplate) throw new Error('Mensaje vacío');
+      const messageText = await broadcastRenderMessageForSend(messageTemplate, processing);
       if (!messageText) throw new Error('Mensaje vacío');
 
       await sendWhatsAppText(recipient, messageText);
@@ -1564,9 +1792,9 @@ async function processBroadcastQueue() {
 
       await db.query(
         `UPDATE broadcast_queue
-            SET status = 'sent', sent_at = NOW(), updated_at = NOW(), last_error = NULL
+            SET status = 'sent', sent_at = NOW(), updated_at = NOW(), last_error = NULL, message_text = $2
           WHERE id = $1`,
-        [processing.id]
+        [processing.id, messageText]
       );
       sent += 1;
     } catch (e) {
@@ -1619,11 +1847,43 @@ async function clearBroadcastQueueForUpload(campaignName = BROADCAST_CAMPAIGN_NA
 
 const app = express();
 app.use(express.json({ limit: "25mb" }));
+app.use(express.urlencoded({ limit: "5mb", extended: true }));
 
 const broadcastUpload = multer ? multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }) : null;
 
-app.get("/broadcast/panel", (_req, res) => {
-  const actionUrl = '/broadcast/upload';
+function broadcastPanelRedirect(res, msg = '', isError = false) {
+  const query = new URLSearchParams();
+  if (msg) query.set(isError ? 'error' : 'ok', msg);
+  return res.redirect(`/broadcast/panel?${query.toString()}`);
+}
+
+app.get("/broadcast/panel", async (req, res) => {
+  const campaignName = String(req.query?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+  const summary = await getBroadcastSummary(campaignName).catch(() => ({}));
+  const campaign = await getBroadcastCampaignConfig(campaignName).catch(() => ({
+    exists: false,
+    campaignName,
+    sourceFile: BROADCAST_EXCEL_PATH,
+    isActive: true,
+    messages: BROADCAST_MESSAGES,
+    pattern: BROADCAST_PATTERN_SAFE,
+  }));
+
+  const okMsg = broadcastCleanText(req.query?.ok || '');
+  const errMsg = broadcastCleanText(req.query?.error || '');
+  const messagesText = (Array.isArray(campaign.messages) && campaign.messages.length ? campaign.messages : BROADCAST_MESSAGES).join('\n');
+  const replaceDefault = String(req.query?.replace_mode || 'replace_pending').trim().toLowerCase();
+  const activeLabel = summary?.is_active === false ? 'Prender difusión' : 'Pausar difusión';
+  const activeValue = summary?.is_active === false ? 'resume' : 'pause';
+  const pending = Number(summary?.pending || 0);
+  const processing = Number(summary?.processing || 0);
+  const sent = Number(summary?.sent || 0);
+  const error = Number(summary?.error || 0);
+  const skipped = Number(summary?.skipped || 0);
+  const total = Number(summary?.total || 0);
+  const remaining = pending + processing + error + skipped;
+  const daysLeft = Number(summary?.remaining_days || 0);
+
   const html = `<!doctype html>
 <html lang="es">
 <head>
@@ -1632,46 +1892,140 @@ app.get("/broadcast/panel", (_req, res) => {
   <title>Difusión Cataleya</title>
   <style>
     body { font-family: Arial, sans-serif; background:#f7f7f8; padding:24px; color:#111; }
-    .box { max-width: 720px; margin: 0 auto; background:#fff; border-radius:16px; padding:24px; box-shadow:0 10px 30px rgba(0,0,0,.08); }
-    h1 { margin-top:0; font-size:24px; }
+    .wrap { max-width: 1080px; margin: 0 auto; display:grid; gap:18px; }
+    .box { background:#fff; border-radius:16px; padding:24px; box-shadow:0 10px 30px rgba(0,0,0,.08); }
+    h1, h2, h3 { margin-top:0; }
     label { display:block; margin:14px 0 6px; font-weight:600; }
-    input, select, button { width:100%; padding:12px; border-radius:10px; border:1px solid #d0d7de; box-sizing:border-box; }
-    button { background:#111827; color:#fff; border:none; cursor:pointer; margin-top:18px; }
+    input, select, textarea, button { width:100%; padding:12px; border-radius:10px; border:1px solid #d0d7de; box-sizing:border-box; font:inherit; }
+    button { background:#111827; color:#fff; border:none; cursor:pointer; margin-top:12px; }
     .muted { color:#555; font-size:14px; }
     .code { font-family: monospace; background:#f3f4f6; padding:3px 6px; border-radius:6px; }
+    .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap:12px; }
+    .stat { background:#f9fafb; border:1px solid #e5e7eb; border-radius:14px; padding:14px; }
+    .stat strong { display:block; font-size:26px; margin-top:6px; }
+    .row { display:grid; grid-template-columns: 1fr 1fr; gap:18px; }
+    .pill { display:inline-block; padding:6px 10px; border-radius:999px; background:#eef2ff; font-size:13px; }
+    .ok { background:#ecfdf5; color:#065f46; padding:12px 14px; border-radius:12px; margin-bottom:12px; }
+    .error { background:#fef2f2; color:#991b1b; padding:12px 14px; border-radius:12px; margin-bottom:12px; }
+    .actions { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+    @media (max-width: 800px) { .row, .actions { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
-  <div class="box">
-    <h1>Subir Excel de difusión</h1>
-    <p class="muted">URL del bot: <span class="code">https://bot-cataleya.onrender.com</span></p>
-    <p class="muted">Columnas mínimas del Excel: <span class="code">Nombre</span> y <span class="code">Número</span>.</p>
-    <p class="muted">Horario de envío: <span class="code">09:00 a 22:00</span>. Los mensajes se reparten aislados dentro de esa franja.</p>
-    <form action="${actionUrl}" method="post" enctype="multipart/form-data">
-      <label>Archivo Excel</label>
-      <input type="file" name="file" accept=".xlsx,.xls" required />
+  <div class="wrap">
+    <div class="box">
+      <h1>Panel de difusión Cataleya</h1>
+      <p class="muted">Bot: <span class="code">https://bot-cataleya.onrender.com</span></p>
+      <p class="muted">Horarios de envío: <span class="code">09:00 a 22:00</span>. Los mensajes se distribuyen aislados dentro de esa franja.</p>
+      <p class="muted">Patrón diario actual: <span class="code">${(campaign.pattern || BROADCAST_PATTERN_SAFE).join(' / ')}</span></p>
+      <p class="muted">Estado: <span class="pill">${summary?.is_active === false ? 'Pausada' : 'Activa'}</span></p>
+      ${okMsg ? `<div class="ok">${okMsg}</div>` : ''}
+      ${errMsg ? `<div class="error">${errMsg}</div>` : ''}
+      <div class="grid">
+        <div class="stat"><span>Total cargados</span><strong>${total}</strong></div>
+        <div class="stat"><span>Enviados</span><strong>${sent}</strong></div>
+        <div class="stat"><span>Pendientes</span><strong>${pending}</strong></div>
+        <div class="stat"><span>Errores</span><strong>${error}</strong></div>
+        <div class="stat"><span>Faltan</span><strong>${remaining}</strong></div>
+        <div class="stat"><span>Días restantes</span><strong>${daysLeft}</strong></div>
+      </div>
+      <p class="muted" style="margin-top:14px;">Programados para hoy: <span class="code">${Number(summary?.scheduled_today || 0)}</span> | Próximo envío: <span class="code">${summary?.next_send_at || '—'}</span></p>
+    </div>
 
-      <label>Modo</label>
-      <select name="replace_mode">
-        <option value="append">Agregar a la cola actual</option>
-        <option value="replace_pending">Reemplazar pendientes/errores y dejar enviados</option>
-        <option value="replace_all">Borrar todo y empezar de cero</option>
-      </select>
+    <div class="row">
+      <div class="box">
+        <h2>Subir o cambiar Excel</h2>
+        <p class="muted">Columnas mínimas del Excel: <span class="code">Nombre</span> y <span class="code">Número</span>. También podés agregar <span class="code">Mensaje</span> si querés un texto propio por fila.</p>
+        <form action="/broadcast/upload" method="post" enctype="multipart/form-data">
+          <label>Archivo Excel</label>
+          <input type="file" name="file" accept=".xlsx,.xls" required />
 
-      <label>Nombre de campaña</label>
-      <input type="text" name="campaign_name" value="${BROADCAST_CAMPAIGN_NAME}" />
+          <label>Modo</label>
+          <select name="replace_mode">
+            <option value="append" ${replaceDefault === 'append' ? 'selected' : ''}>Agregar a la cola actual</option>
+            <option value="replace_pending" ${replaceDefault === 'replace_pending' ? 'selected' : ''}>Reemplazar pendientes/errores y dejar enviados</option>
+            <option value="replace_all" ${replaceDefault === 'replace_all' ? 'selected' : ''}>Borrar todo y empezar de cero</option>
+          </select>
 
-      <label>Mensajes de difusión (opcional, uno por línea)</label>
-      <textarea name="broadcast_messages" rows="12" style="width:100%; padding:12px; border-radius:10px; border:1px solid #d0d7de; box-sizing:border-box;">${BROADCAST_MESSAGES.join('\n')}</textarea>
-      <p class="muted">Si dejás estos mensajes, el bot usará esta lista para la campaña. Si en el Excel ponés una columna <span class="code">Mensaje</span>, esa fila usa su mensaje propio.</p>
+          <label>Nombre de campaña</label>
+          <input type="text" name="campaign_name" value="${campaignName}" />
 
-      <button type="submit">Subir Excel</button>
-    </form>
+          <button type="submit">Subir Excel</button>
+        </form>
+      </div>
+
+      <div class="box">
+        <h2>Control rápido</h2>
+        <div class="actions">
+          <form action="/broadcast/toggle" method="post">
+            <input type="hidden" name="campaign_name" value="${campaignName}" />
+            <input type="hidden" name="action" value="${activeValue}" />
+            <button type="submit">${activeLabel}</button>
+          </form>
+          <form action="/broadcast/retry-errors" method="post">
+            <input type="hidden" name="campaign_name" value="${campaignName}" />
+            <button type="submit">Reintentar errores</button>
+          </form>
+        </div>
+        <p class="muted" style="margin-top:12px;">Excel actual: <span class="code">${campaign.sourceFile || BROADCAST_EXCEL_PATH || 'Sin archivo cargado todavía'}</span></p>
+        <p class="muted">Si pausás la difusión, el bot no envía nada aunque haya pendientes. Al prenderla otra vez, sigue donde estaba.</p>
+      </div>
+    </div>
+
+    <div class="box">
+      <h2>Mensajes de difusión</h2>
+      <p class="muted">Escribilos <strong>uno por línea</strong>. Podés usar <span class="code">{saludo}</span> y <span class="code">{nombre}</span>. Si el nombre no es real o no está bien detectado, el bot no lo pone. Si la persona responde y no tiene nombre válido, el bot le pide el nombre y actualiza el contacto con tu flujo actual.</p>
+      <form action="/broadcast/messages" method="post">
+        <input type="hidden" name="campaign_name" value="${campaignName}" />
+        <textarea name="broadcast_messages" rows="14">${messagesText}</textarea>
+        <button type="submit">Guardar mensajes</button>
+      </form>
+    </div>
   </div>
 </body>
 </html>`;
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   return res.status(200).send(html);
+});
+
+app.post("/broadcast/messages", async (req, res) => {
+  try {
+    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    const broadcastMessages = broadcastParseMessagesInput(req.body?.broadcast_messages || '');
+    if (!broadcastMessages.length) {
+      return broadcastPanelRedirect(res, 'Tenés que dejar al menos un mensaje.', true);
+    }
+
+    const current = await getBroadcastCampaignConfig(campaignName);
+    await upsertBroadcastCampaign({
+      campaignName,
+      sourceFile: current.sourceFile || BROADCAST_EXCEL_PATH,
+      pattern: current.pattern || BROADCAST_PATTERN_SAFE,
+      messages: broadcastMessages,
+      isActive: current.isActive,
+    });
+    await updateBroadcastPendingMessages(campaignName, broadcastMessages);
+    return broadcastPanelRedirect(res, 'Mensajes guardados correctamente.');
+  } catch (e) {
+    return broadcastPanelRedirect(res, e?.message || 'No pude guardar los mensajes.', true);
+  }
+});
+
+app.post("/broadcast/toggle", async (req, res) => {
+  try {
+    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    const action = String(req.body?.action || '').trim().toLowerCase();
+    const enable = action === 'resume' || action === 'start' || action === 'on' || action === 'enable';
+    await db.query(
+      `UPDATE broadcast_campaigns
+          SET is_active = $2, updated_at = NOW()
+        WHERE campaign_name = $1`,
+      [campaignName, enable]
+    );
+    return broadcastPanelRedirect(res, enable ? 'Difusión prendida.' : 'Difusión pausada.');
+  } catch (e) {
+    return broadcastPanelRedirect(res, e?.message || 'No pude cambiar el estado de la difusión.', true);
+  }
 });
 
 app.post("/broadcast/upload", (req, res, next) => {
@@ -1690,7 +2044,7 @@ app.post("/broadcast/upload", (req, res, next) => {
 
     const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
     const replaceMode = String(req.body?.replace_mode || 'append').trim().toLowerCase();
-    const broadcastMessages = broadcastParseMessagesInput(req.body?.broadcast_messages || '');
+    const current = await getBroadcastCampaignConfig(campaignName);
     const tempPath = path.join(getTmpDir(), `broadcast-${Date.now()}-${req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`);
 
     fs.writeFileSync(tempPath, req.file.buffer);
@@ -1703,8 +2057,12 @@ app.post("/broadcast/upload", (req, res, next) => {
       offerType: BROADCAST_OFFER_TYPE,
       offerItems: BROADCAST_OFFER_ITEMS,
       offerSelectedName: BROADCAST_OFFER_SELECTED_NAME,
-      messages: broadcastMessages.length ? broadcastMessages : null,
+      messages: current.messages?.length ? current.messages : null,
     });
+
+    if (req.headers.accept && String(req.headers.accept).includes('text/html')) {
+      return broadcastPanelRedirect(res, `Excel importado. Nuevos: ${Number(data.inserted || 0)} | Omitidos: ${Number(data.skipped || 0)}.`);
+    }
 
     return res.json({
       ok: true,
@@ -1713,10 +2071,13 @@ app.post("/broadcast/upload", (req, res, next) => {
       replace_mode: replaceMode,
       cleared,
       excel_path: tempPath,
-      messages_count: broadcastMessages.length || BROADCAST_MESSAGES.length,
+      messages_count: current.messages?.length || BROADCAST_MESSAGES.length,
       ...data,
     });
   } catch (e) {
+    if (req.headers.accept && String(req.headers.accept).includes('text/html')) {
+      return broadcastPanelRedirect(res, e?.message || 'No pude importar el Excel.', true);
+    }
     return res.status(500).json({ ok: false, error: e?.message || 'error_broadcast_upload' });
   }
 });
@@ -1724,17 +2085,19 @@ app.post("/broadcast/upload", (req, res, next) => {
 app.get("/broadcast/status", async (_req, res) => {
   try {
     const summary = await getBroadcastSummary(BROADCAST_CAMPAIGN_NAME);
+    const campaign = await getBroadcastCampaignConfig(BROADCAST_CAMPAIGN_NAME);
     return res.json({
       ok: true,
       enabled: ENABLE_DAILY_BROADCAST,
       ready: broadcastCanOperate(),
-      excel_path: BROADCAST_EXCEL_PATH,
-      excel_present: broadcastExcelExists(),
+      excel_path: campaign.sourceFile || BROADCAST_EXCEL_PATH,
+      excel_present: broadcastExcelExists(campaign.sourceFile || BROADCAST_EXCEL_PATH),
       panel_url: 'https://bot-cataleya.onrender.com/broadcast/panel',
       upload_url: 'https://bot-cataleya.onrender.com/broadcast/upload',
       campaign_name: BROADCAST_CAMPAIGN_NAME,
-      daily_pattern: BROADCAST_PATTERN_SAFE,
-      default_messages_count: BROADCAST_MESSAGES.length,
+      daily_pattern: campaign.pattern || BROADCAST_PATTERN_SAFE,
+      messages_count: campaign.messages?.length || BROADCAST_MESSAGES.length,
+      is_active: !!campaign.isActive,
       summary,
     });
   } catch (e) {
@@ -1745,18 +2108,21 @@ app.get("/broadcast/status", async (_req, res) => {
 app.post("/broadcast/import", async (req, res) => {
   try {
     const body = req.body || {};
-    const excelPath = String(body.excel_path || BROADCAST_EXCEL_PATH || '').trim();
+    const campaignName = String(body.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    const campaign = await getBroadcastCampaignConfig(campaignName);
+    const excelPath = String(body.excel_path || campaign.sourceFile || BROADCAST_EXCEL_PATH || '').trim();
     if (!excelPath || !fs.existsSync(excelPath)) {
       return res.status(400).json({ ok: false, error: 'excel_missing', message: 'No hay ninguna lista de Excel cargada todavía. Subila en https://bot-cataleya.onrender.com/broadcast/panel o por POST a /broadcast/upload.' });
     }
 
     const data = await ensureBroadcastCampaignLoaded({
-      campaignName: String(body.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME,
+      campaignName,
       excelPath,
       offerType: String(body.offer_type || BROADCAST_OFFER_TYPE || '').trim().toUpperCase() || BROADCAST_OFFER_TYPE,
       offerItems: Array.isArray(body.offer_items) && body.offer_items.length ? body.offer_items : BROADCAST_OFFER_ITEMS,
       offerSelectedName: String(body.offer_selected_name || BROADCAST_OFFER_SELECTED_NAME || '').trim() || BROADCAST_OFFER_SELECTED_NAME,
       startYMD: String(body.start_ymd || '').trim(),
+      messages: campaign.messages?.length ? campaign.messages : null,
     });
 
     return res.json({ ok: true, ...data });
@@ -1767,9 +2133,16 @@ app.post("/broadcast/import", async (req, res) => {
 
 app.post("/broadcast/retry-errors", async (req, res) => {
   try {
-    const data = await resetBroadcastErrorsToPending(String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME);
+    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    const data = await resetBroadcastErrorsToPending(campaignName);
+    if (req.headers.accept && String(req.headers.accept).includes('text/html')) {
+      return broadcastPanelRedirect(res, `Errores restaurados a pendientes: ${Number(data.restored || 0)}.`);
+    }
     return res.json({ ok: true, ...data });
   } catch (e) {
+    if (req.headers.accept && String(req.headers.accept).includes('text/html')) {
+      return broadcastPanelRedirect(res, e?.message || 'No pude restaurar los errores.', true);
+    }
     return res.status(500).json({ ok: false, error: e?.message || 'error_broadcast_retry' });
   }
 });
@@ -1821,6 +2194,7 @@ const BROADCAST_DAILY_PATTERN = String(process.env.BROADCAST_DAILY_PATTERN || '3
   .filter((n) => Number.isFinite(n) && n > 0);
 const BROADCAST_PATTERN_SAFE = BROADCAST_DAILY_PATTERN.length ? BROADCAST_DAILY_PATTERN : [30, 15, 10];
 const BROADCAST_SLOT_GRANULARITY_MINUTES = 5;
+const BROADCAST_MIN_GAP_MINUTES = 20;
 
 
 // ===================== HUBSPOT (CRM seguimiento) =====================
