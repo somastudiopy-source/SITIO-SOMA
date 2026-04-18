@@ -1118,6 +1118,59 @@ function broadcastTodayYMD() {
   return broadcastFormatYMD(broadcastLocalDateParts(new Date(), -180));
 }
 
+function broadcastFormatValidUntilDisplay(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const dt = new Date(raw);
+  if (Number.isNaN(dt.getTime())) return raw;
+  try {
+    return new Intl.DateTimeFormat('es-AR', {
+      timeZone: TIMEZONE,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    }).format(dt);
+  } catch {
+    const parts = broadcastLocalDateParts(dt, -180);
+    return `${String(parts.day).padStart(2,'0')}/${String(parts.month).padStart(2,'0')}/${parts.year} ${String(parts.hour).padStart(2,'0')}:${String(parts.minute).padStart(2,'0')}`;
+  }
+}
+
+function broadcastFormatValidUntilInput(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const dt = new Date(raw);
+  if (Number.isNaN(dt.getTime())) return '';
+  const parts = broadcastLocalDateParts(dt, -180);
+  return `${parts.year}-${String(parts.month).padStart(2,'0')}-${String(parts.day).padStart(2,'0')}T${String(parts.hour).padStart(2,'0')}:${String(parts.minute).padStart(2,'0')}`;
+}
+
+function broadcastParseValidUntilInput(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(raw)) {
+    const [datePart, timePart] = raw.split('T');
+    const [year, month, day] = datePart.split('-').map(Number);
+    const [hour, minute] = timePart.split(':').map(Number);
+    const dt = broadcastUtcDateFromLocalYMDHM(`${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`, hour, minute, -180);
+    return Number.isNaN(dt.getTime()) ? null : dt.toISOString();
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    const dt = broadcastUtcDateFromLocalYMDHM(raw, 23, 59, -180);
+    return Number.isNaN(dt.getTime()) ? null : dt.toISOString();
+  }
+  const dmy = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?$/);
+  if (dmy) {
+    const [day, month, year] = [Number(dmy[1]), Number(dmy[2]), Number(dmy[3])];
+    const hour = dmy[4] != null ? Number(dmy[4]) : 23;
+    const minute = dmy[5] != null ? Number(dmy[5]) : 59;
+    const ymd = `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+    const dt = broadcastUtcDateFromLocalYMDHM(ymd, hour, minute, -180);
+    return Number.isNaN(dt.getTime()) ? null : dt.toISOString();
+  }
+  const dt = new Date(raw);
+  return Number.isNaN(dt.getTime()) ? null : dt.toISOString();
+}
+
 function broadcastParseYMD(ymd) {
   const m = String(ymd || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) throw new Error(`Fecha inválida: ${ymd}`);
@@ -1292,7 +1345,7 @@ async function ensureBroadcastTables() {
       ai_response_style TEXT,
       ai_guardrails TEXT,
       ai_cta TEXT,
-      valid_until TEXT,
+      valid_until TIMESTAMPTZ,
       assets_json JSONB NOT NULL DEFAULT '[]'::jsonb,
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -1341,8 +1394,29 @@ async function ensureBroadcastTables() {
   await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS ai_response_style TEXT`);
   await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS ai_guardrails TEXT`);
   await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS ai_cta TEXT`);
-  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS valid_until TEXT`);
+  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS valid_until TIMESTAMPTZ`);
   await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS assets_json JSONB NOT NULL DEFAULT '[]'::jsonb`);
+
+  const validUntilType = await db.query(`
+    SELECT data_type
+      FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name = 'broadcast_campaigns'
+       AND column_name = 'valid_until'
+     LIMIT 1`);
+  const validUntilDataType = String(validUntilType.rows?.[0]?.data_type || '').toLowerCase();
+  if (validUntilDataType && validUntilDataType !== 'timestamp with time zone') {
+    await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS valid_until_tmp TIMESTAMPTZ`);
+    await db.query(`
+      UPDATE broadcast_campaigns
+         SET valid_until_tmp = CASE
+           WHEN valid_until IS NULL OR BTRIM(valid_until::text) = '' THEN NULL
+           WHEN valid_until::text ~ '^\d{4}-\d{2}-\d{2}$' THEN (valid_until::text || ' 23:59:00-03')::timestamptz
+           ELSE NULL
+         END`);
+    await db.query(`ALTER TABLE broadcast_campaigns DROP COLUMN valid_until`);
+    await db.query(`ALTER TABLE broadcast_campaigns RENAME COLUMN valid_until_tmp TO valid_until`);
+  }
   await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS wa_message_id TEXT`);
   await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS delivery_status TEXT`);
   await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS api_accepted_at TIMESTAMPTZ`);
@@ -1399,7 +1473,7 @@ async function upsertBroadcastCampaign({
      )
      VALUES (
        $1, $2, $3::jsonb, $4, $5::jsonb, COALESCE($6::jsonb, '[]'::jsonb),
-       COALESCE($7, 'OTHER'), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), COALESCE($13::jsonb, '[]'::jsonb),
+       COALESCE($7, 'OTHER'), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, ''), $12::timestamptz, COALESCE($13::jsonb, '[]'::jsonb),
        $14, NOW()
      )
      ON CONFLICT (campaign_name)
@@ -1430,7 +1504,7 @@ async function upsertBroadcastCampaign({
       broadcastCleanText(aiResponseStyle),
       broadcastCleanText(aiGuardrails),
       broadcastCleanText(aiCta),
-      broadcastCleanText(validUntil),
+      broadcastParseValidUntilInput(validUntil),
       Array.isArray(assets) ? broadcastSafeJson(assets, []) : null,
       !!finalIsActive,
     ]
@@ -1483,7 +1557,8 @@ async function getBroadcastCampaignConfig(campaignName = BROADCAST_CAMPAIGN_NAME
       aiResponseStyle: String(row?.ai_response_style || '').trim(),
       aiGuardrails: String(row?.ai_guardrails || '').trim(),
       aiCta: String(row?.ai_cta || '').trim(),
-      validUntil: String(row?.valid_until || '').trim(),
+      validUntil: broadcastFormatValidUntilDisplay(row?.valid_until || ''),
+      validUntilRaw: String(row?.valid_until || '').trim(),
       assets: broadcastParseJsonAnyArray(row?.assets_json || []),
     };
   } catch {
@@ -1501,6 +1576,7 @@ async function getBroadcastCampaignConfig(campaignName = BROADCAST_CAMPAIGN_NAME
       aiGuardrails: '',
       aiCta: '',
       validUntil: '',
+      validUntilRaw: '',
       assets: [],
     };
   }
@@ -1891,6 +1967,42 @@ async function getBroadcastSummary(campaignName = BROADCAST_CAMPAIGN_NAME) {
   };
 }
 
+
+async function listBroadcastCampaignHistory(limit = 30) {
+  try {
+    const result = await db.query(
+      `SELECT
+          c.campaign_name,
+          c.campaign_type,
+          c.is_active,
+          c.updated_at,
+          COUNT(q.id) AS total,
+          COUNT(q.id) FILTER (WHERE q.status = 'pending') AS pending,
+          COUNT(q.id) FILTER (WHERE q.status IN ('sent_api','delivered','read')) AS sent_api,
+          COUNT(q.id) FILTER (WHERE q.status = 'error') AS error
+         FROM broadcast_campaigns c
+         LEFT JOIN broadcast_queue q ON q.campaign_name = c.campaign_name
+        GROUP BY c.campaign_name, c.campaign_type, c.is_active, c.updated_at
+        ORDER BY c.updated_at DESC, c.campaign_name ASC
+        LIMIT $1`,
+      [Math.max(1, Number(limit || 30))]
+    );
+    return (result.rows || []).map((row) => ({
+      campaignName: String(row.campaign_name || '').trim(),
+      campaignType: String(row.campaign_type || 'OTHER').trim().toUpperCase() || 'OTHER',
+      isActive: !!row.is_active,
+      updatedAt: row.updated_at || null,
+      updatedAtText: broadcastFormatValidUntilDisplay(row.updated_at || ''),
+      total: Number(row.total || 0),
+      pending: Number(row.pending || 0),
+      sentApi: Number(row.sent_api || 0),
+      error: Number(row.error || 0),
+    }));
+  } catch {
+    return [];
+  }
+}
+
 async function markBroadcastProcessing(id) {
   const result = await db.query(
     `UPDATE broadcast_queue
@@ -2208,10 +2320,12 @@ app.use(express.urlencoded({ limit: "5mb", extended: true }));
 
 const broadcastUpload = multer ? multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }) : null;
 
-function broadcastPanelRedirect(res, msg = '', isError = false) {
+function broadcastPanelRedirect(res, msg = '', isError = false, campaignName = '') {
   const query = new URLSearchParams();
   if (msg) query.set(isError ? 'error' : 'ok', msg);
-  return res.redirect(`/broadcast/panel?${query.toString()}`);
+  if (campaignName) query.set('campaign_name', String(campaignName || '').trim());
+  const qs = query.toString();
+  return res.redirect(`/broadcast/panel${qs ? `?${qs}` : ''}`);
 }
 
 app.get("/broadcast/panel", async (req, res) => {
@@ -2220,11 +2334,21 @@ app.get("/broadcast/panel", async (req, res) => {
   const campaign = await getBroadcastCampaignConfig(campaignName).catch(() => ({
     exists: false,
     campaignName,
-    sourceFile: BROADCAST_EXCEL_PATH,
+    sourceFile: '',
     isActive: true,
     messages: BROADCAST_MESSAGES,
     pattern: BROADCAST_PATTERN_SAFE,
+    timezone: TIMEZONE,
+    campaignType: 'OTHER',
+    aiContext: '',
+    aiResponseStyle: '',
+    aiGuardrails: '',
+    aiCta: '',
+    validUntil: '',
+    validUntilRaw: '',
+    assets: [],
   }));
+  const history = await listBroadcastCampaignHistory(40).catch(() => []);
 
   const okMsg = broadcastCleanText(req.query?.ok || '');
   const errMsg = broadcastCleanText(req.query?.error || '');
@@ -2232,8 +2356,6 @@ app.get("/broadcast/panel", async (req, res) => {
   const campaignType = campaign.campaignType || 'OTHER';
   const campaignAssets = Array.isArray(campaign.assets) ? campaign.assets : [];
   const replaceDefault = String(req.query?.replace_mode || 'replace_pending').trim().toLowerCase();
-  const activeLabel = summary?.is_active === false ? 'Prender difusión' : 'Pausar difusión';
-  const activeValue = summary?.is_active === false ? 'resume' : 'pause';
   const pending = Number(summary?.pending || 0);
   const processing = Number(summary?.processing || 0);
   const sentApi = Number(summary?.sent_api || 0);
@@ -2244,6 +2366,7 @@ app.get("/broadcast/panel", async (req, res) => {
   const total = Number(summary?.total || 0);
   const remaining = pending + processing + error + skipped;
   const daysLeft = Number(summary?.remaining_days || 0);
+  const currentFileLabel = campaign.sourceFile || BROADCAST_EXCEL_PATH || 'Sin archivo cargado todavía';
 
   const html = `<!doctype html>
 <html lang="es">
@@ -2253,7 +2376,7 @@ app.get("/broadcast/panel", async (req, res) => {
   <title>Difusión Cataleya</title>
   <style>
     body { font-family: Arial, sans-serif; background:#f7f7f8; padding:24px; color:#111; }
-    .wrap { max-width: 1080px; margin: 0 auto; display:grid; gap:18px; }
+    .wrap { max-width: 1280px; margin: 0 auto; display:grid; gap:18px; }
     .box { background:#fff; border-radius:16px; padding:24px; box-shadow:0 10px 30px rgba(0,0,0,.08); }
     h1, h2, h3 { margin-top:0; }
     label { display:block; margin:14px 0 6px; font-weight:600; }
@@ -2264,12 +2387,20 @@ app.get("/broadcast/panel", async (req, res) => {
     .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap:12px; }
     .stat { background:#f9fafb; border:1px solid #e5e7eb; border-radius:14px; padding:14px; }
     .stat strong { display:block; font-size:26px; margin-top:6px; }
-    .row { display:grid; grid-template-columns: 1fr 1fr; gap:18px; }
+    .main-layout { display:grid; grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr); gap:18px; align-items:start; }
     .pill { display:inline-block; padding:6px 10px; border-radius:999px; background:#eef2ff; font-size:13px; }
     .ok { background:#ecfdf5; color:#065f46; padding:12px 14px; border-radius:12px; margin-bottom:12px; }
     .error { background:#fef2f2; color:#991b1b; padding:12px 14px; border-radius:12px; margin-bottom:12px; }
     .actions { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
-    @media (max-width: 800px) { .row, .actions { grid-template-columns: 1fr; } }
+    .section { border:1px solid #e5e7eb; border-radius:14px; padding:16px; margin-top:14px; background:#fafafa; }
+    .row-2 { display:grid; grid-template-columns: 1fr 1fr; gap:14px; }
+    .campaign-list { display:grid; gap:10px; }
+    .campaign-item { display:block; text-decoration:none; color:inherit; border:1px solid #e5e7eb; border-radius:12px; padding:12px; background:#fff; }
+    .campaign-item.active { border-color:#111827; box-shadow:0 0 0 1px #111827 inset; }
+    .campaign-item small { color:#666; display:block; margin-top:4px; }
+    ul.assets { margin:8px 0 0; padding-left:18px; }
+    .footer-save { position:sticky; bottom:0; background:#fff; padding-top:12px; }
+    @media (max-width: 980px) { .main-layout, .row-2, .actions { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -2296,99 +2427,114 @@ app.get("/broadcast/panel", async (req, res) => {
       <p class="muted" style="margin-top:8px;">Faltan para el próximo envío: <span id="next-send-countdown" class="code">${summary?.next_send_at ? 'calculando...' : '—'}</span></p>
     </div>
 
-    <div class="row">
+    <div class="main-layout">
       <div class="box">
-        <h2>Subir o cambiar Excel</h2>
-        <p class="muted">Columnas mínimas del Excel: <span class="code">Nombre</span> y <span class="code">Número</span>. También podés agregar <span class="code">Mensaje</span> si querés un texto propio por fila.</p>
-        <form action="/broadcast/upload" method="post" enctype="multipart/form-data">
-          <label>Archivo Excel</label>
-          <input type="file" name="file" accept=".xlsx,.xls" required />
+        <h2>Editar campaña</h2>
+        <p class="muted">Completá todo y recién al final tocá <span class="code">Guardar y actualizar difusión</span>. Si no elegís un nuevo Excel o nuevos archivos, se conserva lo que ya tenía esta campaña.</p>
 
-          <label>Modo</label>
-          <select name="replace_mode">
-            <option value="append" ${replaceDefault === 'append' ? 'selected' : ''}>Agregar a la cola actual</option>
-            <option value="replace_pending" ${replaceDefault === 'replace_pending' ? 'selected' : ''}>Reemplazar pendientes/errores y dejar enviados</option>
-            <option value="replace_all" ${replaceDefault === 'replace_all' ? 'selected' : ''}>Borrar todo y empezar de cero</option>
-          </select>
+        <form action="/broadcast/save" method="post" enctype="multipart/form-data">
+          <div class="row-2">
+            <div>
+              <label>Nombre de campaña</label>
+              <input type="text" name="campaign_name" value="${campaignName}" />
+            </div>
+            <div>
+              <label>Tipo de campaña</label>
+              <select name="campaign_type">
+                <option value="OTHER" ${campaignType === 'OTHER' ? 'selected' : ''}>OTHER</option>
+                <option value="PRODUCT" ${campaignType === 'PRODUCT' ? 'selected' : ''}>PRODUCT</option>
+                <option value="SERVICE" ${campaignType === 'SERVICE' ? 'selected' : ''}>SERVICE</option>
+                <option value="COURSE" ${campaignType === 'COURSE' ? 'selected' : ''}>COURSE</option>
+              </select>
+            </div>
+          </div>
 
-          <label>Nombre de campaña</label>
-          <input type="text" name="campaign_name" value="${campaignName}" />
+          <div class="section">
+            <h3 style="margin-bottom:6px;">Excel de contactos</h3>
+            <p class="muted">Columnas mínimas: <span class="code">Nombre</span> y <span class="code">Número</span>. Si querés, podés agregar <span class="code">Mensaje</span> para un texto individual por fila.</p>
+            <p class="muted">Archivo actual: <span class="code">${currentFileLabel}</span></p>
+            <label>Nuevo Excel (opcional)</label>
+            <input type="file" name="excel_file" accept=".xlsx,.xls" />
+            <label>Modo de importación</label>
+            <select name="replace_mode">
+              <option value="append" ${replaceDefault === 'append' ? 'selected' : ''}>Agregar a la cola actual</option>
+              <option value="replace_pending" ${replaceDefault === 'replace_pending' ? 'selected' : ''}>Reemplazar pendientes/errores y dejar enviados</option>
+              <option value="replace_all" ${replaceDefault === 'replace_all' ? 'selected' : ''}>Borrar todo y empezar de cero</option>
+            </select>
+          </div>
 
-          <button type="submit">Subir Excel</button>
+          <div class="section">
+            <h3 style="margin-bottom:6px;">Mensajes de difusión</h3>
+            <p class="muted">Uno por línea. Podés usar <span class="code">{saludo}</span> y <span class="code">{nombre}</span>.</p>
+            <textarea name="broadcast_messages" rows="12">${messagesText}</textarea>
+          </div>
+
+          <div class="section">
+            <h3 style="margin-bottom:6px;">Contexto IA de la difusión</h3>
+            <label>De qué trata la difusión</label>
+            <textarea name="ai_context" rows="4">${campaign.aiContext || ''}</textarea>
+
+            <label>Cómo debe responder la IA</label>
+            <textarea name="ai_response_style" rows="4">${campaign.aiResponseStyle || ''}</textarea>
+
+            <label>Qué no debe inventar</label>
+            <textarea name="ai_guardrails" rows="4">${campaign.aiGuardrails || ''}</textarea>
+
+            <label>Objetivo / CTA</label>
+            <textarea name="ai_cta" rows="3">${campaign.aiCta || ''}</textarea>
+
+            <label>Vigente hasta</label>
+            <input type="datetime-local" name="valid_until" value="${broadcastFormatValidUntilInput(campaign.validUntilRaw || '')}" />
+            <p class="muted">Si querés que la IA entienda “solo por hoy”, poné acá la fecha y hora de cierre de esa campaña.</p>
+          </div>
+
+          <div class="section">
+            <h3 style="margin-bottom:6px;">Fotos y archivos de la campaña</h3>
+            <p class="muted">Si subís imágenes o documentos, se conservan en esta campaña y se pueden enviar antes del texto.</p>
+            <label>Adjuntar nuevos archivos (opcional)</label>
+            <input type="file" name="asset_files" accept=".png,.jpg,.jpeg,.webp,.pdf" multiple />
+            <p class="muted">Adjuntos actuales: <span class="code">${campaignAssets.length}</span></p>
+            ${campaignAssets.length ? `<ul class="assets">${campaignAssets.map((a) => `<li>${a.filename || a.mediaId || 'archivo'}</li>`).join('')}</ul>` : '<p class="muted">No hay adjuntos cargados.</p>'}
+          </div>
+
+          <div class="footer-save">
+            <button type="submit">Guardar y actualizar difusión</button>
+          </div>
         </form>
       </div>
 
-      <div class="box">
-        <h2>Control rápido</h2>
-        <div class="actions">
-          <form action="/broadcast/toggle" method="post">
-            <input type="hidden" name="campaign_name" value="${campaignName}" />
-            <input type="hidden" name="action" value="${activeValue}" />
-            <button type="submit">${activeLabel}</button>
-          </form>
-          <form action="/broadcast/retry-errors" method="post">
-            <input type="hidden" name="campaign_name" value="${campaignName}" />
-            <button type="submit">Reintentar errores</button>
-          </form>
+      <div style="display:grid; gap:18px;">
+        <div class="box">
+          <h2>Control rápido</h2>
+          <div class="actions">
+            <form action="/broadcast/toggle" method="post">
+              <input type="hidden" name="campaign_name" value="${campaignName}" />
+              <input type="hidden" name="action" value="${summary?.is_active === false ? 'resume' : 'pause'}" />
+              <button type="submit">${summary?.is_active === false ? 'Prender difusión' : 'Pausar difusión'}</button>
+            </form>
+            <form action="/broadcast/retry-errors" method="post">
+              <input type="hidden" name="campaign_name" value="${campaignName}" />
+              <button type="submit">Reintentar errores</button>
+            </form>
+          </div>
+          <p class="muted" style="margin-top:12px;">Si pausás la difusión, el bot no envía nada aunque haya pendientes. Al prenderla otra vez, sigue donde estaba.</p>
+          <p class="muted">Importante: <span class="code">Enviados a Meta</span> significa que WhatsApp aceptó el mensaje. <span class="code">Entregados</span> y <span class="code">Leídos</span> se actualizan cuando llega el estado real por webhook.</p>
         </div>
-        <p class="muted" style="margin-top:12px;">Excel actual: <span class="code">${campaign.sourceFile || BROADCAST_EXCEL_PATH || 'Sin archivo cargado todavía'}</span></p>
-        <p class="muted">Si pausás la difusión, el bot no envía nada aunque haya pendientes. Al prenderla otra vez, sigue donde estaba.</p>
-        <p class="muted">Importante: <span class="code">Enviados a Meta</span> significa que WhatsApp aceptó el mensaje. <span class="code">Entregados</span> y <span class="code">Leídos</span> se actualizan cuando llega el estado real por webhook.</p>
-      </div>
-    </div>
 
-    <div class="box">
-      <h2>Mensajes de difusión</h2>
-      <p class="muted">Escribilos <strong>uno por línea</strong>. Podés usar <span class="code">{saludo}</span> y <span class="code">{nombre}</span>. Si el nombre no es real o no está bien detectado, el bot no lo pone. Si la persona responde y no tiene nombre válido, el bot le pide el nombre y actualiza el contacto con tu flujo actual.</p>
-      <form action="/broadcast/messages" method="post">
-        <input type="hidden" name="campaign_name" value="${campaignName}" />
-        <textarea name="broadcast_messages" rows="14">${messagesText}</textarea>
-        <button type="submit">Guardar mensajes</button>
-      </form>
-    </div>
-
-    <div class="row">
-      <div class="box">
-        <h2>Contexto IA de la difusión</h2>
-        <form action="/broadcast/context" method="post">
-          <input type="hidden" name="campaign_name" value="${campaignName}" />
-          <label>Tipo de campaña</label>
-          <select name="campaign_type">
-            <option value="OTHER" ${campaignType === 'OTHER' ? 'selected' : ''}>OTHER</option>
-            <option value="PRODUCT" ${campaignType === 'PRODUCT' ? 'selected' : ''}>PRODUCT</option>
-            <option value="SERVICE" ${campaignType === 'SERVICE' ? 'selected' : ''}>SERVICE</option>
-            <option value="COURSE" ${campaignType === 'COURSE' ? 'selected' : ''}>COURSE</option>
-          </select>
-
-          <label>De qué trata la difusión</label>
-          <textarea name="ai_context" rows="4">${campaign.aiContext || ''}</textarea>
-
-          <label>Cómo debe responder la IA</label>
-          <textarea name="ai_response_style" rows="4">${campaign.aiResponseStyle || ''}</textarea>
-
-          <label>Qué no debe inventar</label>
-          <textarea name="ai_guardrails" rows="4">${campaign.aiGuardrails || ''}</textarea>
-
-          <label>Objetivo / CTA</label>
-          <textarea name="ai_cta" rows="3">${campaign.aiCta || ''}</textarea>
-
-          <label>Vigente hasta</label>
-          <input type="text" name="valid_until" value="${campaign.validUntil || ''}" />
-          <button type="submit">Guardar contexto IA</button>
-        </form>
-      </div>
-
-      <div class="box">
-        <h2>Fotos / archivos de la campaña</h2>
-        <p class="muted">Si subís imágenes o documentos, se envían antes del texto de difusión.</p>
-        <form action="/broadcast/assets" method="post" enctype="multipart/form-data">
-          <input type="hidden" name="campaign_name" value="${campaignName}" />
-          <label>Archivos</label>
-          <input type="file" name="files" accept=".png,.jpg,.jpeg,.webp,.pdf" multiple />
-          <button type="submit">Subir archivos</button>
-        </form>
-        <p class="muted" style="margin-top:12px;">Adjuntos cargados: <span class="code">${campaignAssets.length}</span></p>
-        ${campaignAssets.length ? `<ul>${campaignAssets.map((a) => `<li class="muted">${a.filename || a.mediaId || 'archivo'}</li>`).join('')}</ul>` : '<p class="muted">No hay archivos cargados.</p>'}
+        <div class="box">
+          <h2>Registro de campañas</h2>
+          <p class="muted">Acá ves las difusiones que fuiste creando.</p>
+          <div class="campaign-list">
+            ${history.length ? history.map((item) => `
+              <a class="campaign-item ${item.campaignName === campaignName ? 'active' : ''}" href="/broadcast/panel?campaign_name=${encodeURIComponent(item.campaignName)}">
+                <strong>${item.campaignName}</strong>
+                <small>Tipo: ${item.campaignType} · ${item.isActive ? 'Activa' : 'Pausada'}</small>
+                <small>Total: ${item.total} · Pendientes: ${item.pending} · Errores: ${item.error}</small>
+                <small>Actualizada: ${item.updatedAtText || '—'}</small>
+              </a>
+            `).join('') : '<p class="muted">Todavía no hay campañas registradas.</p>'}
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -2434,7 +2580,7 @@ app.get("/broadcast/panel", async (req, res) => {
         humanEl.textContent = formatNextSend(target);
 
         const now = new Date();
-        let diff = target.getTime() - now.getTime();
+        const diff = target.getTime() - now.getTime();
         if (diff <= 0) {
           countdownEl.textContent = '00:00:00';
           return;
@@ -2457,6 +2603,112 @@ app.get("/broadcast/panel", async (req, res) => {
   return res.status(200).send(html);
 });
 
+app.post("/broadcast/save", (req, res, next) => {
+  if (!broadcastUpload) {
+    return res.status(500).json({ ok: false, error: 'multer_missing', message: 'Falta instalar multer: npm i multer' });
+  }
+  return broadcastUpload.fields([
+    { name: 'excel_file', maxCount: 1 },
+    { name: 'asset_files', maxCount: 8 },
+  ])(req, res, next);
+}, async (req, res) => {
+  try {
+    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    const replaceMode = String(req.body?.replace_mode || 'replace_pending').trim().toLowerCase();
+    const campaignType = String(req.body?.campaign_type || 'OTHER').trim().toUpperCase() || 'OTHER';
+    const aiContext = req.body?.ai_context || '';
+    const aiResponseStyle = req.body?.ai_response_style || '';
+    const aiGuardrails = req.body?.ai_guardrails || '';
+    const aiCta = req.body?.ai_cta || '';
+    const validUntilRaw = String(req.body?.valid_until || '').trim();
+    const validUntilParsed = validUntilRaw ? broadcastParseValidUntilInput(validUntilRaw) : null;
+    if (validUntilRaw && !validUntilParsed) {
+      return broadcastPanelRedirect(res, 'No pude interpretar la vigencia. Usá fecha y hora válidas.', true, campaignName);
+    }
+
+    const current = await getBroadcastCampaignConfig(campaignName);
+    const filesMap = req.files || {};
+    const excelFile = Array.isArray(filesMap.excel_file) ? filesMap.excel_file[0] : null;
+    const assetFiles = Array.isArray(filesMap.asset_files) ? filesMap.asset_files : [];
+    const broadcastMessages = broadcastParseMessagesInput(req.body?.broadcast_messages || '');
+    const finalMessages = broadcastMessages.length ? broadcastMessages : (current.messages?.length ? current.messages : BROADCAST_MESSAGES);
+
+    let sourceFile = current.sourceFile || '';
+    if (excelFile?.buffer && excelFile?.originalname) {
+      if (!XLSX) {
+        return broadcastPanelRedirect(res, 'Falta instalar xlsx: npm i xlsx', true, campaignName);
+      }
+      const tempPath = path.join(getTmpDir(), `broadcast-${Date.now()}-${String(excelFile.originalname).replace(/[^a-zA-Z0-9._-]/g, '_')}`);
+      fs.writeFileSync(tempPath, excelFile.buffer);
+      BROADCAST_EXCEL_PATH = tempPath;
+      sourceFile = tempPath;
+    }
+
+    const mergedAssets = Array.isArray(current.assets) ? current.assets.slice() : [];
+    for (const file of assetFiles) {
+      const safeName = String(file.originalname || `archivo-${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, '_');
+      const tmpPath = path.join(getTmpDir(), `broadcast-asset-${Date.now()}-${safeName}`);
+      fs.writeFileSync(tmpPath, file.buffer);
+      const mimeType = String(file.mimetype || guessMimeTypeFromFilename(safeName) || 'application/octet-stream');
+      const mediaId = await uploadMediaToWhatsApp(tmpPath, mimeType);
+      mergedAssets.push({
+        filename: safeName,
+        mimeType,
+        mediaId,
+        uploadedAt: new Date().toISOString(),
+      });
+    }
+
+    await upsertBroadcastCampaign({
+      campaignName,
+      sourceFile: sourceFile || BROADCAST_EXCEL_PATH,
+      pattern: current.pattern || BROADCAST_PATTERN_SAFE,
+      messages: finalMessages,
+      isActive: current.isActive,
+      campaignType,
+      aiContext,
+      aiResponseStyle,
+      aiGuardrails,
+      aiCta,
+      validUntil: validUntilParsed,
+      assets: mergedAssets,
+    });
+
+    await updateBroadcastPendingMessages(campaignName, finalMessages);
+
+    await db.query(
+      `UPDATE broadcast_queue
+          SET offer_type = $2,
+              updated_at = NOW()
+        WHERE campaign_name = $1
+          AND status IN ('pending','processing','error','skipped')`,
+      [campaignName, campaignType]
+    );
+
+    let summaryMsg = 'Difusión guardada correctamente.';
+    if (excelFile?.buffer && excelFile?.originalname) {
+      const cleared = await clearBroadcastQueueForUpload(campaignName, replaceMode);
+      const data = await ensureBroadcastCampaignLoaded({
+        campaignName,
+        excelPath: sourceFile,
+        offerType: campaignType === 'OTHER' ? BROADCAST_OFFER_TYPE : campaignType,
+        offerItems: BROADCAST_OFFER_ITEMS,
+        offerSelectedName: BROADCAST_OFFER_SELECTED_NAME,
+        messages: finalMessages,
+      });
+      summaryMsg = `Difusión actualizada. Nuevos: ${Number(data.inserted || 0)} | Omitidos: ${Number(data.skipped || 0)} | Cola limpiada: ${Number(cleared.deleted || 0)}.`;
+    } else if (sourceFile && fs.existsSync(sourceFile)) {
+      await planBroadcastQueue({
+        campaignName,
+        pattern: current.pattern || BROADCAST_PATTERN_SAFE,
+      }).catch(() => null);
+    }
+
+    return broadcastPanelRedirect(res, summaryMsg, false, campaignName);
+  } catch (e) {
+    return broadcastPanelRedirect(res, e?.message || 'No pude guardar la difusión.', true, String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME);
+  }
+});
 
 app.post("/broadcast/context", async (req, res) => {
   try {
@@ -2470,9 +2722,9 @@ app.post("/broadcast/context", async (req, res) => {
       aiCta: req.body?.ai_cta || '',
       validUntil: req.body?.valid_until || '',
     });
-    return broadcastPanelRedirect(res, 'Contexto IA guardado correctamente.');
+    return broadcastPanelRedirect(res, 'Contexto IA guardado correctamente.', false, campaignName);
   } catch (e) {
-    return broadcastPanelRedirect(res, e?.message || 'No pude guardar el contexto IA.', true);
+    return broadcastPanelRedirect(res, e?.message || 'No pude guardar el contexto IA.', true, campaignName);
   }
 });
 
@@ -2485,7 +2737,7 @@ app.post("/broadcast/assets", (req, res, next) => {
   try {
     const files = Array.isArray(req.files) ? req.files : [];
     const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
-    if (!files.length) return broadcastPanelRedirect(res, 'No recibí archivos para subir.', true);
+    if (!files.length) return broadcastPanelRedirect(res, 'No recibí archivos para subir.', true, campaignName);
 
     const current = await getBroadcastCampaignConfig(campaignName);
     const assets = Array.isArray(current.assets) ? current.assets.slice() : [];
@@ -2514,13 +2766,13 @@ app.post("/broadcast/assets", (req, res, next) => {
       aiResponseStyle: current.aiResponseStyle,
       aiGuardrails: current.aiGuardrails,
       aiCta: current.aiCta,
-      validUntil: current.validUntil,
+      validUntil: current.validUntilRaw || current.validUntil,
       assets,
     });
 
-    return broadcastPanelRedirect(res, `Archivos cargados correctamente: ${files.length}.`);
+    return broadcastPanelRedirect(res, `Archivos cargados correctamente: ${files.length}.`, false, campaignName);
   } catch (e) {
-    return broadcastPanelRedirect(res, e?.message || 'No pude subir los archivos de la campaña.', true);
+    return broadcastPanelRedirect(res, e?.message || 'No pude subir los archivos de la campaña.', true, campaignName);
   }
 });
 
@@ -2529,7 +2781,7 @@ app.post("/broadcast/messages", async (req, res) => {
     const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
     const broadcastMessages = broadcastParseMessagesInput(req.body?.broadcast_messages || '');
     if (!broadcastMessages.length) {
-      return broadcastPanelRedirect(res, 'Tenés que dejar al menos un mensaje.', true);
+      return broadcastPanelRedirect(res, 'Tenés que dejar al menos un mensaje.', true, campaignName);
     }
 
     const current = await getBroadcastCampaignConfig(campaignName);
@@ -2541,9 +2793,9 @@ app.post("/broadcast/messages", async (req, res) => {
       isActive: current.isActive,
     });
     await updateBroadcastPendingMessages(campaignName, broadcastMessages);
-    return broadcastPanelRedirect(res, 'Mensajes guardados correctamente.');
+    return broadcastPanelRedirect(res, 'Mensajes guardados correctamente.', false, campaignName);
   } catch (e) {
-    return broadcastPanelRedirect(res, e?.message || 'No pude guardar los mensajes.', true);
+    return broadcastPanelRedirect(res, e?.message || 'No pude guardar los mensajes.', true, campaignName);
   }
 });
 
@@ -2558,9 +2810,9 @@ app.post("/broadcast/toggle", async (req, res) => {
         WHERE campaign_name = $1`,
       [campaignName, enable]
     );
-    return broadcastPanelRedirect(res, enable ? 'Difusión prendida.' : 'Difusión pausada.');
+    return broadcastPanelRedirect(res, enable ? 'Difusión prendida.' : 'Difusión pausada.', false, campaignName);
   } catch (e) {
-    return broadcastPanelRedirect(res, e?.message || 'No pude cambiar el estado de la difusión.', true);
+    return broadcastPanelRedirect(res, e?.message || 'No pude cambiar el estado de la difusión.', true, campaignName);
   }
 });
 
@@ -2596,7 +2848,7 @@ app.post("/broadcast/upload", (req, res, next) => {
       aiResponseStyle: current.aiResponseStyle,
       aiGuardrails: current.aiGuardrails,
       aiCta: current.aiCta,
-      validUntil: current.validUntil,
+      validUntil: current.validUntilRaw || current.validUntil,
       assets: current.assets || [],
     });
 
@@ -2611,7 +2863,7 @@ app.post("/broadcast/upload", (req, res, next) => {
     });
 
     if (req.headers.accept && String(req.headers.accept).includes('text/html')) {
-      return broadcastPanelRedirect(res, `Excel importado. Nuevos: ${Number(data.inserted || 0)} | Omitidos: ${Number(data.skipped || 0)}.`);
+      return broadcastPanelRedirect(res, `Excel importado. Nuevos: ${Number(data.inserted || 0)} | Omitidos: ${Number(data.skipped || 0)}.`, false, campaignName);
     }
 
     return res.json({
@@ -2626,16 +2878,17 @@ app.post("/broadcast/upload", (req, res, next) => {
     });
   } catch (e) {
     if (req.headers.accept && String(req.headers.accept).includes('text/html')) {
-      return broadcastPanelRedirect(res, e?.message || 'No pude importar el Excel.', true);
+      return broadcastPanelRedirect(res, e?.message || 'No pude importar el Excel.', true, campaignName);
     }
     return res.status(500).json({ ok: false, error: e?.message || 'error_broadcast_upload' });
   }
 });
 
-app.get("/broadcast/status", async (_req, res) => {
+app.get("/broadcast/status", async (req, res) => {
   try {
-    const summary = await getBroadcastSummary(BROADCAST_CAMPAIGN_NAME);
-    const campaign = await getBroadcastCampaignConfig(BROADCAST_CAMPAIGN_NAME);
+    const campaignName = String(req.query?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    const summary = await getBroadcastSummary(campaignName);
+    const campaign = await getBroadcastCampaignConfig(campaignName);
     return res.json({
       ok: true,
       enabled: ENABLE_DAILY_BROADCAST,
@@ -2644,7 +2897,7 @@ app.get("/broadcast/status", async (_req, res) => {
       excel_present: broadcastExcelExists(campaign.sourceFile || BROADCAST_EXCEL_PATH),
       panel_url: 'https://bot-cataleya.onrender.com/broadcast/panel',
       upload_url: 'https://bot-cataleya.onrender.com/broadcast/upload',
-      campaign_name: BROADCAST_CAMPAIGN_NAME,
+      campaign_name: campaignName,
       daily_pattern: campaign.pattern || BROADCAST_PATTERN_SAFE,
       messages_count: campaign.messages?.length || BROADCAST_MESSAGES.length,
       is_active: !!campaign.isActive,
@@ -2693,12 +2946,12 @@ app.post("/broadcast/retry-errors", async (req, res) => {
     const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
     const data = await resetBroadcastErrorsToPending(campaignName);
     if (req.headers.accept && String(req.headers.accept).includes('text/html')) {
-      return broadcastPanelRedirect(res, `Errores restaurados a pendientes: ${Number(data.restored || 0)}.`);
+      return broadcastPanelRedirect(res, `Errores restaurados a pendientes: ${Number(data.restored || 0)}.`, false, campaignName);
     }
     return res.json({ ok: true, ...data });
   } catch (e) {
     if (req.headers.accept && String(req.headers.accept).includes('text/html')) {
-      return broadcastPanelRedirect(res, e?.message || 'No pude restaurar los errores.', true);
+      return broadcastPanelRedirect(res, e?.message || 'No pude restaurar los errores.', true, campaignName);
     }
     return res.status(500).json({ ok: false, error: e?.message || 'error_broadcast_retry' });
   }
