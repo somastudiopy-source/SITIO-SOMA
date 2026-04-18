@@ -1700,14 +1700,15 @@ async function getBroadcastSummary(campaignName = BROADCAST_CAMPAIGN_NAME) {
         COUNT(*) FILTER (WHERE status = 'pending') AS pending,
         COUNT(*) FILTER (WHERE status = 'processing') AS processing,
         COUNT(*) FILTER (WHERE status IN ('sent','sent_api','delivered','read')) AS sent_api,
+        COUNT(*) FILTER (WHERE status = 'sent_api') AS awaiting_delivery,
         COUNT(*) FILTER (WHERE status IN ('delivered','read')) AS delivered,
         COUNT(*) FILTER (WHERE status = 'read') AS read,
         COUNT(*) FILTER (WHERE status = 'error') AS error,
         COUNT(*) FILTER (WHERE status = 'skipped') AS skipped,
         COUNT(*) FILTER (WHERE status = 'pending' AND schedule_day = CURRENT_DATE) AS scheduled_today,
-        COUNT(DISTINCT schedule_day) FILTER (WHERE status IN ('pending','processing','error','skipped') AND schedule_day IS NOT NULL) AS remaining_days,
+        COUNT(DISTINCT schedule_day) FILTER (WHERE status IN ('pending','processing','sent_api','error','skipped') AND schedule_day IS NOT NULL) AS remaining_days,
         MIN(send_at) FILTER (WHERE status = 'pending') AS next_send_at,
-        MAX(send_at) FILTER (WHERE status IN ('pending','processing','error','skipped')) AS last_send_at
+        MAX(send_at) FILTER (WHERE status IN ('pending','processing','sent_api','error','skipped')) AS last_send_at
        FROM broadcast_queue
       WHERE campaign_name = $1`,
     [cleanCampaign]
@@ -1720,6 +1721,7 @@ async function getBroadcastSummary(campaignName = BROADCAST_CAMPAIGN_NAME) {
     pending: Number(base.pending || 0),
     processing: Number(base.processing || 0),
     sent_api: Number(base.sent_api || 0),
+    awaiting_delivery: Number(base.awaiting_delivery || 0),
     delivered: Number(base.delivered || 0),
     read: Number(base.read || 0),
     error: Number(base.error || 0),
@@ -1834,6 +1836,62 @@ async function updateBroadcastDeliveryFromWebhook(statusObj = {}) {
   return { matched: 0, ignored: true, reason: 'unsupported_status', status: rawStatus };
 }
 
+async function recycleStaleBroadcastUnconfirmed(campaignName = BROADCAST_CAMPAIGN_NAME) {
+  const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
+  const staleMinutes = Math.max(10, Number(BROADCAST_CONFIRM_TIMEOUT_MINUTES || 90));
+  const maxAttempts = Math.max(1, Number(BROADCAST_CONFIRM_MAX_ATTEMPTS || 3));
+  const retryDelay = Math.max(1, Number(BROADCAST_CONFIRM_RETRY_DELAY_MINUTES || 15));
+
+  const rows = await db.query(
+    `SELECT id, attempts
+       FROM broadcast_queue
+      WHERE campaign_name = $1
+        AND status = 'sent_api'
+        AND COALESCE(api_accepted_at, sent_at, updated_at) <= NOW() - ($2::int * INTERVAL '1 minute')
+      ORDER BY COALESCE(api_accepted_at, sent_at, updated_at) ASC, id ASC`,
+    [cleanCampaign, staleMinutes]
+  );
+
+  let retried = 0;
+  let markedError = 0;
+
+  for (const row of (rows.rows || [])) {
+    const attempts = Number(row.attempts || 0);
+    if (attempts >= maxAttempts) {
+      const result = await db.query(
+        `UPDATE broadcast_queue
+            SET status = 'error',
+                delivery_status = COALESCE(delivery_status, 'unconfirmed'),
+                last_error = COALESCE(last_error, 'Sin confirmación de entrega en el tiempo esperado'),
+                updated_at = NOW()
+          WHERE id = $1
+            AND status = 'sent_api'`,
+        [row.id]
+      );
+      markedError += Number(result.rowCount || 0);
+      continue;
+    }
+
+    const result = await db.query(
+      `UPDATE broadcast_queue
+          SET status = 'pending',
+              send_at = NOW() + ($2::int * INTERVAL '1 minute'),
+              wa_message_id = NULL,
+              delivery_status = NULL,
+              api_accepted_at = NULL,
+              sent_at = NULL,
+              last_error = 'Reintento automático por falta de confirmación de entrega',
+              updated_at = NOW()
+        WHERE id = $1
+          AND status = 'sent_api'`,
+      [row.id, retryDelay]
+    );
+    retried += Number(result.rowCount || 0);
+  }
+
+  return { retried, marked_error: markedError };
+}
+
 async function processBroadcastQueue() {
   if (!broadcastCanOperate()) return { sent_api: 0, failed: 0, attempted: 0, ready: false };
 
@@ -1848,6 +1906,10 @@ async function processBroadcastQueue() {
     offerType: BROADCAST_OFFER_TYPE,
     offerItems: BROADCAST_OFFER_ITEMS,
     offerSelectedName: BROADCAST_OFFER_SELECTED_NAME,
+  });
+
+  await recycleStaleBroadcastUnconfirmed(BROADCAST_CAMPAIGN_NAME).catch((e) => {
+    console.error('❌ Error reciclando difusión sin confirmar:', e?.response?.data || e?.message || e);
   });
 
   const due = await db.query(
@@ -1877,12 +1939,7 @@ async function processBroadcastQueue() {
       const messageText = await broadcastRenderMessageForSend(messageTemplate, processing);
       if (!messageText) throw new Error('Mensaje vacío');
 
-      const sendResponse = await sendWhatsAppText(recipient, messageText, {
-        disableDedup: true,
-      });
-      if (sendResponse?.deduped) {
-        throw new Error('Envío deduplicado, no confirmado por WhatsApp');
-      }
+      const sendResponse = await sendWhatsAppText(recipient, messageText, { disableDedup: true });
       const waMessageId = broadcastExtractWaMessageId(sendResponse);
       if (!waMessageId) {
         throw new Error('WhatsApp no devolvió ID de mensaje');
@@ -2004,12 +2061,13 @@ app.get("/broadcast/panel", async (req, res) => {
   const pending = Number(summary?.pending || 0);
   const processing = Number(summary?.processing || 0);
   const sentApi = Number(summary?.sent_api || 0);
+  const awaitingDelivery = Number(summary?.awaiting_delivery || 0);
   const delivered = Number(summary?.delivered || 0);
   const readCount = Number(summary?.read || 0);
   const error = Number(summary?.error || 0);
   const skipped = Number(summary?.skipped || 0);
   const total = Number(summary?.total || 0);
-  const remaining = pending + processing + error + skipped;
+  const remaining = pending + processing + awaitingDelivery + error + skipped;
   const daysLeft = Number(summary?.remaining_days || 0);
 
   const html = `<!doctype html>
@@ -2052,6 +2110,7 @@ app.get("/broadcast/panel", async (req, res) => {
       <div class="grid">
         <div class="stat"><span>Total cargados</span><strong>${total}</strong></div>
         <div class="stat"><span>Enviados a Meta</span><strong>${sentApi}</strong></div>
+        <div class="stat"><span>Por confirmar</span><strong>${awaitingDelivery}</strong></div>
         <div class="stat"><span>Entregados</span><strong>${delivered}</strong></div>
         <div class="stat"><span>Leídos</span><strong>${readCount}</strong></div>
         <div class="stat"><span>Pendientes</span><strong>${pending}</strong></div>
@@ -2098,9 +2157,14 @@ app.get("/broadcast/panel", async (req, res) => {
             <button type="submit">Reintentar errores</button>
           </form>
         </div>
+        <form action="/broadcast/retry-unconfirmed" method="post" style="margin-top:12px;">
+          <input type="hidden" name="campaign_name" value="${campaignName}" />
+          <input type="hidden" name="delay_minutes" value="1" />
+          <button type="submit">Reintentar sin confirmar</button>
+        </form>
         <p class="muted" style="margin-top:12px;">Excel actual: <span class="code">${campaign.sourceFile || BROADCAST_EXCEL_PATH || 'Sin archivo cargado todavía'}</span></p>
         <p class="muted">Si pausás la difusión, el bot no envía nada aunque haya pendientes. Al prenderla otra vez, sigue donde estaba.</p>
-        <p class="muted">Importante: <span class="code">Enviados a Meta</span> significa que WhatsApp aceptó el mensaje. <span class="code">Entregados</span> y <span class="code">Leídos</span> se actualizan cuando llega el estado real por webhook.</p>
+        <p class="muted">Importante: <span class="code">Enviados a Meta</span> significa que WhatsApp aceptó el mensaje. <span class="code">Por confirmar</span> muestra lo aceptado por Meta que todavía no confirmó entrega. <span class="code">Entregados</span> y <span class="code">Leídos</span> se actualizan cuando llega el estado real por webhook.</p>
       </div>
     </div>
 
@@ -2322,6 +2386,36 @@ app.post("/broadcast/import", async (req, res) => {
   }
 });
 
+app.post("/broadcast/retry-unconfirmed", async (req, res) => {
+  try {
+    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    const delayMinutes = Math.max(1, Number(req.body?.delay_minutes || 1));
+    const result = await db.query(
+      `UPDATE broadcast_queue
+          SET status = 'pending',
+              send_at = NOW() + ($2::int * INTERVAL '1 minute'),
+              wa_message_id = NULL,
+              delivery_status = NULL,
+              api_accepted_at = NULL,
+              sent_at = NULL,
+              last_error = 'Reintento manual de mensaje sin confirmar',
+              updated_at = NOW()
+        WHERE campaign_name = $1
+          AND status = 'sent_api'`,
+      [campaignName, delayMinutes]
+    );
+    if (req.headers.accept && String(req.headers.accept).includes('text/html')) {
+      return broadcastPanelRedirect(res, `Mensajes sin confirmar pasados a pendiente: ${Number(result.rowCount || 0)}.`);
+    }
+    return res.json({ ok: true, restored: Number(result.rowCount || 0) });
+  } catch (e) {
+    if (req.headers.accept && String(req.headers.accept).includes('text/html')) {
+      return broadcastPanelRedirect(res, e?.message || 'No pude restaurar los mensajes sin confirmar.', true);
+    }
+    return res.status(500).json({ ok: false, error: e?.message || 'error_broadcast_retry_unconfirmed' });
+  }
+});
+
 app.post("/broadcast/retry-errors", async (req, res) => {
   try {
     const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
@@ -2386,6 +2480,9 @@ const BROADCAST_DAILY_PATTERN = String(process.env.BROADCAST_DAILY_PATTERN || '3
 const BROADCAST_PATTERN_SAFE = BROADCAST_DAILY_PATTERN.length ? BROADCAST_DAILY_PATTERN : [30, 15, 10];
 const BROADCAST_SLOT_GRANULARITY_MINUTES = 5;
 const BROADCAST_MIN_GAP_MINUTES = 20;
+const BROADCAST_CONFIRM_TIMEOUT_MINUTES = Number(process.env.BROADCAST_CONFIRM_TIMEOUT_MINUTES || 90);
+const BROADCAST_CONFIRM_MAX_ATTEMPTS = Number(process.env.BROADCAST_CONFIRM_MAX_ATTEMPTS || 3);
+const BROADCAST_CONFIRM_RETRY_DELAY_MINUTES = Number(process.env.BROADCAST_CONFIRM_RETRY_DELAY_MINUTES || 15);
 
 
 // ===================== HUBSPOT (CRM seguimiento) =====================
@@ -11391,69 +11488,70 @@ Respondé SOLO JSON.`
 
 // ===================== WHATSAPP SEND =====================
 async function sendWhatsAppText(to, text, options = {}) {
-  const opts = (options && typeof options === 'object') ? options : {};
-  const disableDedup = !!opts.disableDedup;
-  const applyPrefix = opts.applyPrefix !== false;
-
+  const recipient = normalizeWhatsAppRecipient(to) || String(to || '').trim();
   let body = String(text || "");
-  const oneShotPrefix = applyPrefix ? consumeOneShotReplyPrefix(to) : "";
+  const oneShotPrefix = consumeOneShotReplyPrefix(recipient || to);
   if (oneShotPrefix) {
-    body = body ? `${oneShotPrefix}\n\n${body}`.trim() : String(oneShotPrefix || '').trim();
+    body = body ? `${oneShotPrefix}
+
+${body}`.trim() : String(oneShotPrefix || '').trim();
   }
 
-  const dedupKey = `${to}::${body}`;
+  const disableDedup = !!options?.disableDedup;
+  const dedupKey = `${recipient}::${body}`;
   const now = Date.now();
   const prevTs = lastSentOutByPeer.get(dedupKey) || 0;
   if (!disableDedup && body && (now - prevTs) < OUT_DEDUP_MS) {
-    return { deduped: true };
+    return { deduped: true, wa_msg_id: null };
   }
 
-  try {
-    const resp = await axios.post(
-      `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
-      { messaging_product: "whatsapp", to, text: { body } },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
+  const resp = await axios.post(
+    `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to: recipient,
+      type: "text",
+      text: { body }
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+    }
+  );
 
-    // Solo marcamos dedupe local si Meta aceptó el envío.
-    if (body) lastSentOutByPeer.set(dedupKey, now);
+  const wa_msg_id = resp?.data?.messages?.[0]?.id || null;
 
-    const wa_msg_id = resp?.data?.messages?.[0]?.id || null;
-
-    await dbInsertMessage({
-      direction: "out",
-      wa_peer: to,
-      name: null,
-      text: body,
-      msg_type: "text",
-      wa_msg_id,
-      raw: resp?.data || {},
-    });
-
-    return { ...(resp?.data || {}), wa_msg_id };
-  } catch (err) {
-    // Si falló, no dejamos bloqueado el reintento por dedupe local.
-    if (body) lastSentOutByPeer.delete(dedupKey);
-    throw err;
+  if (!disableDedup && body && wa_msg_id) {
+    lastSentOutByPeer.set(dedupKey, now);
   }
+
+  await dbInsertMessage({
+    direction: "out",
+    wa_peer: recipient,
+    name: null,
+    text: body,
+    msg_type: "text",
+    wa_msg_id,
+    raw: resp?.data || {},
+  });
+
+  return { ...(resp?.data || {}), wa_msg_id };
 }
 
 
-async function sendWhatsAppTemplate(to, templateName, bodyVars = [], meta = {}) {
+async function sendWhatsAppTemplate(to, templateName, bodyVars = [], meta = {}, options = {}) {
   const recipient = normalizeWhatsAppRecipient(to);
   if (!recipient) throw new Error(`Número inválido para plantilla: ${to || '(vacío)'}`);
   if (!templateName) throw new Error('Falta templateName');
 
   const body = (Array.isArray(bodyVars) ? bodyVars : []).map((v) => String(v ?? '').trim());
+  const disableDedup = !!options?.disableDedup;
   const dedupKey = `${recipient}::template::${templateName}::${body.join('|')}`;
   const now = Date.now();
   const prevTs = lastSentOutByPeer.get(dedupKey) || 0;
-  if ((now - prevTs) < OUT_DEDUP_MS) return { deduped: true };
+  if (!disableDedup && (now - prevTs) < OUT_DEDUP_MS) return { deduped: true, wa_msg_id: null };
 
   const components = body.length
     ? [{
@@ -11473,25 +11571,22 @@ async function sendWhatsAppTemplate(to, templateName, bodyVars = [], meta = {}) 
     },
   };
 
-  let resp;
-  try {
-    resp = await axios.post(
-      `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
-      payload,
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-    lastSentOutByPeer.set(dedupKey, now);
-  } catch (err) {
-    lastSentOutByPeer.delete(dedupKey);
-    throw err;
-  }
+  const resp = await axios.post(
+    `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
+    payload,
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
 
   const wa_msg_id = resp?.data?.messages?.[0]?.id || null;
+  if (!disableDedup && wa_msg_id) {
+    lastSentOutByPeer.set(dedupKey, now);
+  }
+
   await dbInsertMessage({
     direction: 'out',
     wa_peer: recipient,
