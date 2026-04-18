@@ -6038,11 +6038,12 @@ function normalizeHourHM(value) {
     return '';
   }
 
-  m = compact.match(/^(\d{1,2})(?:[:\.h])(\d{1,2})$/);
+  m = compact.match(/^(\d{1,2})(?:[:\.h])(\d{1,2})(?:[:\.h](\d{1,2}))?$/);
   if (m) {
     const hh = Number(m[1]);
     const mm = Number(m[2]);
-    if (hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59) {
+    const ss = Number(m[3] || 0);
+    if (hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59 && ss >= 0 && ss <= 59) {
       return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
     }
     return '';
@@ -6259,8 +6260,8 @@ function mapDraftRowToTurno(row) {
   if (!row) return null;
   return {
     appointment_id: row.appointment_id == null ? null : Number(row.appointment_id),
-    fecha: row.appointment_date ? String(row.appointment_date).slice(0, 10) : "",
-    hora: row.appointment_time ? String(row.appointment_time).slice(0, 5) : "",
+    fecha: resolveAppointmentDateYMD(row.appointment_date || ''),
+    hora: formatAppointmentTimeForTemplate(row.appointment_time || ''),
     servicio: row.service_name || "",
     duracion_min: Number(row.duration_min || 60) || 60,
     notas: row.service_notes || "",
@@ -6996,8 +6997,8 @@ function mapAppointmentRowToDraft(row) {
   if (!row) return null;
   return {
     appointment_id: row.id == null ? null : Number(row.id),
-    fecha: row.appointment_date ? String(row.appointment_date).slice(0, 10) : '',
-    hora: row.appointment_time ? String(row.appointment_time).slice(0, 5) : '',
+    fecha: resolveAppointmentDateYMD(row.appointment_date || ''),
+    hora: formatAppointmentTimeForTemplate(row.appointment_time || ''),
     servicio: row.service_name || '',
     duracion_min: Number(row.duration_min || 60) || 60,
     notas: row.service_notes || '',
@@ -7191,7 +7192,7 @@ async function updateAppointmentStatus(appointmentId, patch = {}) {
 
 function buildAppointmentPaymentMessageFromRow(row) {
   const appt = row || {};
-  const dateYMD = appt.appointment_date ? String(appt.appointment_date).slice(0, 10) : '';
+  const dateYMD = resolveAppointmentDateYMD(appt.appointment_date || '');
   const diaOk = dateYMD ? weekdayEsFromYMD(dateYMD) : '';
   const fechaTxt = dateYMD ? ymdToDMY(dateYMD) : '';
   const horaTxt = normalizeHourHM(appt.appointment_time || '') || String(appt.appointment_time || '').slice(0, 5);
@@ -7347,7 +7348,7 @@ async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
     await deleteAppointmentDraft(appt.wa_id);
     clearPendingStylistSuggestion(appt.wa_id);
 
-    const suggestedDateYMD = suggestionDate || (appt.appointment_date ? String(appt.appointment_date).slice(0, 10) : '');
+    const suggestedDateYMD = suggestionDate || resolveAppointmentDateYMD(appt.appointment_date || '');
     const suggestedTimeHM = normalizeHourHM(suggestionTime || '');
     const suggestedMode = suggestedTimeHM && isHourAllowedForAvailabilityMode(suggestedTimeHM, 'siesta') ? 'siesta' : 'commercial';
 
@@ -7399,7 +7400,8 @@ Si ninguno de los horarios comerciales le sirve, puedo revisar otros horarios �
 }
 
 function buildStylistTimeoutClientMessage(appt = {}) {
-  const fechaTxt = appt?.appointment_date ? ymdToDMY(appt.appointment_date) : '';
+  const fechaYMD = resolveAppointmentDateYMD(appt?.appointment_date || '');
+  const fechaTxt = fechaYMD ? ymdToDMY(fechaYMD) : '';
   const horaTxt = formatAppointmentTimeForTemplate(appt?.appointment_time || '');
   const servicioTxt = String(appt?.service_name || '').trim();
   return [
@@ -7615,7 +7617,8 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
     }
 
     try {
-      await notifyStylistTurnConfirmed(bookedRow || currentAppt || {});
+      const bookedRowForStylist = await getAppointmentRowById(merged.appointment_id);
+      await notifyStylistTurnConfirmed(bookedRowForStylist || bookedRow || currentAppt || {});
     } catch (e) {
       console.error('❌ Error avisando a la peluquera que el turno ya quedó señado:', e?.response?.data || e?.message || e);
     }
@@ -11647,8 +11650,8 @@ async function getLastBookedAppointmentForUser({ waId, waPhone }) {
   return rows.map((row) => ({
     client_name: row.client_name || "",
     service_name: row.service_name || "",
-    fecha: row.appointment_date ? String(row.appointment_date).slice(0, 10) : "",
-    hora: row.appointment_time ? String(row.appointment_time).slice(0, 5) : "",
+    fecha: resolveAppointmentDateYMD(row.appointment_date || ''),
+    hora: formatAppointmentTimeForTemplate(row.appointment_time || ''),
     duracion_min: Number(row.duration_min || 60) || 60,
     created_at: row.created_at || null,
   }))[0] || null;
@@ -12231,8 +12234,43 @@ async function sendWhatsAppTemplate(to, templateName, bodyVars = [], meta = {}, 
   return { ...(resp?.data || {}), wa_msg_id };
 }
 
+function resolveAppointmentDateYMD(value) {
+  if (!value) return '';
+
+  if (value instanceof Date) {
+    const time = value.getTime();
+    if (Number.isNaN(time)) return '';
+    const yyyy = String(value.getUTCFullYear()).padStart(4, '0');
+    const mm = String(value.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(value.getUTCDate()).padStart(2, '0');
+    return buildValidYMD(yyyy, mm, dd);
+  }
+
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    return buildValidYMD(raw.slice(0, 4), raw.slice(5, 7), raw.slice(8, 10));
+  }
+
+  const shortEnglish = raw.match(/^(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)\s+([A-Za-z]{3})\s+(\d{1,2})(?:\s+(\d{4}))?$/i)
+    || raw.match(/^([A-Za-z]{3})\s+(\d{1,2})(?:\s+(\d{4}))?$/i);
+  if (shortEnglish) {
+    const monthMap = {
+      jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+      jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12',
+    };
+    const mon = monthMap[String(shortEnglish[1]).slice(0, 3).toLowerCase()];
+    const dd = String(shortEnglish[2]).padStart(2, '0');
+    const yyyy = String(shortEnglish[3] || todayYMDInTZ().slice(0, 4));
+    if (mon) return buildValidYMD(yyyy, mon, dd);
+  }
+
+  return toYMD(raw);
+}
+
 function formatAppointmentDateForTemplate(dateYMD) {
-  const ymd = toYMD(dateYMD);
+  const ymd = resolveAppointmentDateYMD(dateYMD);
   if (!ymd) return '';
 
   try {
@@ -12273,7 +12311,7 @@ function buildAppointmentData(row = {}) {
     contact_phone: normalizePhone(row.contact_phone || ''),
     client_name: String(row.client_name || '').trim(),
     service_name: String(row.service_name || '').trim(),
-    appointment_date: toYMD(row.appointment_date || ''),
+    appointment_date: resolveAppointmentDateYMD(row.appointment_date || ''),
     appointment_time: formatAppointmentTimeForTemplate(row.appointment_time || ''),
     status: String(row.status || '').trim(),
     stylist_notified_at: row.stylist_notified_at || null,
