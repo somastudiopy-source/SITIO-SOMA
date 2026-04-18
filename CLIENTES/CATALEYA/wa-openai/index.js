@@ -950,6 +950,15 @@ function broadcastCleanText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function escapeHtml(value = '') {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function broadcastFirstName(value) {
   const txt = broadcastCleanText(value);
   if (!txt) return '';
@@ -1085,6 +1094,134 @@ function broadcastParseMessagesInput(value = '') {
     .split(/\r?\n/)
     .map((x) => broadcastCleanText(x))
     .filter(Boolean);
+}
+
+
+function normalizeBroadcastCampaignType(value = '') {
+  const t = String(value || '').trim().toUpperCase();
+  return ['PRODUCT', 'SERVICE', 'COURSE', 'OTHER'].includes(t) ? t : '';
+}
+
+function broadcastNormalizeLocalDateTimeInput(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(raw)) return raw;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${y}-${m}-${day}T${hh}:${mm}`;
+}
+
+function broadcastFormatValidUntilHuman(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return '';
+  try {
+    return new Intl.DateTimeFormat('es-AR', {
+      timeZone: TIMEZONE,
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(d);
+  } catch {
+    return raw;
+  }
+}
+
+function broadcastNormalizeMediaItems(items = []) {
+  return (Array.isArray(items) ? items : []).map((row) => {
+    const mediaId = String(row?.mediaId || row?.media_id || '').trim();
+    const mediaType = String(row?.mediaType || row?.media_type || '').trim().toLowerCase();
+    const filename = String(row?.filename || '').trim();
+    const mimeType = String(row?.mimeType || row?.mime_type || '').trim().toLowerCase();
+    const caption = String(row?.caption || '').trim();
+    if (!mediaId || !mediaType) return null;
+    return { mediaId, mediaType, filename, mimeType, caption };
+  }).filter(Boolean);
+}
+
+function broadcastContextLooksLikeFollowup(text = '') {
+  const t = normalize(text || '');
+  if (!t) return false;
+  if (looksLikeActiveOfferFollowup(text)) return true;
+  return /(me interesa|pasame info|pásame info|quiero saber|contame|cuentame|más info|mas info|hay cuotas|cuotas|medidas|materiales|entrega|envio|envío|como hago|cómo hago|quiero reservar|quiero avanzar|quiero anotarme|quiero inscribirme|precio|fotos|foto|stock|colores|formas de pago)/i.test(t);
+}
+
+function broadcastLooksLikeExplicitTopicSwitch(text = '', activeOffer = null, campaignConfig = null) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  const t = normalize(raw);
+  const activeType = normalizeBroadcastCampaignType(activeOffer?.campaignType || activeOffer?.type || campaignConfig?.campaignType || '');
+  if (!activeType) return false;
+
+  const explicitCourse = detectCourseIntentFromContext(raw, { lastCourseContext: getLastCourseContext(activeOffer?.waId || '') });
+  const explicitProduct = isExplicitProductIntent(raw) || detectProductDomain(raw, detectFurnitureFamily(raw) || detectProductFamily(raw));
+  const explicitService = isExplicitServiceIntent(raw) || /turno|reserv\w+|agend\w+|cita|servicio/.test(t);
+
+  if (activeType === 'COURSE' && (explicitProduct || explicitService) && !broadcastContextLooksLikeFollowup(raw)) return true;
+  if (activeType === 'PRODUCT' && (explicitCourse.isCourse || explicitService) && !broadcastContextLooksLikeFollowup(raw)) return true;
+  if (activeType === 'SERVICE' && (explicitCourse.isCourse || explicitProduct) && !broadcastContextLooksLikeFollowup(raw)) return true;
+
+  if (/(otra consulta|otra cosa|aparte|por otro lado|consultarte otra cosa|queria preguntarte otra cosa|quería preguntarte otra cosa)/i.test(t)) return true;
+  return false;
+}
+
+async function getBroadcastMediaItemsForCampaign(campaignName = BROADCAST_CAMPAIGN_NAME) {
+  const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
+  try {
+    const result = await db.query(
+      `SELECT media_items_json
+         FROM broadcast_campaigns
+        WHERE campaign_name = $1
+        LIMIT 1`,
+      [cleanCampaign]
+    );
+    return broadcastNormalizeMediaItems(result.rows?.[0]?.media_items_json || []);
+  } catch {
+    return [];
+  }
+}
+
+async function sendBroadcastMediaItem(recipient = '', item = {}) {
+  const to = normalizeWhatsAppRecipient(recipient);
+  const mediaId = String(item?.mediaId || '').trim();
+  const mediaType = String(item?.mediaType || '').trim().toLowerCase();
+  if (!to || !mediaId || !mediaType) return false;
+  const caption = String(item?.caption || '').trim();
+  if (mediaType === 'image') {
+    await sendWhatsAppImageById(to, mediaId, caption);
+    return true;
+  }
+  if (mediaType === 'video') {
+    await sendWhatsAppVideoById(to, mediaId, caption);
+    return true;
+  }
+  await sendWhatsAppDocumentById(to, mediaId, String(item?.filename || '').trim(), caption);
+  return true;
+}
+
+async function sendBroadcastCampaignMediaItems(recipient = '', items = []) {
+  const mediaItems = broadcastNormalizeMediaItems(items);
+  if (!mediaItems.length) return { sent: 0 };
+  let sent = 0;
+  for (const item of mediaItems) {
+    try {
+      await sendBroadcastMediaItem(recipient, item);
+      sent += 1;
+      await sleep(500);
+    } catch (e) {
+      console.error('❌ Error enviando media de difusión:', e?.response?.data || e?.message || e);
+      throw e;
+    }
+  }
+  return { sent };
 }
 
 function broadcastLocalDateParts(date = new Date(), offsetMinutes = -180) {
@@ -1252,6 +1389,234 @@ function broadcastDefaultOfferFromRow(row = {}) {
   return { type, selectedName: selected, items };
 }
 
+async function broadcastHasRecentPhoneActivity(waPhone = '', excludeId = null, minutes = BROADCAST_PHONE_COOLDOWN_MINUTES) {
+  const recipient = normalizeWhatsAppRecipient(waPhone);
+  const cooldown = Math.max(0, Number(minutes || 0));
+  if (!recipient || cooldown <= 0) return false;
+
+  const params = [recipient, cooldown];
+  let sql = `SELECT 1
+               FROM broadcast_queue
+              WHERE wa_phone = $1
+                AND status IN ('processing','sent_api','delivered','read')
+                AND COALESCE(api_accepted_at, sent_at, updated_at) >= NOW() - ($2::int * INTERVAL '1 minute')`;
+  if (excludeId != null) {
+    params.push(Number(excludeId));
+    sql += `
+                AND id <> $3`;
+  }
+  sql += `
+              LIMIT 1`;
+
+  const r = await db.query(sql, params);
+  return !!r.rows?.length;
+}
+
+async function broadcastReschedulePhoneCooldown(rowId, minutes = BROADCAST_PHONE_COOLDOWN_MINUTES) {
+  const delayMinutes = Math.max(1, Number(minutes || 1));
+  await db.query(
+    `UPDATE broadcast_queue
+        SET status = 'pending',
+            send_at = NOW() + ($2::int * INTERVAL '1 minute'),
+            updated_at = NOW(),
+            last_error = 'Reprogramado para evitar mensajes repetidos al mismo número'
+      WHERE id = $1`,
+    [rowId, delayMinutes]
+  );
+}
+
+function applyBroadcastOfferContext(waId, offer = {}, courseMatches = []) {
+  const type = String(offer?.type || '').trim().toUpperCase();
+  if (!waId || !type) return;
+
+  if (type === 'COURSE') {
+    clearProductMemory(waId);
+    const previousRecent = Array.isArray(getLastCourseContext(waId)?.recentCourses) ? getLastCourseContext(waId).recentCourses : [];
+    const recentCourses = mergeCourseContextRows(Array.isArray(courseMatches) ? courseMatches : [], previousRecent);
+    const selectedName = String(offer?.selectedName || (courseMatches.length === 1 ? courseMatches[0]?.nombre || '' : '')).trim();
+    setLastCourseContext(waId, {
+      query: selectedName || 'cursos',
+      selectedName,
+      currentCourseName: selectedName,
+      lastOptions: (courseMatches.length ? courseMatches.map((x) => x?.nombre).filter(Boolean) : normalizeActiveOfferItems(offer?.items || [])).slice(0, 10),
+      recentCourses: recentCourses.length ? recentCourses : normalizeActiveOfferItems(offer?.items || []).map((nombre) => ({ nombre })),
+    });
+    return;
+  }
+
+  if (type === 'PRODUCT') {
+    clearLastCourseContext(waId);
+    return;
+  }
+
+  if (type === 'SERVICE') {
+    clearProductMemory(waId);
+    clearLastCourseContext(waId);
+  }
+}
+
+async function buildBroadcastStructuredKnowledge(activeOffer = {}) {
+  const type = String(activeOffer?.type || activeOffer?.campaignType || '').trim().toUpperCase();
+  const itemNames = normalizeActiveOfferItems(activeOffer?.items || []);
+  if (!type || !itemNames.length) return [];
+
+  try {
+    if (type === 'COURSE') {
+      const recent = Array.isArray(getLastCourseContext(activeOffer?.waId || '')?.recentCourses)
+        ? getLastCourseContext(activeOffer?.waId || '').recentCourses
+        : [];
+      const courses = recent.length ? recent : resolveCoursesByNames(await getCoursesCatalog(), itemNames);
+      return courses.slice(0, 8).map((row) => broadcastFormatStructuredKnowledge(row, 'COURSE')).filter(Boolean);
+    }
+    if (type === 'SERVICE') {
+      const services = resolveServicesByNames(await getServicesCatalog(), itemNames);
+      return services.slice(0, 8).map((row) => broadcastFormatStructuredKnowledge(row, 'SERVICE')).filter(Boolean);
+    }
+    const products = resolveProductsByNames(filterSellableCatalogRows(await getStockCatalog(), { includeOutOfStock: true }), itemNames);
+    return products.slice(0, 8).map((row) => broadcastFormatStructuredKnowledge(row, 'PRODUCT')).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+async function resolveBroadcastReplyIntentWithAI(text = '', activeOffer = {}, campaignConfig = {}, historySnippet = '') {
+  const raw = String(text || '').trim();
+  if (!raw || !activeOffer?.type) return { action: 'NONE' };
+  const itemNames = normalizeActiveOfferItems(activeOffer?.items || []);
+  const fallback = { action: broadcastContextLooksLikeFollowup(raw) ? 'CONTINUE_BROADCAST' : 'NONE', reason: 'fallback' };
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Analizá si el mensaje del cliente responde a una difusión activa enviada por WhatsApp.
+Devolvé SOLO JSON válido con:
+- action: CONTINUE_BROADCAST | SWITCH_TOPIC | ASK_CLARIFY | NONE
+- target_type: PRODUCT | COURSE | SERVICE | OTHER
+- target_name: string
+- user_goal: INFO | PRICE | PHOTOS | SCHEDULE | SIGNUP | BOOK | RESERVE | PAYMENT | MEASURES | MATERIALS | DELIVERY | GENERAL | NONE
+
+Reglas:
+- Priorizá la última difusión activa.
+- "me interesa", "pasame info", "quiero saber", "dale", "hay cuotas", "medidas", "cómo hago", "quiero reservar" suelen ser CONTINUE_BROADCAST.
+- Solo marcá SWITCH_TOPIC si claramente cambió a otra cosa distinta.
+- No inventes nombres de productos/cursos/servicios.`
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje_cliente: raw,
+            tipo_difusion: activeOffer?.campaignType || activeOffer?.type || '',
+            items_ofrecidos: itemNames,
+            item_seleccionado: activeOffer?.selectedName || '',
+            mensaje_de_difusion: activeOffer?.lastAssistantText || '',
+            contexto_base: campaignConfig?.aiBrief || '',
+            reglas: campaignConfig?.aiRules || '',
+            objetivo: campaignConfig?.aiGoal || '',
+            historial_reciente: historySnippet || '',
+          })
+        }
+      ],
+      response_format: { type: 'json_object' },
+    });
+    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    return {
+      action: String(obj?.action || fallback.action || 'NONE').trim().toUpperCase(),
+      target_type: String(obj?.target_type || activeOffer?.campaignType || activeOffer?.type || '').trim().toUpperCase(),
+      target_name: String(obj?.target_name || activeOffer?.selectedName || '').trim(),
+      user_goal: String(obj?.user_goal || 'GENERAL').trim().toUpperCase(),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+async function buildBroadcastAiReply({ text = '', waId = '', activeOffer = {}, campaignConfig = {}, historySnippet = '' } = {}) {
+  const structuredKnowledge = await buildBroadcastStructuredKnowledge({ ...activeOffer, waId });
+  const firstName = await broadcastResolveDisplayNameForRow({ contact_name: activeOffer?.contactName || '', profile_name: activeOffer?.profileName || '', wa_phone: activeOffer?.phone || '', wa_id: waId });
+  const validUntilText = campaignConfig?.validUntil ? new Intl.DateTimeFormat('es-AR', { timeZone: TIMEZONE, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(campaignConfig.validUntil)) : '';
+
+  const completion = await openai.chat.completions.create({
+    model: PRIMARY_MODEL,
+    temperature: 0.45,
+    messages: [
+      {
+        role: 'system',
+        content:
+`Sos la asistente oficial de Cataleya por WhatsApp.
+Estás respondiendo a una persona que contestó una difusión activa.
+Tu tarea es continuar ESA charla con criterio humano, comercial y natural.
+
+Reglas obligatorias:
+- Respondé solo sobre la difusión activa y su contexto.
+- No inventes datos, cursos, productos, servicios, precios, stock, medidas ni plazos.
+- Si falta un dato concreto, decí que lo confirmás o que le pasás más detalle enseguida.
+- Respetá especialmente la lista de cosas que no debés inventar si fue cargada en el contexto.
+- Soná cálida, breve y conversacional. No robot.
+- Cerrá con una sola pregunta simple para avanzar.
+- Si la persona pide info general, explicá lo ofrecido con criterio.
+- Si pide reservar, inscribirse o avanzar, guiála con el siguiente paso.
+- Si la promo tiene vencimiento, mencionála solo si ayuda.
+- No menciones que usás IA ni que seguís instrucciones internas.`
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({
+          cliente_mensaje: String(text || '').trim(),
+          nombre_cliente: firstName || '',
+          tipo_difusion: activeOffer?.campaignType || activeOffer?.type || '',
+          mensaje_que_se_envio: activeOffer?.lastAssistantText || '',
+          items_ofrecidos: normalizeActiveOfferItems(activeOffer?.items || []),
+          item_seleccionado: activeOffer?.selectedName || '',
+          contexto_base: campaignConfig?.aiBrief || '',
+          reglas_de_respuesta: campaignConfig?.aiRules || '',
+          no_inventar: campaignConfig?.aiDontInvent || '',
+          objetivo_de_la_campana: campaignConfig?.aiGoal || '',
+          promo_vigente_hasta: validUntilText || '',
+          conocimiento_estructurado: structuredKnowledge,
+          historial_reciente: historySnippet || '',
+        })
+      }
+    ]
+  });
+
+  return String(completion.choices?.[0]?.message?.content || '').trim();
+}
+
+async function maybeHandleBroadcastAiFollowup({ text = '', waId = '', phone = '', activeOffer = null, historySnippet = '' } = {}) {
+  if (!activeOffer?.isBroadcastCampaign) return { handled: false };
+
+  const campaignConfig = await getBroadcastCampaignConfig(activeOffer?.campaignName || BROADCAST_CAMPAIGN_NAME);
+  if (broadcastLooksLikeExplicitTopicSwitch(text, activeOffer, campaignConfig)) return { handled: false };
+  if (!broadcastContextLooksLikeFollowup(text)) return { handled: false };
+
+  const intent = await resolveBroadcastReplyIntentWithAI(text, activeOffer, campaignConfig, historySnippet);
+  if (intent?.action === 'SWITCH_TOPIC' || intent?.action === 'NONE') return { handled: false };
+
+  const reply = await buildBroadcastAiReply({ text, waId, activeOffer, campaignConfig, historySnippet });
+  const cleanReply = String(reply || '').trim();
+  if (!cleanReply) return { handled: false };
+
+  setActiveAssistantOffer(waId, {
+    ...activeOffer,
+    type: normalizeBroadcastCampaignType(activeOffer?.campaignType || activeOffer?.type || '') || activeOffer?.type || '',
+    campaignType: normalizeBroadcastCampaignType(activeOffer?.campaignType || activeOffer?.type || '') || activeOffer?.type || '',
+    selectedName: intent?.target_name || activeOffer?.selectedName || '',
+    questionKind: intent?.user_goal || activeOffer?.questionKind || '',
+    lastAssistantText: cleanReply,
+    ts: Date.now(),
+  });
+
+  pushHistory(waId, 'assistant', cleanReply);
+  await sendWhatsAppText(phone, cleanReply);
+  scheduleInactivityFollowUp(waId, phone);
+  return { handled: true, message: cleanReply };
+}
+
 function broadcastCanOperate() {
   if (!ENABLE_DAILY_BROADCAST) return false;
   return !!XLSX;
@@ -1319,6 +1684,13 @@ async function ensureBroadcastTables() {
   `);
 
   await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS messages_json JSONB NOT NULL DEFAULT '[]'::jsonb`);
+  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS campaign_type TEXT`);
+  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS ai_brief TEXT`);
+  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS ai_rules TEXT`);
+  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS ai_goal TEXT`);
+  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS ai_dont_invent TEXT`);
+  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS media_items_json JSONB NOT NULL DEFAULT '[]'::jsonb`);
+  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS valid_until TIMESTAMPTZ`);
   await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS wa_message_id TEXT`);
   await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS delivery_status TEXT`);
   await db.query(`ALTER TABLE broadcast_queue ADD COLUMN IF NOT EXISTS api_accepted_at TIMESTAMPTZ`);
@@ -1342,9 +1714,19 @@ async function upsertBroadcastCampaign({
   pattern = BROADCAST_PATTERN_SAFE,
   messages = null,
   isActive = true,
+  campaignType = '',
+  aiBrief = null,
+  aiRules = null,
+  aiGoal = null,
+  aiDontInvent = null,
+  mediaItems = null,
+  validUntil = null,
 } = {}) {
   const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
   const cleanMessages = Array.isArray(messages) ? messages.map((x) => broadcastCleanText(x)).filter(Boolean) : null;
+  const normalizedCampaignType = normalizeBroadcastCampaignType(campaignType);
+  const normalizedValidUntil = validUntil ? broadcastNormalizeLocalDateTimeInput(validUntil) || String(validUntil || '').trim() : null;
+  const normalizedMediaItems = mediaItems != null ? broadcastNormalizeMediaItems(mediaItems) : null;
 
   let finalIsActive = typeof isActive === 'boolean' ? isActive : true;
   if (typeof isActive !== 'boolean') {
@@ -1361,8 +1743,14 @@ async function upsertBroadcastCampaign({
   }
 
   await db.query(
-    `INSERT INTO broadcast_campaigns (campaign_name, source_file, daily_pattern_json, timezone, windows_json, messages_json, is_active, updated_at)
-     VALUES ($1, $2, $3::jsonb, $4, $5::jsonb, COALESCE($6::jsonb, '[]'::jsonb), $7, NOW())
+    `INSERT INTO broadcast_campaigns (
+       campaign_name, source_file, daily_pattern_json, timezone, windows_json, messages_json,
+       campaign_type, ai_brief, ai_rules, ai_goal, ai_dont_invent, media_items_json, valid_until, is_active, updated_at
+     )
+     VALUES (
+       $1, $2, $3::jsonb, $4, $5::jsonb, COALESCE($6::jsonb, '[]'::jsonb),
+       NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, ''), COALESCE($12::jsonb, '[]'::jsonb), NULLIF($13, '')::timestamptz, $14, NOW()
+     )
      ON CONFLICT (campaign_name)
      DO UPDATE SET
        source_file = EXCLUDED.source_file,
@@ -1370,6 +1758,13 @@ async function upsertBroadcastCampaign({
        timezone = EXCLUDED.timezone,
        windows_json = EXCLUDED.windows_json,
        messages_json = COALESCE(EXCLUDED.messages_json, broadcast_campaigns.messages_json),
+       campaign_type = COALESCE(EXCLUDED.campaign_type, broadcast_campaigns.campaign_type),
+       ai_brief = COALESCE(EXCLUDED.ai_brief, broadcast_campaigns.ai_brief),
+       ai_rules = COALESCE(EXCLUDED.ai_rules, broadcast_campaigns.ai_rules),
+       ai_goal = COALESCE(EXCLUDED.ai_goal, broadcast_campaigns.ai_goal),
+       ai_dont_invent = COALESCE(EXCLUDED.ai_dont_invent, broadcast_campaigns.ai_dont_invent),
+       media_items_json = COALESCE(EXCLUDED.media_items_json, broadcast_campaigns.media_items_json),
+       valid_until = COALESCE(EXCLUDED.valid_until, broadcast_campaigns.valid_until),
        is_active = EXCLUDED.is_active,
        updated_at = NOW()`,
     [
@@ -1379,6 +1774,13 @@ async function upsertBroadcastCampaign({
       TIMEZONE,
       broadcastSafeJson(BROADCAST_WINDOWS, []),
       cleanMessages ? broadcastSafeJson(cleanMessages, []) : null,
+      normalizedCampaignType || '',
+      aiBrief != null ? String(aiBrief || '').trim() : '',
+      aiRules != null ? String(aiRules || '').trim() : '',
+      aiGoal != null ? String(aiGoal || '').trim() : '',
+      aiDontInvent != null ? String(aiDontInvent || '').trim() : '',
+      normalizedMediaItems != null ? broadcastSafeJson(normalizedMediaItems, []) : null,
+      normalizedValidUntil || '',
       !!finalIsActive,
     ]
   );
@@ -1407,7 +1809,8 @@ async function getBroadcastCampaignConfig(campaignName = BROADCAST_CAMPAIGN_NAME
   const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
   try {
     const result = await db.query(
-      `SELECT campaign_name, source_file, daily_pattern_json, messages_json, is_active, timezone
+      `SELECT campaign_name, source_file, daily_pattern_json, messages_json, is_active, timezone,
+              campaign_type, ai_brief, ai_rules, ai_goal, ai_dont_invent, media_items_json, valid_until
          FROM broadcast_campaigns
         WHERE campaign_name = $1
         LIMIT 1`,
@@ -1424,6 +1827,13 @@ async function getBroadcastCampaignConfig(campaignName = BROADCAST_CAMPAIGN_NAME
       messages: messages.length ? messages : BROADCAST_MESSAGES,
       pattern: pattern.length ? pattern : BROADCAST_PATTERN_SAFE,
       timezone: broadcastCleanText(row?.timezone || TIMEZONE),
+      campaignType: normalizeBroadcastCampaignType(row?.campaign_type || ''),
+      aiBrief: String(row?.ai_brief || '').trim(),
+      aiRules: String(row?.ai_rules || '').trim(),
+      aiGoal: String(row?.ai_goal || '').trim(),
+      aiDontInvent: String(row?.ai_dont_invent || '').trim(),
+      mediaItems: broadcastNormalizeMediaItems(row?.media_items_json || []),
+      validUntil: row?.valid_until || null,
     };
   } catch {
     return {
@@ -1434,6 +1844,13 @@ async function getBroadcastCampaignConfig(campaignName = BROADCAST_CAMPAIGN_NAME
       messages: BROADCAST_MESSAGES,
       pattern: BROADCAST_PATTERN_SAFE,
       timezone: TIMEZONE,
+      campaignType: '',
+      aiBrief: '',
+      aiRules: '',
+      aiGoal: '',
+      aiDontInvent: '',
+      mediaItems: [],
+      validUntil: null,
     };
   }
 }
@@ -1933,6 +2350,13 @@ async function processBroadcastQueue() {
     try {
       const recipient = normalizeWhatsAppRecipient(processing.wa_phone);
       if (!recipient) throw new Error('Número inválido');
+
+      const hasRecentPhoneActivity = await broadcastHasRecentPhoneActivity(recipient, processing.id, BROADCAST_PHONE_COOLDOWN_MINUTES);
+      if (hasRecentPhoneActivity) {
+        await broadcastReschedulePhoneCooldown(processing.id, BROADCAST_PHONE_COOLDOWN_MINUTES);
+        continue;
+      }
+
       const waId = broadcastCleanText(processing.wa_id) || recipient;
       const messageTemplate = broadcastCleanText(processing.custom_message || processing.message_text || '');
       if (!messageTemplate) throw new Error('Mensaje vacío');
@@ -1954,16 +2378,41 @@ async function processBroadcastQueue() {
         profileName: processing.profile_name || processing.contact_name || '',
       });
 
+      const rowCampaignConfig = await getBroadcastCampaignConfig(processing.campaign_name || BROADCAST_CAMPAIGN_NAME);
+      if (Array.isArray(rowCampaignConfig?.mediaItems) && rowCampaignConfig.mediaItems.length) {
+        await sendBroadcastCampaignMediaItems(recipient, rowCampaignConfig.mediaItems);
+      }
+
       const offer = broadcastDefaultOfferFromRow(processing);
-      if (offer.type && offer.items.length) {
+      if (!offer.type && rowCampaignConfig?.campaignType) offer.type = rowCampaignConfig.campaignType;
+      if (offer.type || rowCampaignConfig?.aiBrief || rowCampaignConfig?.mediaItems?.length) {
+        let offerCourseMatches = [];
+        if ((rowCampaignConfig?.campaignType || offer.type) === 'COURSE') {
+          const broadcastCourses = await getCoursesCatalog();
+          offerCourseMatches = resolveCoursesByNames(broadcastCourses, offer.items);
+        }
+
         setActiveAssistantOffer(waId, {
           type: offer.type,
+          campaignType: normalizeBroadcastCampaignType(rowCampaignConfig?.campaignType || offer.type) || offer.type,
           items: normalizeActiveOfferItems(offer.items),
           selectedName: offer.selectedName || (offer.items.length === 1 ? offer.items[0] : ''),
           mode: 'DETAIL',
           questionKind: 'MANUAL_BROADCAST',
           lastAssistantText: messageText,
+          isBroadcastCampaign: true,
+          campaignName: processing.campaign_name || BROADCAST_CAMPAIGN_NAME,
+          campaignBrief: rowCampaignConfig?.aiBrief || '',
+          campaignRules: rowCampaignConfig?.aiRules || '',
+          campaignDontInvent: rowCampaignConfig?.aiDontInvent || '',
+          campaignGoal: rowCampaignConfig?.aiGoal || '',
+          campaignValidUntil: rowCampaignConfig?.validUntil || null,
+          campaignMediaItems: Array.isArray(rowCampaignConfig?.mediaItems) ? rowCampaignConfig.mediaItems : [],
+          phone: recipient,
+          contactName: processing.contact_name || '',
+          profileName: processing.profile_name || '',
         });
+        applyBroadcastOfferContext(waId, offer, offerCourseMatches);
       }
 
       await db.query(
@@ -2050,25 +2499,48 @@ app.get("/broadcast/panel", async (req, res) => {
     isActive: true,
     messages: BROADCAST_MESSAGES,
     pattern: BROADCAST_PATTERN_SAFE,
+    campaignType: '',
+    aiBrief: '',
+    aiRules: '',
+    aiDontInvent: '',
+    aiGoal: '',
+    mediaItems: [],
+    validUntil: null,
   }));
 
   const okMsg = broadcastCleanText(req.query?.ok || '');
   const errMsg = broadcastCleanText(req.query?.error || '');
-  const messagesText = (Array.isArray(campaign.messages) && campaign.messages.length ? campaign.messages : BROADCAST_MESSAGES).join('\n');
+  const messagesText = (Array.isArray(campaign.messages) && campaign.messages.length ? campaign.messages : BROADCAST_MESSAGES).join('\\n');
   const replaceDefault = String(req.query?.replace_mode || 'replace_pending').trim().toLowerCase();
   const activeLabel = summary?.is_active === false ? 'Prender difusión' : 'Pausar difusión';
   const activeValue = summary?.is_active === false ? 'resume' : 'pause';
   const pending = Number(summary?.pending || 0);
   const processing = Number(summary?.processing || 0);
   const sentApi = Number(summary?.sent_api || 0);
-  const awaitingDelivery = Number(summary?.awaiting_delivery || 0);
   const delivered = Number(summary?.delivered || 0);
   const readCount = Number(summary?.read || 0);
   const error = Number(summary?.error || 0);
   const skipped = Number(summary?.skipped || 0);
   const total = Number(summary?.total || 0);
-  const remaining = pending + processing + awaitingDelivery + error + skipped;
+  const remaining = pending + processing + error + skipped;
   const daysLeft = Number(summary?.remaining_days || 0);
+  const mediaItems = Array.isArray(campaign.mediaItems) ? campaign.mediaItems : [];
+  const validUntilInput = campaign.validUntil ? broadcastNormalizeLocalDateTimeInput(campaign.validUntil) : '';
+
+  const mediaHtml = mediaItems.length
+    ? mediaItems.map((item, idx) => `
+      <div class="media-row">
+        <div>
+          <strong>${String(item.filename || `Adjunto ${idx + 1}`).replace(/</g, '&lt;')}</strong>
+          <div class="muted">${String(item.mediaType || '').toUpperCase()}${item.caption ? ` · ${String(item.caption).replace(/</g, '&lt;')}` : ''}</div>
+        </div>
+        <form action="/broadcast/media/delete" method="post">
+          <input type="hidden" name="campaign_name" value="${campaignName}" />
+          <input type="hidden" name="media_id" value="${String(item.mediaId || '')}" />
+          <button type="submit" class="danger">Quitar</button>
+        </form>
+      </div>`).join('')
+    : '<p class="muted">Todavía no hay fotos o archivos cargados para esta difusión.</p>';
 
   const html = `<!doctype html>
 <html lang="es">
@@ -2078,23 +2550,26 @@ app.get("/broadcast/panel", async (req, res) => {
   <title>Difusión Cataleya</title>
   <style>
     body { font-family: Arial, sans-serif; background:#f7f7f8; padding:24px; color:#111; }
-    .wrap { max-width: 1080px; margin: 0 auto; display:grid; gap:18px; }
+    .wrap { max-width: 1180px; margin: 0 auto; display:grid; gap:18px; }
     .box { background:#fff; border-radius:16px; padding:24px; box-shadow:0 10px 30px rgba(0,0,0,.08); }
     h1, h2, h3 { margin-top:0; }
     label { display:block; margin:14px 0 6px; font-weight:600; }
     input, select, textarea, button { width:100%; padding:12px; border-radius:10px; border:1px solid #d0d7de; box-sizing:border-box; font:inherit; }
     button { background:#111827; color:#fff; border:none; cursor:pointer; margin-top:12px; }
+    .danger { background:#7f1d1d; }
     .muted { color:#555; font-size:14px; }
     .code { font-family: monospace; background:#f3f4f6; padding:3px 6px; border-radius:6px; }
     .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap:12px; }
     .stat { background:#f9fafb; border:1px solid #e5e7eb; border-radius:14px; padding:14px; }
     .stat strong { display:block; font-size:26px; margin-top:6px; }
     .row { display:grid; grid-template-columns: 1fr 1fr; gap:18px; }
-    .pill { display:inline-block; padding:6px 10px; border-radius:999px; background:#eef2ff; font-size:13px; }
+    .actions { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
     .ok { background:#ecfdf5; color:#065f46; padding:12px 14px; border-radius:12px; margin-bottom:12px; }
     .error { background:#fef2f2; color:#991b1b; padding:12px 14px; border-radius:12px; margin-bottom:12px; }
-    .actions { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
-    @media (max-width: 800px) { .row, .actions { grid-template-columns: 1fr; } }
+    .pill { display:inline-block; padding:6px 10px; border-radius:999px; background:#eef2ff; font-size:13px; }
+    .media-row { display:flex; justify-content:space-between; gap:14px; align-items:center; border:1px solid #e5e7eb; border-radius:12px; padding:12px; margin:10px 0; }
+    .media-row form { min-width: 140px; }
+    @media (max-width: 900px) { .row, .actions { grid-template-columns: 1fr; } .media-row { flex-direction:column; align-items:flex-start; } .media-row form { width:100%; } }
   </style>
 </head>
 <body>
@@ -2110,7 +2585,6 @@ app.get("/broadcast/panel", async (req, res) => {
       <div class="grid">
         <div class="stat"><span>Total cargados</span><strong>${total}</strong></div>
         <div class="stat"><span>Enviados a Meta</span><strong>${sentApi}</strong></div>
-        <div class="stat"><span>Por confirmar</span><strong>${awaitingDelivery}</strong></div>
         <div class="stat"><span>Entregados</span><strong>${delivered}</strong></div>
         <div class="stat"><span>Leídos</span><strong>${readCount}</strong></div>
         <div class="stat"><span>Pendientes</span><strong>${pending}</strong></div>
@@ -2129,17 +2603,14 @@ app.get("/broadcast/panel", async (req, res) => {
         <form action="/broadcast/upload" method="post" enctype="multipart/form-data">
           <label>Archivo Excel</label>
           <input type="file" name="file" accept=".xlsx,.xls" required />
-
           <label>Modo</label>
           <select name="replace_mode">
             <option value="append" ${replaceDefault === 'append' ? 'selected' : ''}>Agregar a la cola actual</option>
             <option value="replace_pending" ${replaceDefault === 'replace_pending' ? 'selected' : ''}>Reemplazar pendientes/errores y dejar enviados</option>
             <option value="replace_all" ${replaceDefault === 'replace_all' ? 'selected' : ''}>Borrar todo y empezar de cero</option>
           </select>
-
           <label>Nombre de campaña</label>
           <input type="text" name="campaign_name" value="${campaignName}" />
-
           <button type="submit">Subir Excel</button>
         </form>
       </div>
@@ -2157,36 +2628,71 @@ app.get("/broadcast/panel", async (req, res) => {
             <button type="submit">Reintentar errores</button>
           </form>
         </div>
-        <form action="/broadcast/retry-unconfirmed" method="post" style="margin-top:12px;">
-          <input type="hidden" name="campaign_name" value="${campaignName}" />
-          <input type="hidden" name="delay_minutes" value="1" />
-          <button type="submit">Reintentar sin confirmar</button>
-        </form>
         <p class="muted" style="margin-top:12px;">Excel actual: <span class="code">${campaign.sourceFile || BROADCAST_EXCEL_PATH || 'Sin archivo cargado todavía'}</span></p>
-        <p class="muted">Si pausás la difusión, el bot no envía nada aunque haya pendientes. Al prenderla otra vez, sigue donde estaba.</p>
-        <p class="muted">Importante: <span class="code">Enviados a Meta</span> significa que WhatsApp aceptó el mensaje. <span class="code">Por confirmar</span> muestra lo aceptado por Meta que todavía no confirmó entrega. <span class="code">Entregados</span> y <span class="code">Leídos</span> se actualizan cuando llega el estado real por webhook.</p>
+        <p class="muted">La IA solo toma la difusión como contexto si el cliente realmente responde a esa campaña. Si cambia claramente de tema, vuelve al flujo normal del bot.</p>
       </div>
     </div>
 
     <div class="box">
       <h2>Mensajes de difusión</h2>
-      <p class="muted">Escribilos <strong>uno por línea</strong>. Podés usar <span class="code">{saludo}</span> y <span class="code">{nombre}</span>. Si el nombre no es real o no está bien detectado, el bot no lo pone. Si la persona responde y no tiene nombre válido, el bot le pide el nombre y actualiza el contacto con tu flujo actual.</p>
+      <p class="muted">Escribilos <strong>uno por línea</strong>. Podés usar <span class="code">{saludo}</span> y <span class="code">{nombre}</span>.</p>
       <form action="/broadcast/messages" method="post">
         <input type="hidden" name="campaign_name" value="${campaignName}" />
-        <textarea name="broadcast_messages" rows="14">${messagesText}</textarea>
+        <textarea name="broadcast_messages" rows="12">${messagesText}</textarea>
         <button type="submit">Guardar mensajes</button>
       </form>
+    </div>
+
+    <div class="box">
+      <h2>Contexto IA de la difusión</h2>
+      <p class="muted">Acá le explicás a OpenAI de qué trata la campaña, cómo debe responder y qué no tiene que inventar. Si la persona responde a esta difusión, la IA va a usar esto antes de contestar.</p>
+      <form action="/broadcast/context" method="post">
+        <input type="hidden" name="campaign_name" value="${campaignName}" />
+        <label>Tipo de campaña</label>
+        <select name="campaign_type">
+          <option value="" ${!campaign.campaignType ? 'selected' : ''}>Sin definir</option>
+          <option value="PRODUCT" ${campaign.campaignType === 'PRODUCT' ? 'selected' : ''}>PRODUCT / Muebles / Equipamiento / Productos</option>
+          <option value="SERVICE" ${campaign.campaignType === 'SERVICE' ? 'selected' : ''}>SERVICE / Servicios</option>
+          <option value="COURSE" ${campaign.campaignType === 'COURSE' ? 'selected' : ''}>COURSE / Cursos</option>
+          <option value="OTHER" ${campaign.campaignType === 'OTHER' ? 'selected' : ''}>OTHER / Otro</option>
+        </select>
+        <label>De qué trata la difusión / info base</label>
+        <textarea name="ai_brief" rows="5">${String(campaign.aiBrief || '').replace(/</g, '&lt;')}</textarea>
+        <label>Cómo debe responder la IA</label>
+        <textarea name="ai_rules" rows="4">${String(campaign.aiRules || '').replace(/</g, '&lt;')}</textarea>
+        <label>Qué no debe inventar</label>
+        <textarea name="ai_dont_invent" rows="4">${String(campaign.aiDontInvent || '').replace(/</g, '&lt;')}</textarea>
+        <label>Objetivo / CTA</label>
+        <textarea name="ai_goal" rows="3">${String(campaign.aiGoal || '').replace(/</g, '&lt;')}</textarea>
+        <label>Válido hasta (opcional)</label>
+        <input type="datetime-local" name="valid_until" value="${validUntilInput}" />
+        <button type="submit">Guardar contexto IA</button>
+      </form>
+    </div>
+
+    <div class="box">
+      <h2>Fotos o archivos de la campaña</h2>
+      <p class="muted">Podés subir una foto, varias fotos o archivos. Se van a adjuntar a cada difusión de esta campaña.</p>
+      <form action="/broadcast/media/upload" method="post" enctype="multipart/form-data">
+        <input type="hidden" name="campaign_name" value="${campaignName}" />
+        <label>Archivos</label>
+        <input type="file" name="media_files" accept=".png,.jpg,.jpeg,.webp,.pdf,.mp4,.mov" multiple required />
+        <label>Texto opcional para el archivo</label>
+        <input type="text" name="caption" value="" />
+        <button type="submit">Subir archivos</button>
+      </form>
+      <div style="margin-top:14px;">
+        ${mediaHtml}
+      </div>
     </div>
   </div>
   <script>
     (function(){
       const NEXT_SEND_AT_RAW = ${summary?.next_send_at ? JSON.stringify(summary.next_send_at) : 'null'};
-      const TIMEZONE_LABEL = ${JSON.stringify(TIMEZONE)};
+      const TIMEZONE_LABEL = ${json.dumps("America/Argentina/Salta")};
       const humanEl = document.getElementById('next-send-human');
       const countdownEl = document.getElementById('next-send-countdown');
-
       function two(n){ return String(n).padStart(2, '0'); }
-
       function formatNextSend(date){
         try {
           return new Intl.DateTimeFormat('es-AR', {
@@ -2199,40 +2705,23 @@ app.get("/broadcast/panel", async (req, res) => {
             hour12: false
           }).format(date);
         } catch (_) {
-          const d = date;
-          return two(d.getDate()) + '/' + two(d.getMonth()+1) + ' ' + two(d.getHours()) + ':' + two(d.getMinutes());
+          return two(date.getDate()) + '/' + two(date.getMonth()+1) + ' ' + two(date.getHours()) + ':' + two(date.getMinutes());
         }
       }
-
       function renderCountdown(){
-        if (!humanEl || !countdownEl || !NEXT_SEND_AT_RAW) {
-          if (countdownEl && !NEXT_SEND_AT_RAW) countdownEl.textContent = '—';
-          return;
-        }
-
+        if (!humanEl || !countdownEl || !NEXT_SEND_AT_RAW) { if (countdownEl && !NEXT_SEND_AT_RAW) countdownEl.textContent = '—'; return; }
         const target = new Date(NEXT_SEND_AT_RAW);
-        if (Number.isNaN(target.getTime())) {
-          humanEl.textContent = '—';
-          countdownEl.textContent = '—';
-          return;
-        }
-
+        if (Number.isNaN(target.getTime())) { humanEl.textContent = '—'; countdownEl.textContent = '—'; return; }
         humanEl.textContent = formatNextSend(target);
-
         const now = new Date();
         let diff = target.getTime() - now.getTime();
-        if (diff <= 0) {
-          countdownEl.textContent = '00:00:00';
-          return;
-        }
-
+        if (diff <= 0) { countdownEl.textContent = '00:00:00'; return; }
         const totalSeconds = Math.floor(diff / 1000);
         const hours = Math.floor(totalSeconds / 3600);
         const minutes = Math.floor((totalSeconds % 3600) / 60);
         const seconds = totalSeconds % 60;
         countdownEl.textContent = two(hours) + ':' + two(minutes) + ':' + two(seconds);
       }
-
       renderCountdown();
       setInterval(renderCountdown, 1000);
     })();
@@ -2242,6 +2731,7 @@ app.get("/broadcast/panel", async (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   return res.status(200).send(html);
 });
+
 
 app.post("/broadcast/messages", async (req, res) => {
   try {
@@ -2263,6 +2753,131 @@ app.post("/broadcast/messages", async (req, res) => {
     return broadcastPanelRedirect(res, 'Mensajes guardados correctamente.');
   } catch (e) {
     return broadcastPanelRedirect(res, e?.message || 'No pude guardar los mensajes.', true);
+  }
+});
+
+
+app.post("/broadcast/context", async (req, res) => {
+  try {
+    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    const current = await getBroadcastCampaignConfig(campaignName);
+    await upsertBroadcastCampaign({
+      campaignName,
+      sourceFile: current.sourceFile || BROADCAST_EXCEL_PATH,
+      pattern: current.pattern || BROADCAST_PATTERN_SAFE,
+      messages: current.messages?.length ? current.messages : BROADCAST_MESSAGES,
+      isActive: current.isActive,
+      campaignType: req.body?.campaign_type || current.campaignType || '',
+      aiBrief: req.body?.ai_brief ?? current.aiBrief ?? '',
+      aiRules: req.body?.ai_rules ?? current.aiRules ?? '',
+      aiDontInvent: req.body?.ai_dont_invent ?? current.aiDontInvent ?? '',
+      aiGoal: req.body?.ai_goal ?? current.aiGoal ?? '',
+      validUntil: req.body?.valid_until ?? current.validUntil ?? '',
+      mediaItems: current.mediaItems || [],
+    });
+    return broadcastPanelRedirect(res, 'Contexto IA guardado correctamente.');
+  } catch (e) {
+    return broadcastPanelRedirect(res, e?.message || 'No pude guardar el contexto IA.', true);
+  }
+});
+
+app.post("/broadcast/media/upload", (req, res, next) => {
+  if (!broadcastUpload) {
+    return res.status(500).json({ ok: false, error: 'multer_missing', message: 'Falta instalar multer: npm i multer' });
+  }
+  return broadcastUpload.array('media_files', 10)(req, res, next);
+}, async (req, res) => {
+  try {
+    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (!files.length) return broadcastPanelRedirect(res, 'Tenés que elegir al menos un archivo.', true);
+
+    const current = await getBroadcastCampaignConfig(campaignName);
+    const existingItems = Array.isArray(current.mediaItems) ? current.mediaItems : [];
+    const uploadedItems = [];
+
+    for (const file of files) {
+      const savedName = String(file.originalname || `media-${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, '_');
+      const tmpPath = path.join(getTmpDir(), `broadcast-media-${Date.now()}-${savedName}`);
+      fs.writeFileSync(tmpPath, file.buffer);
+      const mimeType = String(file.mimetype || guessMimeTypeFromFilename(savedName) || 'application/octet-stream');
+      const mediaId = await uploadMediaToWhatsApp(tmpPath, mimeType);
+      const mediaType = mimeType.startsWith('image/') ? 'image' : (mimeType.startsWith('video/') ? 'video' : 'document');
+      uploadedItems.push({
+        mediaId,
+        mediaType,
+        filename: savedName,
+        mimeType,
+        caption: String(req.body?.caption || '').trim(),
+      });
+    }
+
+    await upsertBroadcastCampaign({
+      campaignName,
+      sourceFile: current.sourceFile || BROADCAST_EXCEL_PATH,
+      pattern: current.pattern || BROADCAST_PATTERN_SAFE,
+      messages: current.messages?.length ? current.messages : BROADCAST_MESSAGES,
+      isActive: current.isActive,
+      campaignType: current.campaignType || '',
+      aiBrief: current.aiBrief || '',
+      aiRules: current.aiRules || '',
+      aiDontInvent: current.aiDontInvent || '',
+      aiGoal: current.aiGoal || '',
+      validUntil: current.validUntil || '',
+      mediaItems: [...existingItems, ...uploadedItems],
+    });
+
+    return broadcastPanelRedirect(res, `Archivos cargados correctamente: ${uploadedItems.length}.`);
+  } catch (e) {
+    return broadcastPanelRedirect(res, e?.message || 'No pude subir los archivos.', true);
+  }
+});
+
+app.post("/broadcast/media/delete", async (req, res) => {
+  try {
+    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    const mediaId = String(req.body?.media_id || '').trim();
+    const current = await getBroadcastCampaignConfig(campaignName);
+    const nextItems = (Array.isArray(current.mediaItems) ? current.mediaItems : []).filter((item) => String(item?.mediaId || '').trim() !== mediaId);
+    await upsertBroadcastCampaign({
+      campaignName,
+      sourceFile: current.sourceFile || BROADCAST_EXCEL_PATH,
+      pattern: current.pattern || BROADCAST_PATTERN_SAFE,
+      messages: current.messages?.length ? current.messages : BROADCAST_MESSAGES,
+      isActive: current.isActive,
+      campaignType: current.campaignType || '',
+      aiBrief: current.aiBrief || '',
+      aiRules: current.aiRules || '',
+      aiDontInvent: current.aiDontInvent || '',
+      aiGoal: current.aiGoal || '',
+      validUntil: current.validUntil || '',
+      mediaItems: nextItems,
+    });
+    return broadcastPanelRedirect(res, 'Archivo quitado de la campaña.');
+  } catch (e) {
+    return broadcastPanelRedirect(res, e?.message || 'No pude quitar el archivo.', true);
+  }
+});
+
+app.post("/broadcast/context", async (req, res) => {
+  try {
+    const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    const current = await getBroadcastCampaignConfig(campaignName);
+    await upsertBroadcastCampaign({
+      campaignName,
+      sourceFile: current.sourceFile || BROADCAST_EXCEL_PATH,
+      pattern: current.pattern || BROADCAST_PATTERN_SAFE,
+      messages: current.messages?.length ? current.messages : null,
+      isActive: current.isActive,
+      campaignType: req.body?.campaign_type || current.campaignType || '',
+      aiBrief: req.body?.campaign_brief || current.aiBrief || '',
+      aiRules: req.body?.campaign_rules || current.aiRules || '',
+      aiGoal: req.body?.campaign_goal || current.aiGoal || '',
+      validUntil: req.body?.campaign_valid_until || current.validUntil || '',
+    });
+    return broadcastPanelRedirect(res, 'Contexto IA guardado correctamente.');
+  } catch (e) {
+    return broadcastPanelRedirect(res, e?.message || 'No pude guardar el contexto IA.', true);
   }
 });
 
@@ -2327,6 +2942,8 @@ app.post("/broadcast/upload", (req, res, next) => {
       cleared,
       excel_path: tempPath,
       messages_count: current.messages?.length || BROADCAST_MESSAGES.length,
+      campaign_type: current.campaignType || '',
+      media_items_count: Array.isArray(current.mediaItems) ? current.mediaItems.length : 0,
       ...data,
     });
   } catch (e) {
@@ -2353,6 +2970,11 @@ app.get("/broadcast/status", async (_req, res) => {
       daily_pattern: campaign.pattern || BROADCAST_PATTERN_SAFE,
       messages_count: campaign.messages?.length || BROADCAST_MESSAGES.length,
       is_active: !!campaign.isActive,
+      campaign_type: campaign.campaignType || '',
+      ai_brief: campaign.aiBrief || '',
+      ai_rules: campaign.aiRules || '',
+      ai_goal: campaign.aiGoal || '',
+      valid_until: campaign.validUntil || null,
       summary,
     });
   } catch (e) {
@@ -2483,6 +3105,7 @@ const BROADCAST_MIN_GAP_MINUTES = 20;
 const BROADCAST_CONFIRM_TIMEOUT_MINUTES = Number(process.env.BROADCAST_CONFIRM_TIMEOUT_MINUTES || 90);
 const BROADCAST_CONFIRM_MAX_ATTEMPTS = Number(process.env.BROADCAST_CONFIRM_MAX_ATTEMPTS || 3);
 const BROADCAST_CONFIRM_RETRY_DELAY_MINUTES = Number(process.env.BROADCAST_CONFIRM_RETRY_DELAY_MINUTES || 15);
+const BROADCAST_PHONE_COOLDOWN_MINUTES = Number(process.env.BROADCAST_PHONE_COOLDOWN_MINUTES || 5);
 
 
 // ===================== HUBSPOT (CRM seguimiento) =====================
@@ -4644,6 +5267,13 @@ function rememberAssistantServiceOffer(waId, rows = [], extra = {}) {
     questionKind: extra.questionKind || '',
     lastAssistantText: extra.lastAssistantText || '',
   });
+}
+
+
+function resolveServicesByNames(rows = [], names = []) {
+  const wanted = new Set(normalizeActiveOfferItems(names).map((x) => normalize(cleanServiceName(x))));
+  if (!wanted.size) return [];
+  return (Array.isArray(rows) ? rows : []).filter((row) => wanted.has(normalize(cleanServiceName(row?.nombre || ''))));
 }
 
 function looksLikeActiveOfferFollowup(text = '') {
@@ -10382,6 +11012,22 @@ function findCourseByContextName(rows, courseName) {
     || null;
 }
 
+function resolveCoursesByNames(rows, names = []) {
+  const list = Array.isArray(rows) ? rows.filter((x) => x?.nombre) : [];
+  const wanted = normalizeActiveOfferItems(names);
+  if (!list.length || !wanted.length) return [];
+  const out = [];
+  const seen = new Set();
+  for (const name of wanted) {
+    const row = findCourseByContextName(list, name);
+    const key = normalize(row?.nombre || '');
+    if (!row || !key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(row);
+  }
+  return out;
+}
+
 
 const COURSE_REFERENCE_STOPWORDS = new Set([
   'curso', 'cursos', 'clase', 'clases', 'capacitacion', 'capacitaciones', 'taller', 'talleres',
@@ -12838,22 +13484,62 @@ lastCloseContext.set(waId, {
     pushHistory(waId, "user", text);
 
     const activeOfferForReview = getActiveAssistantOffer(waId);
+    const pendingDraftForAiReview = await getAppointmentDraft(waId);
+    const lastCourseContextForReview = getLastCourseContext(waId);
+    const aiHistorySnippet = buildConversationHistorySnippet(ensureConv(waId).messages || [], 12, 1600);
+
+    if (activeOfferForReview?.isBroadcastCampaign) {
+      const broadcastHandled = await maybeHandleBroadcastAiFollowup({
+        text,
+        waId,
+        phone,
+        activeOffer: activeOfferForReview,
+        historySnippet: aiHistorySnippet,
+      });
+      if (broadcastHandled?.handled) return;
+    }
+
+    let preResolvedActiveOffer = null;
+
+    if (activeOfferForReview && looksLikeActiveOfferFollowup(text)) {
+      preResolvedActiveOffer = await resolveReplyToActiveAssistantOfferWithAI(text, {
+        activeOffer: activeOfferForReview,
+        lastServiceName: getLastKnownService(waId, pendingDraftForAiReview)?.nombre || '',
+        lastCourseName: lastCourseContextForReview?.selectedName || lastCourseContextForReview?.query || '',
+        historySnippet: aiHistorySnippet,
+        force: true,
+      });
+
+      if (preResolvedActiveOffer?.action === 'CONTINUE_ACTIVE_OFFER') {
+        const preTargetType = String(preResolvedActiveOffer.target_type || activeOfferForReview?.type || '').trim().toUpperCase();
+        if (preTargetType === 'COURSE') clearProductMemory(waId);
+        if (preTargetType === 'PRODUCT') clearLastCourseContext(waId);
+
+        const syntheticFromPreResolvedOffer = buildSyntheticTextFromActiveOfferResolution(preResolvedActiveOffer, activeOfferForReview);
+        if (syntheticFromPreResolvedOffer) {
+          text = syntheticFromPreResolvedOffer;
+          userIntentText = syntheticFromPreResolvedOffer;
+          updateLastCloseContext(waId, { lastUserText: syntheticFromPreResolvedOffer });
+        }
+      }
+    }
+
     const firstAiReview = await reviewInboundMessageFirstWithAI(text, {
       activeAssistantOfferType: activeOfferForReview?.type || '',
       activeAssistantOfferDomain: activeOfferForReview?.domain || '',
       activeAssistantOfferFamily: activeOfferForReview?.family || '',
       activeAssistantOfferItems: Array.isArray(activeOfferForReview?.items) ? activeOfferForReview.items.slice(0, 12) : [],
       activeAssistantOfferSelectedName: activeOfferForReview?.selectedName || '',
-      hasDraft: !!(await getAppointmentDraft(waId)),
-      pendingDraft: await getAppointmentDraft(waId),
-      flowStep: (await getAppointmentDraft(waId))?.flow_step || '',
-      lastService: getLastKnownService(waId, await getAppointmentDraft(waId)),
-      lastServiceName: getLastKnownService(waId, await getAppointmentDraft(waId))?.nombre || '',
+      hasDraft: !!pendingDraftForAiReview,
+      pendingDraft: pendingDraftForAiReview,
+      flowStep: pendingDraftForAiReview?.flow_step || '',
+      lastService: getLastKnownService(waId, pendingDraftForAiReview),
+      lastServiceName: getLastKnownService(waId, pendingDraftForAiReview)?.nombre || '',
       lastProductName: lastProductByUser.get(waId)?.nombre || '',
-      lastCourseContext: getLastCourseContext(waId),
-      lastCourseName: getLastCourseContext(waId)?.selectedName || getLastCourseContext(waId)?.query || '',
-      hasCourseContext: !!getLastCourseContext(waId),
-      historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 12, 1600),
+      lastCourseContext: lastCourseContextForReview,
+      lastCourseName: lastCourseContextForReview?.selectedName || lastCourseContextForReview?.query || '',
+      hasCourseContext: !!lastCourseContextForReview,
+      historySnippet: aiHistorySnippet,
     });
 
     if (firstAiReview?.topic_changed) {
@@ -13006,21 +13692,81 @@ updateLastCloseContext(waId, {
     const shouldReviewActiveOffer = !!(
       activeAssistantOffer
       && (
-        firstAiReview?.follows_active_offer
+        preResolvedActiveOffer?.action === 'CONTINUE_ACTIVE_OFFER'
+        || firstAiReview?.follows_active_offer
         || (!firstAiReview?.topic_changed && (firstAiReview?.type === 'OTHER' || !firstAiReview?.type))
       )
     );
 
-    const activeOfferResolution = shouldReviewActiveOffer
-      ? await resolveReplyToActiveAssistantOfferWithAI(text, {
-          activeOffer: activeAssistantOffer,
-          lastServiceName: getLastKnownService(waId, await getAppointmentDraft(waId))?.nombre || '',
-          lastCourseName: getLastCourseContext(waId)?.selectedName || getLastCourseContext(waId)?.query || '',
-          historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 12, 1400),
-        })
-      : (firstAiReview?.topic_changed ? { action: 'SWITCH_TOPIC' } : null);
+    const activeOfferResolution = preResolvedActiveOffer
+      || (shouldReviewActiveOffer
+        ? await resolveReplyToActiveAssistantOfferWithAI(text, {
+            activeOffer: activeAssistantOffer,
+            lastServiceName: getLastKnownService(waId, pendingDraftForAiReview)?.nombre || '',
+            lastCourseName: getLastCourseContext(waId)?.selectedName || getLastCourseContext(waId)?.query || '',
+            historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 12, 1400),
+            force: true,
+          })
+        : (firstAiReview?.topic_changed ? { action: 'SWITCH_TOPIC' } : null));
 
     if (activeOfferResolution?.action === 'CONTINUE_ACTIVE_OFFER') {
+      if (activeOfferResolution.target_type === 'COURSE') {
+        const courseCatalogForActiveOffer = await getCoursesCatalog();
+        const activeCourseNames = normalizeActiveOfferItems(
+          activeOfferResolution.wants_all_items
+            ? (activeAssistantOffer?.items || [])
+            : [
+                activeOfferResolution.target_name || '',
+                activeAssistantOffer?.selectedName || '',
+                ...(Array.isArray(activeAssistantOffer?.items) ? activeAssistantOffer.items.slice(0, 6) : []),
+              ]
+        );
+        let activeCourses = resolveCoursesByNames(courseCatalogForActiveOffer, activeCourseNames);
+        if (!activeCourses.length && Array.isArray(activeAssistantOffer?.items) && activeAssistantOffer.items.length) {
+          activeCourses = resolveCoursesByNames(courseCatalogForActiveOffer, activeAssistantOffer.items);
+        }
+
+        if (activeCourses.length) {
+          const previousRecentCourses = Array.isArray(getLastCourseContext(waId)?.recentCourses) ? getLastCourseContext(waId).recentCourses : [];
+          const detailGoal = String(activeOfferResolution.goal || 'DETAIL').trim().toUpperCase();
+          const selectedCourse = findCourseByContextName(activeCourses, activeOfferResolution.target_name || activeAssistantOffer?.selectedName || '')
+            || (activeCourses.length === 1 ? activeCourses[0] : null);
+          const shouldListCourses = activeOfferResolution.wants_all_items || (!selectedCourse && activeCourses.length > 1);
+
+          setLastCourseContext(waId, {
+            query: selectedCourse?.nombre || activeAssistantOffer?.selectedName || 'cursos',
+            selectedName: selectedCourse?.nombre || activeAssistantOffer?.selectedName || '',
+            currentCourseName: selectedCourse?.nombre || activeAssistantOffer?.selectedName || '',
+            lastOptions: activeCourses.map((x) => x.nombre).filter(Boolean).slice(0, 10),
+            recentCourses: mergeCourseContextRows(activeCourses, previousRecentCourses),
+          });
+          clearProductMemory(waId);
+
+          if (shouldListCourses) {
+            await sendCourseCatalogResponses(phone, waId, activeCourses, 'LIST');
+            scheduleInactivityFollowUp(waId, phone);
+            return;
+          }
+
+          if (selectedCourse && detailGoal !== 'MATERIAL') {
+            const naturalGoal = detailGoal === 'NONE' ? 'DETAIL' : detailGoal;
+            const naturalCourseReply = formatNaturalCourseFollowupReply(selectedCourse, naturalGoal);
+            if (naturalCourseReply) {
+              rememberAssistantCourseOffer(waId, [selectedCourse], {
+                mode: 'DETAIL',
+                selectedName: selectedCourse?.nombre || '',
+                questionKind: naturalGoal,
+                lastAssistantText: naturalCourseReply,
+              });
+              pushHistory(waId, 'assistant', naturalCourseReply);
+              await sendWhatsAppText(phone, naturalCourseReply);
+              scheduleInactivityFollowUp(waId, phone);
+              return;
+            }
+          }
+        }
+      }
+
       if (activeOfferResolution.target_type === 'PRODUCT') {
         const stockForActiveOffer = filterSellableCatalogRows(await getStockCatalog(), { includeOutOfStock: false });
         const activeProductNames = normalizeActiveOfferItems(
@@ -13042,6 +13788,7 @@ updateLastCloseContext(waId, {
             lastOptions: activeProducts.map((x) => x.nombre).slice(0, 10),
           });
           if (activeProducts.length === 1) lastProductByUser.set(waId, activeProducts[0]);
+          clearLastCourseContext(waId);
 
           if (activeOfferResolution.goal === 'PHOTO') {
             const sent = activeOfferResolution.wants_all_items || activeProducts.length > 1
