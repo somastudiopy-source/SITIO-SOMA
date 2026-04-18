@@ -11547,6 +11547,19 @@ function formatCourseReplyBlock(course = {}) {
   return lines.join("\n");
 }
 
+function buildCourseMediaCaption(course = {}) {
+  const caption = formatCourseReplyBlock(course).trim();
+  if (!caption) return '';
+  if (caption.length <= 900) return caption;
+  return `${caption.slice(0, 897).trimEnd()}...`;
+}
+
+function buildCourseCatalogClosingPrompt(mode = 'LIST') {
+  return mode === 'LIST'
+    ? 'Si quiere, le paso requisitos, horarios o inscripción del curso que le interese 😊'
+    : 'Si quiere, también le paso requisitos, horarios o inscripción 😊';
+}
+
 function formatCoursesReplySequence(matches, mode) {
   if (!matches.length) return [];
 
@@ -11568,21 +11581,63 @@ function formatCoursesReplySequence(matches, mode) {
 }
 
 async function sendCourseCatalogResponses(phone, waId, matches, mode) {
-  const parts = formatCoursesReplySequence(matches, mode);
-  if (!parts.length) return false;
+  const limited = Array.isArray(matches)
+    ? (mode === 'LIST' ? matches.slice(0, 10) : matches.slice(0, 3))
+    : [];
+  if (!limited.length) return false;
 
-  rememberAssistantCourseOffer(waId, matches, {
+  const renderedParts = [];
+
+  rememberAssistantCourseOffer(waId, limited, {
     mode,
-    selectedName: matches.length === 1 ? (matches[0]?.nombre || '') : '',
+    selectedName: limited.length === 1 ? (limited[0]?.nombre || '') : '',
     questionKind: mode === 'LIST' ? 'LIST' : 'DETAIL',
-    lastAssistantText: parts.join('\n\n'),
+    lastAssistantText: '',
   });
 
-  for (const part of parts) {
-    pushHistory(waId, "assistant", part);
-    await sendWhatsAppText(phone, part);
+  for (const course of limited) {
+    const caption = buildCourseMediaCaption(course);
+    const hasLinkedMedia = !!String(course?.link || '').trim();
+
+    if (hasLinkedMedia) {
+      const mediaResult = await sendCourseMediaDirect(phone, course, { caption });
+      if (mediaResult.ok) {
+        renderedParts.push(caption);
+        pushHistory(waId, "assistant", caption);
+      } else {
+        const fallbackText = caption || formatNaturalCourseFollowupReply(course, 'DETAIL');
+        if (fallbackText) {
+          renderedParts.push(fallbackText);
+          pushHistory(waId, "assistant", fallbackText);
+          await sendWhatsAppText(phone, fallbackText);
+        }
+      }
+    } else {
+      const fallbackText = caption || formatNaturalCourseFollowupReply(course, 'DETAIL');
+      if (fallbackText) {
+        renderedParts.push(fallbackText);
+        pushHistory(waId, "assistant", fallbackText);
+        await sendWhatsAppText(phone, fallbackText);
+      }
+    }
+
     await sleep(250);
   }
+
+  const closingPrompt = buildCourseCatalogClosingPrompt(mode);
+  if (closingPrompt) {
+    renderedParts.push(closingPrompt);
+    pushHistory(waId, "assistant", closingPrompt);
+    await sendWhatsAppText(phone, closingPrompt);
+  }
+
+  rememberAssistantCourseOffer(waId, limited, {
+    mode,
+    selectedName: limited.length === 1 ? (limited[0]?.nombre || '') : '',
+    questionKind: mode === 'LIST' ? 'LIST' : 'DETAIL',
+    lastAssistantText: renderedParts.join('\n\n'),
+  });
+
   return true;
 }
 
@@ -13190,7 +13245,7 @@ async function sendWhatsAppVideoById(to, mediaId, caption) {
   });
 }
 
-async function sendCourseMediaDirect(phone, course) {
+async function sendCourseMediaDirect(phone, course, opts = {}) {
   if (!course) return { ok: false, reason: 'no_course' };
 
   const mediaLink = String(course.link || '').trim();
@@ -13210,7 +13265,7 @@ async function sendCourseMediaDirect(phone, course) {
       fs.copyFileSync(tmpPath, path.join(MEDIA_DIR, savedName));
     } catch {}
 
-    const caption = [
+    const caption = String(opts?.caption || '').trim() || [
       course.nombre || 'Curso',
       course.precio ? `Precio: ${moneyOrConsult(course.precio)}` : '',
       course.fechaInicio ? `Inicio: ${course.fechaInicio}` : '',
@@ -15740,26 +15795,42 @@ ${some}
       }
 
       if (isDirectCurrentCourseFollowup || isExplicitReferencedCourseFollowup) {
+        const rememberedCourses = mergeCourseContextRows([activeCourse], previousRecentCourses);
+        const currentInterest = buildHubSpotCourseInterestLabel(activeCourse?.nombre || activeCourse?.categoria || '') || lastCourseContext?.requestedInterest || '';
+
+        setLastCourseContext(waId, {
+          query: lastCourseContext?.query || activeCourse?.nombre || 'cursos',
+          selectedName: activeCourse?.nombre || '',
+          currentCourseName: activeCourse?.nombre || '',
+          lastOptions: rememberedCourses.map((c) => c.nombre).filter(Boolean).slice(0, 10),
+          recentCourses: rememberedCourses,
+          requestedInterest: currentInterest,
+        });
+
+        updateLastCloseContext(waId, {
+          intentType: 'COURSE',
+          interest: currentInterest,
+          lastUserText: text,
+        });
+
+        if (followupGoal === 'MATERIAL') {
+          const caption = buildCourseMediaCaption(activeCourse);
+          const mediaResult = await sendCourseMediaDirect(phone, activeCourse, { caption });
+          if (mediaResult.ok) {
+            rememberAssistantCourseOffer(waId, [activeCourse], { mode: 'DETAIL', selectedName: activeCourse?.nombre || '', questionKind: 'MATERIAL', lastAssistantText: caption });
+            pushHistory(waId, 'assistant', caption);
+          } else {
+            const fallbackMaterialText = caption || formatNaturalCourseFollowupReply(activeCourse, 'DETAIL');
+            rememberAssistantCourseOffer(waId, [activeCourse], { mode: 'DETAIL', selectedName: activeCourse?.nombre || '', questionKind: 'MATERIAL', lastAssistantText: fallbackMaterialText });
+            pushHistory(waId, 'assistant', fallbackMaterialText);
+            await sendWhatsAppText(phone, fallbackMaterialText);
+          }
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
+
         const naturalCourseReply = formatNaturalCourseFollowupReply(activeCourse, followupGoal || 'DETAIL');
         if (naturalCourseReply) {
-          const rememberedCourses = mergeCourseContextRows([activeCourse], previousRecentCourses);
-          const currentInterest = buildHubSpotCourseInterestLabel(activeCourse?.nombre || activeCourse?.categoria || '') || lastCourseContext?.requestedInterest || '';
-
-          setLastCourseContext(waId, {
-            query: lastCourseContext?.query || activeCourse?.nombre || 'cursos',
-            selectedName: activeCourse?.nombre || '',
-            currentCourseName: activeCourse?.nombre || '',
-            lastOptions: rememberedCourses.map((c) => c.nombre).filter(Boolean).slice(0, 10),
-            recentCourses: rememberedCourses,
-            requestedInterest: currentInterest,
-          });
-
-          updateLastCloseContext(waId, {
-            intentType: 'COURSE',
-            interest: currentInterest,
-            lastUserText: text,
-          });
-
           rememberAssistantCourseOffer(waId, [activeCourse], { mode: 'DETAIL', selectedName: activeCourse?.nombre || '', questionKind: followupGoal || 'DETAIL', lastAssistantText: naturalCourseReply });
           pushHistory(waId, 'assistant', naturalCourseReply);
           await sendWhatsAppText(phone, naturalCourseReply);
@@ -15834,7 +15905,6 @@ ${some}
         });
 
         await sendCourseCatalogResponses(phone, waId, matches, replyMode);
-        await maybeSendCoursePhotos(phone, matches);
         scheduleInactivityFollowUp(waId, phone);
         return;
       }
