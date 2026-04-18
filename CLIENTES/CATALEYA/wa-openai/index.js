@@ -973,6 +973,13 @@ function broadcastParseJsonArray(value) {
   }
 }
 
+function broadcastParseMessagesInput(value = '') {
+  return String(value || '')
+    .split(/\r?\n/)
+    .map((x) => broadcastCleanText(x))
+    .filter(Boolean);
+}
+
 function broadcastLocalDateParts(date = new Date(), offsetMinutes = -180) {
   const shifted = new Date(date.getTime() + offsetMinutes * 60000);
   return {
@@ -1072,9 +1079,40 @@ function broadcastBuildCandidateTimesForDay(ymd, minDate = null) {
 
 function broadcastPickRandomTimes(ymd, count, minDate = null) {
   if (count <= 0) return [];
-  const candidates = broadcastBuildCandidateTimesForDay(ymd, minDate);
+  const candidates = broadcastBuildCandidateTimesForDay(ymd, minDate).sort((a, b) => a.getTime() - b.getTime());
   if (!candidates.length) return [];
-  const picks = broadcastShuffle(candidates).slice(0, Math.min(count, candidates.length));
+
+  const target = Math.min(count, candidates.length);
+  const picks = [];
+  const usedIndexes = new Set();
+
+  for (let i = 0; i < target; i += 1) {
+    let startIdx = Math.floor((i * candidates.length) / target);
+    let endIdx = Math.floor(((i + 1) * candidates.length) / target) - 1;
+    if (endIdx < startIdx) endIdx = startIdx;
+
+    const segment = [];
+    for (let idx = startIdx; idx <= endIdx; idx += 1) {
+      if (!usedIndexes.has(idx)) segment.push(idx);
+    }
+
+    let chosenIdx = -1;
+    if (segment.length) {
+      chosenIdx = segment[Math.floor(Math.random() * segment.length)];
+    } else {
+      for (let idx = 0; idx < candidates.length; idx += 1) {
+        if (!usedIndexes.has(idx)) {
+          chosenIdx = idx;
+          break;
+        }
+      }
+    }
+
+    if (chosenIdx === -1) break;
+    usedIndexes.add(chosenIdx);
+    picks.push(candidates[chosenIdx]);
+  }
+
   return picks.sort((a, b) => a.getTime() - b.getTime());
 }
 
@@ -1120,6 +1158,7 @@ async function ensureBroadcastTables() {
       daily_pattern_json JSONB NOT NULL DEFAULT '[30,15,10]'::jsonb,
       timezone TEXT NOT NULL DEFAULT 'America/Argentina/Salta',
       windows_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      messages_json JSONB NOT NULL DEFAULT '[]'::jsonb,
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1156,6 +1195,7 @@ async function ensureBroadcastTables() {
     )
   `);
 
+  await db.query(`ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS messages_json JSONB NOT NULL DEFAULT '[]'::jsonb`);
   await db.query(`CREATE INDEX IF NOT EXISTS idx_broadcast_queue_pending_send_at ON broadcast_queue(status, send_at)`);
   await db.query(`CREATE INDEX IF NOT EXISTS idx_broadcast_queue_campaign_status ON broadcast_queue(campaign_name, status)`);
 }
@@ -1164,18 +1204,21 @@ async function upsertBroadcastCampaign({
   campaignName = BROADCAST_CAMPAIGN_NAME,
   sourceFile = BROADCAST_EXCEL_PATH,
   pattern = BROADCAST_PATTERN_SAFE,
+  messages = null,
   isActive = true,
 } = {}) {
   const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
+  const cleanMessages = Array.isArray(messages) ? messages.map((x) => broadcastCleanText(x)).filter(Boolean) : null;
   await db.query(
-    `INSERT INTO broadcast_campaigns (campaign_name, source_file, daily_pattern_json, timezone, windows_json, is_active, updated_at)
-     VALUES ($1, $2, $3::jsonb, $4, $5::jsonb, $6, NOW())
+    `INSERT INTO broadcast_campaigns (campaign_name, source_file, daily_pattern_json, timezone, windows_json, messages_json, is_active, updated_at)
+     VALUES ($1, $2, $3::jsonb, $4, $5::jsonb, COALESCE($6::jsonb, '[]'::jsonb), $7, NOW())
      ON CONFLICT (campaign_name)
      DO UPDATE SET
        source_file = EXCLUDED.source_file,
        daily_pattern_json = EXCLUDED.daily_pattern_json,
        timezone = EXCLUDED.timezone,
        windows_json = EXCLUDED.windows_json,
+       messages_json = COALESCE(EXCLUDED.messages_json, broadcast_campaigns.messages_json),
        is_active = EXCLUDED.is_active,
        updated_at = NOW()`,
     [
@@ -1184,10 +1227,29 @@ async function upsertBroadcastCampaign({
       broadcastSafeJson(pattern, [30, 15, 10]),
       TIMEZONE,
       broadcastSafeJson(BROADCAST_WINDOWS, []),
+      cleanMessages ? broadcastSafeJson(cleanMessages, []) : null,
       !!isActive,
     ]
   );
   return cleanCampaign;
+}
+
+async function getBroadcastMessagesForCampaign(campaignName = BROADCAST_CAMPAIGN_NAME) {
+  const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
+  try {
+    const result = await db.query(
+      `SELECT messages_json
+         FROM broadcast_campaigns
+        WHERE campaign_name = $1
+        LIMIT 1`,
+      [cleanCampaign]
+    );
+    const rows = Array.isArray(result.rows) ? result.rows : [];
+    const parsed = broadcastParseJsonArray(rows?.[0]?.messages_json || []);
+    return parsed.length ? parsed : BROADCAST_MESSAGES;
+  } catch {
+    return BROADCAST_MESSAGES;
+  }
 }
 
 function broadcastPickColumn(row, alternatives = []) {
@@ -1206,12 +1268,13 @@ async function importBroadcastContactsFromExcel({
   offerType = BROADCAST_OFFER_TYPE,
   offerItems = BROADCAST_OFFER_ITEMS,
   offerSelectedName = BROADCAST_OFFER_SELECTED_NAME,
+  messages = null,
 } = {}) {
   if (!ENABLE_DAILY_BROADCAST) return { inserted: 0, skipped: 0, totalRows: 0, disabled: true, reason: 'feature_disabled' };
   if (!XLSX) return { inserted: 0, skipped: 0, totalRows: 0, disabled: true, reason: 'xlsx_missing' };
   if (!excelPath || !fs.existsSync(excelPath)) return { inserted: 0, skipped: 0, totalRows: 0, disabled: true, reason: 'excel_missing' };
 
-  const cleanCampaign = await upsertBroadcastCampaign({ campaignName, sourceFile });
+  const cleanCampaign = await upsertBroadcastCampaign({ campaignName, sourceFile, messages });
   const wb = XLSX.readFile(excelPath, { cellDates: false });
   const firstSheet = wb.SheetNames[0];
   if (!firstSheet) return { inserted: 0, skipped: 0, totalRows: 0, campaignName: cleanCampaign };
@@ -1327,6 +1390,8 @@ async function planBroadcastQueue({
   const planningState = await getBroadcastPlanningState(cleanCampaign);
   const patternSafe = Array.isArray(pattern) && pattern.length ? pattern.map((n) => Math.max(0, Number(n || 0))).filter((n) => n > 0) : [30, 15, 10];
 
+  const campaignMessages = await getBroadcastMessagesForCampaign(cleanCampaign);
+
   let dayCursor = planningState.maxDay ? broadcastAddDaysYMD(planningState.maxDay, 1) : broadcastChooseStartYMD(startYMD);
   if (startYMD && !planningState.maxDay) dayCursor = startYMD;
 
@@ -1353,8 +1418,9 @@ async function planBroadcastQueue({
     for (let i = 0; i < batch.length; i += 1) {
       const row = batch[i];
       const slot = slots[i];
-      const messageIndex = row.message_index != null ? Number(row.message_index) : ((queueIndex + i) % BROADCAST_MESSAGES.length);
-      const baseMessage = broadcastCleanText(row.custom_message) || BROADCAST_MESSAGES[messageIndex % BROADCAST_MESSAGES.length] || '';
+      const messagePool = Array.isArray(campaignMessages) && campaignMessages.length ? campaignMessages : BROADCAST_MESSAGES;
+      const messageIndex = row.message_index != null ? Number(row.message_index) : ((queueIndex + i) % messagePool.length);
+      const baseMessage = broadcastCleanText(row.custom_message) || messagePool[messageIndex % messagePool.length] || '';
       const finalMessage = broadcastRenderMessage(baseMessage, row);
 
       await db.query(
@@ -1385,6 +1451,7 @@ async function ensureBroadcastCampaignLoaded({
   offerType = BROADCAST_OFFER_TYPE,
   offerItems = BROADCAST_OFFER_ITEMS,
   offerSelectedName = BROADCAST_OFFER_SELECTED_NAME,
+  messages = null,
   startYMD = '',
 } = {}) {
   if (!broadcastCanOperate()) {
@@ -1398,6 +1465,7 @@ async function ensureBroadcastCampaignLoaded({
     offerType,
     offerItems,
     offerSelectedName,
+    messages,
   });
 
   const planned = await planBroadcastQueue({ campaignName: imported.campaignName || campaignName, startYMD, pattern: BROADCAST_PATTERN_SAFE });
@@ -1578,6 +1646,7 @@ app.get("/broadcast/panel", (_req, res) => {
     <h1>Subir Excel de difusión</h1>
     <p class="muted">URL del bot: <span class="code">https://bot-cataleya.onrender.com</span></p>
     <p class="muted">Columnas mínimas del Excel: <span class="code">Nombre</span> y <span class="code">Número</span>.</p>
+    <p class="muted">Horario de envío: <span class="code">09:00 a 22:00</span>. Los mensajes se reparten aislados dentro de esa franja.</p>
     <form action="${actionUrl}" method="post" enctype="multipart/form-data">
       <label>Archivo Excel</label>
       <input type="file" name="file" accept=".xlsx,.xls" required />
@@ -1591,6 +1660,10 @@ app.get("/broadcast/panel", (_req, res) => {
 
       <label>Nombre de campaña</label>
       <input type="text" name="campaign_name" value="${BROADCAST_CAMPAIGN_NAME}" />
+
+      <label>Mensajes de difusión (opcional, uno por línea)</label>
+      <textarea name="broadcast_messages" rows="12" style="width:100%; padding:12px; border-radius:10px; border:1px solid #d0d7de; box-sizing:border-box;">${BROADCAST_MESSAGES.join('\n')}</textarea>
+      <p class="muted">Si dejás estos mensajes, el bot usará esta lista para la campaña. Si en el Excel ponés una columna <span class="code">Mensaje</span>, esa fila usa su mensaje propio.</p>
 
       <button type="submit">Subir Excel</button>
     </form>
@@ -1617,6 +1690,7 @@ app.post("/broadcast/upload", (req, res, next) => {
 
     const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
     const replaceMode = String(req.body?.replace_mode || 'append').trim().toLowerCase();
+    const broadcastMessages = broadcastParseMessagesInput(req.body?.broadcast_messages || '');
     const tempPath = path.join(getTmpDir(), `broadcast-${Date.now()}-${req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`);
 
     fs.writeFileSync(tempPath, req.file.buffer);
@@ -1629,6 +1703,7 @@ app.post("/broadcast/upload", (req, res, next) => {
       offerType: BROADCAST_OFFER_TYPE,
       offerItems: BROADCAST_OFFER_ITEMS,
       offerSelectedName: BROADCAST_OFFER_SELECTED_NAME,
+      messages: broadcastMessages.length ? broadcastMessages : null,
     });
 
     return res.json({
@@ -1638,6 +1713,7 @@ app.post("/broadcast/upload", (req, res, next) => {
       replace_mode: replaceMode,
       cleared,
       excel_path: tempPath,
+      messages_count: broadcastMessages.length || BROADCAST_MESSAGES.length,
       ...data,
     });
   } catch (e) {
@@ -1658,6 +1734,7 @@ app.get("/broadcast/status", async (_req, res) => {
       upload_url: 'https://bot-cataleya.onrender.com/broadcast/upload',
       campaign_name: BROADCAST_CAMPAIGN_NAME,
       daily_pattern: BROADCAST_PATTERN_SAFE,
+      default_messages_count: BROADCAST_MESSAGES.length,
       summary,
     });
   } catch (e) {
@@ -1736,8 +1813,7 @@ const BROADCAST_OFFER_ITEMS = String(process.env.BROADCAST_OFFER_ITEMS || "Talle
   .filter(Boolean);
 const BROADCAST_OFFER_SELECTED_NAME = String(process.env.BROADCAST_OFFER_SELECTED_NAME || "Talleres Cataleya").trim();
 const BROADCAST_WINDOWS = [
-  { start: '10:15', end: '12:45' },
-  { start: '17:10', end: '21:10' },
+  { start: '09:00', end: '22:00' },
 ];
 const BROADCAST_DAILY_PATTERN = String(process.env.BROADCAST_DAILY_PATTERN || '30,15,10')
   .split(',')
@@ -14528,7 +14604,7 @@ const PORT = process.env.PORT || 3000;
     : "ℹ️ Mensajes de cumpleaños desactivados");
   console.log(ENABLE_DAILY_BROADCAST
     ? (broadcastExcelExists()
-        ? `ℹ️ Difusión diaria activada con Excel cargado en: ${BROADCAST_EXCEL_PATH}`
+        ? `ℹ️ Difusión diaria activada con Excel cargado en: ${BROADCAST_EXCEL_PATH} | horario 09:00 a 22:00`
         : 'ℹ️ Difusión diaria lista pero sin Excel cargado todavía. Subilo en https://bot-cataleya.onrender.com/broadcast/panel')
     : "ℹ️ Difusión diaria desactivada");
   console.log(hasGoogleContactsSyncEnabled()
