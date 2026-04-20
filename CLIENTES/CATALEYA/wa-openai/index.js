@@ -1728,7 +1728,14 @@ async function importBroadcastContactsFromExcel({
   if (!excelPath || !fs.existsSync(excelPath)) return { inserted: 0, skipped: 0, totalRows: 0, disabled: true, reason: 'excel_missing' };
 
   const cleanCampaign = await upsertBroadcastCampaign({ campaignName, sourceFile, messages });
-  const wb = XLSX.readFile(excelPath, { cellDates: false });
+
+  let wb = null;
+  try {
+    wb = XLSX.readFile(excelPath, { cellDates: false });
+  } catch (e) {
+    throw new Error('No pude leer el Excel. Revisá el archivo y volvé a subirlo.');
+  }
+
   const firstSheet = wb.SheetNames[0];
   if (!firstSheet) return { inserted: 0, skipped: 0, totalRows: 0, campaignName: cleanCampaign };
 
@@ -2000,6 +2007,120 @@ async function listBroadcastCampaignHistory(limit = 30) {
     }));
   } catch {
     return [];
+  }
+}
+
+
+
+function broadcastEscapeHtml(value = '') {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function broadcastHumanizeErrorText(raw = '', status = '') {
+  const txt = String(raw || '').replace(/\s+/g, ' ').trim();
+  const norm = normalize(txt);
+
+  if (!txt && String(status || '').trim().toLowerCase() === 'skipped') return 'Contacto omitido';
+  if (!txt) return 'Error sin detalle';
+
+  if (norm.includes('numero invalido') || norm.includes('número inválido') || norm.includes('destinatario invalido')) {
+    return 'Número inválido';
+  }
+  if (norm.includes('mensaje vacio') || norm.includes('mensaje vacío') || norm.includes('empty message')) {
+    return 'Mensaje vacío';
+  }
+  if (norm.includes('sin confirmacion de entrega') || norm.includes('sin confirmación de entrega')) {
+    return 'Faltó confirmación de entrega';
+  }
+  if (norm.includes('whatsapp no devolvio id de mensaje') || norm.includes('whatsapp no devolvió id de mensaje')) {
+    return 'WhatsApp no confirmó el envío';
+  }
+  if (norm.includes('delivery_failed') || norm.includes('delivery failed') || norm.includes('whatsapp rechaz') || norm.includes('invalid parameter') || norm.includes('not a valid whatsapp') || norm.includes('unsupported')) {
+    return 'WhatsApp rechazó el envío';
+  }
+  if (norm.includes('draft_abierto')) {
+    return 'Hay un flujo abierto con ese contacto';
+  }
+  if (norm.includes('sin_mensaje')) {
+    return 'No se pudo generar mensaje para ese contacto';
+  }
+  if (norm.includes('duplicate') || norm.includes('duplicado') || norm.includes('unique constraint')) {
+    return 'Contacto duplicado';
+  }
+  if (norm.includes('xlsx_missing') || norm.includes('excel_missing') || norm.includes('leer el excel') || norm.includes('readfile')) {
+    return 'Error al leer Excel';
+  }
+  if (norm.includes('multer') || norm.includes('archivo') || norm.includes('media') || norm.includes('upload')) {
+    return 'Error al subir archivo';
+  }
+
+  return txt.length > 140 ? `${txt.slice(0, 137).trim()}...` : txt;
+}
+
+async function getBroadcastErrorReport(campaignName = BROADCAST_CAMPAIGN_NAME, limit = 20) {
+  const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
+  const result = await db.query(
+    `SELECT wa_phone, status, last_error, updated_at
+       FROM broadcast_queue
+      WHERE campaign_name = $1
+        AND status IN ('error','skipped')
+      ORDER BY updated_at DESC NULLS LAST, id DESC
+      LIMIT $2`,
+    [cleanCampaign, Math.max(1, Number(limit || 20))]
+  );
+
+  const rows = (result.rows || []).map((row) => {
+    const reason = broadcastHumanizeErrorText(row?.last_error || '', row?.status || '');
+    return {
+      waPhone: String(row?.wa_phone || '').trim(),
+      status: String(row?.status || '').trim().toLowerCase(),
+      rawError: String(row?.last_error || '').trim(),
+      reason,
+      updatedAt: row?.updated_at || null,
+      updatedAtText: row?.updated_at ? broadcastFormatValidUntilDisplay(row.updated_at) : '',
+    };
+  });
+
+  const groupedMap = new Map();
+  for (const row of rows) {
+    const key = row.reason || 'Error sin detalle';
+    groupedMap.set(key, Number(groupedMap.get(key) || 0) + 1);
+  }
+
+  const grouped = Array.from(groupedMap.entries())
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((a, b) => Number(b.count || 0) - Number(a.count || 0) || String(a.reason).localeCompare(String(b.reason), 'es'));
+
+  return {
+    total: rows.length,
+    grouped,
+    recent: rows,
+  };
+}
+
+async function activateBroadcastCampaignExclusive(campaignName = BROADCAST_CAMPAIGN_NAME) {
+  const cleanCampaign = broadcastCleanText(campaignName) || BROADCAST_CAMPAIGN_NAME;
+  await db.query(`UPDATE broadcast_campaigns SET is_active = FALSE, updated_at = NOW() WHERE campaign_name <> $1`, [cleanCampaign]);
+  await db.query(`UPDATE broadcast_campaigns SET is_active = TRUE, updated_at = NOW() WHERE campaign_name = $1`, [cleanCampaign]);
+  return { campaignName: cleanCampaign, action: 'activated_exclusive' };
+}
+
+async function clearAllBroadcastCampaignData() {
+  await db.query('BEGIN');
+  try {
+    await db.query(`DELETE FROM broadcast_queue`);
+    await db.query(`DELETE FROM broadcast_campaigns`);
+    await db.query('COMMIT');
+    broadcastAiNameCache.clear();
+    return { ok: true };
+  } catch (e) {
+    try { await db.query('ROLLBACK'); } catch {}
+    throw e;
   }
 }
 
@@ -2360,6 +2481,7 @@ app.get("/broadcast/panel", async (req, res) => {
     assets: [],
   }));
   const history = await listBroadcastCampaignHistory(40).catch(() => []);
+  const errorReport = await getBroadcastErrorReport(campaignName, 18).catch(() => ({ total: 0, grouped: [], recent: [] }));
 
   const okMsg = broadcastCleanText(req.query?.ok || '');
   const errMsg = broadcastCleanText(req.query?.error || '');
@@ -2369,15 +2491,30 @@ app.get("/broadcast/panel", async (req, res) => {
   const replaceDefault = String(req.query?.replace_mode || 'replace_pending').trim().toLowerCase();
   const pending = Number(summary?.pending || 0);
   const processing = Number(summary?.processing || 0);
-  const sentApi = Number(summary?.sent_api || 0);
   const delivered = Number(summary?.delivered || 0);
-  const readCount = Number(summary?.read || 0);
   const error = Number(summary?.error || 0);
   const skipped = Number(summary?.skipped || 0);
   const total = Number(summary?.total || 0);
   const remaining = pending + processing + error + skipped;
   const daysLeft = Number(summary?.remaining_days || 0);
   const currentFileLabel = campaign.sourceFile || BROADCAST_EXCEL_PATH || 'Sin archivo cargado todavía';
+  const activeCampaignCount = history.filter((item) => item.isActive).length;
+
+  const esc = broadcastEscapeHtml;
+  const safeCampaignName = esc(campaignName);
+  const safeMessagesText = esc(messagesText);
+  const safeAiContext = esc(campaign.aiContext || '');
+  const safeAiResponseStyle = esc(campaign.aiResponseStyle || '');
+  const safeAiGuardrails = esc(campaign.aiGuardrails || '');
+  const safeAiCta = esc(campaign.aiCta || '');
+  const safeCurrentFileLabel = esc(currentFileLabel);
+  const safeValidUntilInput = esc(broadcastFormatValidUntilInput(campaign.validUntilRaw || ''));
+  const topReasonsHtml = errorReport.grouped.length
+    ? `<div class="reason-grid">${errorReport.grouped.map((item) => `<div class="reason-card"><strong>${Number(item.count || 0)}</strong><span>${esc(item.reason || '')}</span></div>`).join('')}</div>`
+    : '<p class="muted">No hay errores recientes en esta campaña.</p>';
+  const recentErrorsHtml = errorReport.recent.length
+    ? `<div class="error-list">${errorReport.recent.map((row) => `<div class="error-item"><div><strong>${esc(row.reason || '')}</strong><small>${esc(row.updatedAtText || '')}</small></div><div class="error-meta"><span class="code">${esc(row.waPhone || 'sin número')}</span><small>${row.status === 'skipped' ? 'omitido' : 'error'}</small></div></div>`).join('')}</div>`
+    : '<p class="muted">Todavía no hay detalle de errores para mostrar.</p>';
 
   const html = `<!doctype html>
 <html lang="es">
@@ -2387,7 +2524,7 @@ app.get("/broadcast/panel", async (req, res) => {
   <title>Difusión Cataleya</title>
   <style>
     body { font-family: Arial, sans-serif; background:#f7f7f8; padding:24px; color:#111; }
-    .wrap { max-width: 1280px; margin: 0 auto; display:grid; gap:18px; }
+    .wrap { max-width: 1320px; margin: 0 auto; display:grid; gap:18px; }
     .box { background:#fff; border-radius:16px; padding:24px; box-shadow:0 10px 30px rgba(0,0,0,.08); }
     h1, h2, h3 { margin-top:0; }
     label { display:block; margin:14px 0 6px; font-weight:600; }
@@ -2398,11 +2535,13 @@ app.get("/broadcast/panel", async (req, res) => {
     .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap:12px; }
     .stat { background:#f9fafb; border:1px solid #e5e7eb; border-radius:14px; padding:14px; }
     .stat strong { display:block; font-size:26px; margin-top:6px; }
-    .main-layout { display:grid; grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr); gap:18px; align-items:start; }
+    .main-layout { display:grid; grid-template-columns: minmax(0, 2fr) minmax(340px, 1fr); gap:18px; align-items:start; }
     .pill { display:inline-block; padding:6px 10px; border-radius:999px; background:#eef2ff; font-size:13px; }
     .ok { background:#ecfdf5; color:#065f46; padding:12px 14px; border-radius:12px; margin-bottom:12px; }
     .error { background:#fef2f2; color:#991b1b; padding:12px 14px; border-radius:12px; margin-bottom:12px; }
+    .warning { background:#fff7ed; color:#9a3412; padding:12px 14px; border-radius:12px; margin-bottom:12px; }
     .actions { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+    .actions.single { grid-template-columns: 1fr; }
     .section { border:1px solid #e5e7eb; border-radius:14px; padding:16px; margin-top:14px; background:#fafafa; }
     .row-2 { display:grid; grid-template-columns: 1fr 1fr; gap:14px; }
     .campaign-list { display:grid; gap:10px; }
@@ -2411,7 +2550,17 @@ app.get("/broadcast/panel", async (req, res) => {
     .campaign-item small { color:#666; display:block; margin-top:4px; }
     ul.assets { margin:8px 0 0; padding-left:18px; }
     .footer-save { position:sticky; bottom:0; background:#fff; padding-top:12px; }
-    @media (max-width: 980px) { .main-layout, .row-2, .actions { grid-template-columns: 1fr; } }
+    .secondary { background:#374151; }
+    .danger { background:#991b1b; }
+    .reason-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap:10px; margin-top:12px; }
+    .reason-card { border:1px solid #e5e7eb; border-radius:12px; padding:12px; background:#fff; }
+    .reason-card strong { display:block; font-size:22px; margin-bottom:6px; }
+    .error-list { display:grid; gap:10px; margin-top:12px; }
+    .error-item { border:1px solid #e5e7eb; border-radius:12px; padding:12px; background:#fff; display:flex; justify-content:space-between; gap:12px; }
+    .error-item small { display:block; color:#666; margin-top:4px; }
+    .error-meta { text-align:right; min-width:120px; }
+    .mini-note { font-size:13px; color:#6b7280; margin-top:6px; }
+    @media (max-width: 980px) { .main-layout, .row-2, .actions, .actions.single, .error-item { grid-template-columns: 1fr; display:grid; } .error-meta { text-align:left; } }
   </style>
 </head>
 <body>
@@ -2421,20 +2570,19 @@ app.get("/broadcast/panel", async (req, res) => {
       <p class="muted">Bot: <span class="code">https://bot-cataleya.onrender.com</span></p>
       <p class="muted">Horarios de envío: <span class="code">09:00 a 22:00</span>. Los mensajes se distribuyen aislados dentro de esa franja.</p>
       <p class="muted">Patrón diario actual: <span class="code">${(campaign.pattern || BROADCAST_PATTERN_SAFE).join(' / ')}</span></p>
-      <p class="muted">Estado: <span class="pill">${summary?.is_active === false ? 'Pausada' : 'Activa'}</span></p>
-      ${okMsg ? `<div class="ok">${okMsg}</div>` : ''}
-      ${errMsg ? `<div class="error">${errMsg}</div>` : ''}
+      <p class="muted">Estado de esta campaña: <span class="pill">${summary?.is_active === false ? 'Pausada' : 'Activa'}</span></p>
+      ${activeCampaignCount > 1 ? `<div class="warning">Hay <strong>${activeCampaignCount}</strong> campañas activas al mismo tiempo. Si no querés que se mezclen, usá <span class="code">Activar esta y pausar las demás</span>.</div>` : ''}
+      ${okMsg ? `<div class="ok">${esc(okMsg)}</div>` : ''}
+      ${errMsg ? `<div class="error">${esc(errMsg)}</div>` : ''}
       <div class="grid">
         <div class="stat"><span>Total cargados</span><strong>${total}</strong></div>
-        <div class="stat"><span>Enviados a Meta</span><strong>${sentApi}</strong></div>
+        <div class="stat"><span>Faltan por trabajar</span><strong>${remaining}</strong></div>
         <div class="stat"><span>Entregados</span><strong>${delivered}</strong></div>
-        <div class="stat"><span>Leídos</span><strong>${readCount}</strong></div>
-        <div class="stat"><span>Pendientes</span><strong>${pending}</strong></div>
-        <div class="stat"><span>Errores</span><strong>${error}</strong></div>
-        <div class="stat"><span>Faltan</span><strong>${remaining}</strong></div>
+        <div class="stat"><span>Errores / omitidos</span><strong>${error + skipped}</strong></div>
         <div class="stat"><span>Días restantes</span><strong>${daysLeft}</strong></div>
+        <div class="stat"><span>Programados hoy</span><strong>${Number(summary?.scheduled_today || 0)}</strong></div>
       </div>
-      <p class="muted" style="margin-top:14px;">Programados para hoy: <span class="code">${Number(summary?.scheduled_today || 0)}</span> | Próximo envío: <span id="next-send-human" class="code">${summary?.next_send_at || '—'}</span></p>
+      <p class="muted" style="margin-top:14px;">Próximo envío: <span id="next-send-human" class="code">${summary?.next_send_at || '—'}</span></p>
       <p class="muted" style="margin-top:8px;">Faltan para el próximo envío: <span id="next-send-countdown" class="code">${summary?.next_send_at ? 'calculando...' : '—'}</span></p>
     </div>
 
@@ -2447,7 +2595,7 @@ app.get("/broadcast/panel", async (req, res) => {
           <div class="row-2">
             <div>
               <label>Nombre de campaña</label>
-              <input type="text" name="campaign_name" value="${campaignName}" />
+              <input type="text" name="campaign_name" value="${safeCampaignName}" />
             </div>
             <div>
               <label>Tipo de campaña</label>
@@ -2460,10 +2608,26 @@ app.get("/broadcast/panel", async (req, res) => {
             </div>
           </div>
 
+          <div class="row-2">
+            <div>
+              <label>Estado al guardar</label>
+              <select name="campaign_state_action">
+                <option value="keep" selected>Conservar como está</option>
+                <option value="resume">Dejar esta campaña activa</option>
+                <option value="pause">Dejar esta campaña pausada</option>
+                <option value="activate_only">Activar esta y pausar las demás</option>
+              </select>
+            </div>
+            <div>
+              <label>Estado actual</label>
+              <input type="text" value="${summary?.is_active === false ? 'Pausada' : 'Activa'}" disabled />
+            </div>
+          </div>
+
           <div class="section">
             <h3 style="margin-bottom:6px;">Excel de contactos</h3>
             <p class="muted">Columnas mínimas: <span class="code">Nombre</span> y <span class="code">Número</span>. Si querés, podés agregar <span class="code">Mensaje</span> para un texto individual por fila.</p>
-            <p class="muted">Archivo actual: <span class="code">${currentFileLabel}</span></p>
+            <p class="muted">Archivo actual: <span class="code">${safeCurrentFileLabel}</span></p>
             <label>Nuevo Excel (opcional)</label>
             <input type="file" name="excel_file" accept=".xlsx,.xls" />
             <label>Modo de importación</label>
@@ -2477,25 +2641,26 @@ app.get("/broadcast/panel", async (req, res) => {
           <div class="section">
             <h3 style="margin-bottom:6px;">Mensajes de difusión</h3>
             <p class="muted">Uno por línea. Podés usar <span class="code">{saludo}</span> y <span class="code">{nombre}</span>.</p>
-            <textarea name="broadcast_messages" rows="12">${messagesText}</textarea>
+            <textarea name="broadcast_messages" rows="12">${safeMessagesText}</textarea>
+            <p class="mini-note">Si cambiás estos mensajes, solo se actualizan los contactos que todavía faltan. Lo ya enviado no se toca.</p>
           </div>
 
           <div class="section">
             <h3 style="margin-bottom:6px;">Contexto IA de la difusión</h3>
             <label>De qué trata la difusión</label>
-            <textarea name="ai_context" rows="4">${campaign.aiContext || ''}</textarea>
+            <textarea name="ai_context" rows="4">${safeAiContext}</textarea>
 
             <label>Cómo debe responder la IA</label>
-            <textarea name="ai_response_style" rows="4">${campaign.aiResponseStyle || ''}</textarea>
+            <textarea name="ai_response_style" rows="4">${safeAiResponseStyle}</textarea>
 
             <label>Qué no debe inventar</label>
-            <textarea name="ai_guardrails" rows="4">${campaign.aiGuardrails || ''}</textarea>
+            <textarea name="ai_guardrails" rows="4">${safeAiGuardrails}</textarea>
 
             <label>Objetivo / CTA</label>
-            <textarea name="ai_cta" rows="3">${campaign.aiCta || ''}</textarea>
+            <textarea name="ai_cta" rows="3">${safeAiCta}</textarea>
 
             <label>Vigente hasta</label>
-            <input type="datetime-local" name="valid_until" value="${broadcastFormatValidUntilInput(campaign.validUntilRaw || '')}" />
+            <input type="datetime-local" name="valid_until" value="${safeValidUntilInput}" />
             <p class="muted">Si querés que la IA entienda “solo por hoy”, poné acá la fecha y hora de cierre de esa campaña.</p>
           </div>
 
@@ -2505,7 +2670,7 @@ app.get("/broadcast/panel", async (req, res) => {
             <label>Adjuntar nuevos archivos (opcional)</label>
             <input type="file" name="asset_files" accept=".png,.jpg,.jpeg,.webp,.pdf" multiple />
             <p class="muted">Adjuntos actuales: <span class="code">${campaignAssets.length}</span></p>
-            ${campaignAssets.length ? `<ul class="assets">${campaignAssets.map((a) => `<li>${a.filename || a.mediaId || 'archivo'}</li>`).join('')}</ul>` : '<p class="muted">No hay adjuntos cargados.</p>'}
+            ${campaignAssets.length ? `<ul class="assets">${campaignAssets.map((a) => `<li>${esc(a.filename || a.mediaId || 'archivo')}</li>`).join('')}</ul>` : '<p class="muted">No hay adjuntos cargados.</p>'}
           </div>
 
           <div class="footer-save">
@@ -2519,29 +2684,46 @@ app.get("/broadcast/panel", async (req, res) => {
           <h2>Control rápido</h2>
           <div class="actions">
             <form action="/broadcast/toggle" method="post">
-              <input type="hidden" name="campaign_name" value="${campaignName}" />
+              <input type="hidden" name="campaign_name" value="${safeCampaignName}" />
               <input type="hidden" name="action" value="${summary?.is_active === false ? 'resume' : 'pause'}" />
-              <button type="submit">${summary?.is_active === false ? 'Prender difusión' : 'Pausar difusión'}</button>
+              <button type="submit">${summary?.is_active === false ? 'Reanudar campaña' : 'Pausar campaña'}</button>
             </form>
-            <form action="/broadcast/retry-errors" method="post">
-              <input type="hidden" name="campaign_name" value="${campaignName}" />
-              <button type="submit">Reintentar errores</button>
+            <form action="/broadcast/toggle" method="post">
+              <input type="hidden" name="campaign_name" value="${safeCampaignName}" />
+              <input type="hidden" name="action" value="activate_only" />
+              <button type="submit" class="secondary">Activar esta y pausar las demás</button>
             </form>
           </div>
-          <p class="muted" style="margin-top:12px;">Si pausás la difusión, el bot no envía nada aunque haya pendientes. Al prenderla otra vez, sigue donde estaba.</p>
-          <p class="muted">Importante: <span class="code">Enviados a Meta</span> significa que WhatsApp aceptó el mensaje. <span class="code">Entregados</span> y <span class="code">Leídos</span> se actualizan cuando llega el estado real por webhook.</p>
+          <div class="actions" style="margin-top:12px;">
+            <form action="/broadcast/retry-errors" method="post">
+              <input type="hidden" name="campaign_name" value="${safeCampaignName}" />
+              <button type="submit" class="secondary">Reintentar errores</button>
+            </form>
+            <form action="/broadcast/clear-all" method="post" onsubmit="return confirm('Esto va a borrar todas las campañas, colas e historial de difusión. ¿Seguimos?');">
+              <button type="submit" class="danger">Borrar todo</button>
+            </form>
+          </div>
+          <p class="muted" style="margin-top:12px;">Si pausás la difusión, la cola queda intacta. Cuando la reanudás, sigue exactamente desde donde quedó.</p>
+        </div>
+
+        <div class="box">
+          <h2>Errores y motivos</h2>
+          <p class="muted">Acá podés entender qué está frenando la difusión, con un resumen más claro.</p>
+          ${topReasonsHtml}
+          <h3 style="margin-top:18px;">Últimos casos</h3>
+          ${recentErrorsHtml}
         </div>
 
         <div class="box">
           <h2>Registro de campañas</h2>
-          <p class="muted">Acá ves las difusiones que fuiste creando.</p>
+          <p class="muted">Acá ves las difusiones que fuiste creando y podés abrir una anterior para seguir trabajándola.</p>
           <div class="campaign-list">
             ${history.length ? history.map((item) => `
               <a class="campaign-item ${item.campaignName === campaignName ? 'active' : ''}" href="/broadcast/panel?campaign_name=${encodeURIComponent(item.campaignName)}">
-                <strong>${item.campaignName}</strong>
-                <small>Tipo: ${item.campaignType} · ${item.isActive ? 'Activa' : 'Pausada'}</small>
-                <small>Total: ${item.total} · Pendientes: ${item.pending} · Errores: ${item.error}</small>
-                <small>Actualizada: ${item.updatedAtText || '—'}</small>
+                <strong>${esc(item.campaignName)}</strong>
+                <small>Tipo: ${esc(item.campaignType)} · ${item.isActive ? 'Activa' : 'Pausada'}</small>
+                <small>Total: ${Number(item.total || 0)} · Faltan: ${Math.max(0, Number(item.pending || 0) + Number(item.error || 0))} · Errores: ${Number(item.error || 0)}</small>
+                <small>Actualizada: ${esc(item.updatedAtText || '—')}</small>
               </a>
             `).join('') : '<p class="muted">Todavía no hay campañas registradas.</p>'}
           </div>
@@ -2626,6 +2808,7 @@ app.post("/broadcast/save", (req, res, next) => {
   try {
     const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
     const replaceMode = String(req.body?.replace_mode || 'replace_pending').trim().toLowerCase();
+    const stateAction = String(req.body?.campaign_state_action || 'keep').trim().toLowerCase();
     const campaignType = String(req.body?.campaign_type || 'OTHER').trim().toUpperCase() || 'OTHER';
     const aiContext = req.body?.ai_context || '';
     const aiResponseStyle = req.body?.ai_response_style || '';
@@ -2696,6 +2879,18 @@ app.post("/broadcast/save", (req, res, next) => {
       [campaignName, campaignType]
     );
 
+    let stateMsg = '';
+    if (stateAction === 'activate_only') {
+      await activateBroadcastCampaignExclusive(campaignName);
+      stateMsg = ' Esta campaña quedó activa y las demás quedaron pausadas.';
+    } else if (stateAction === 'resume' || stateAction === 'activate' || stateAction === 'enable' || stateAction === 'start') {
+      await db.query(`UPDATE broadcast_campaigns SET is_active = TRUE, updated_at = NOW() WHERE campaign_name = $1`, [campaignName]);
+      stateMsg = ' Esta campaña quedó activa.';
+    } else if (stateAction === 'pause') {
+      await db.query(`UPDATE broadcast_campaigns SET is_active = FALSE, updated_at = NOW() WHERE campaign_name = $1`, [campaignName]);
+      stateMsg = ' Esta campaña quedó pausada.';
+    }
+
     let summaryMsg = 'Difusión guardada correctamente.';
     if (excelFile?.buffer && excelFile?.originalname) {
       const cleared = await clearBroadcastQueueForUpload(campaignName, replaceMode);
@@ -2707,7 +2902,11 @@ app.post("/broadcast/save", (req, res, next) => {
         offerSelectedName: BROADCAST_OFFER_SELECTED_NAME,
         messages: finalMessages,
       });
-      summaryMsg = `Difusión actualizada. Nuevos: ${Number(data.inserted || 0)} | Omitidos: ${Number(data.skipped || 0)} | Cola limpiada: ${Number(cleared.deleted || 0)}.`;
+      if (Number(data.inserted || 0) === 0 && Number(data.totalRows || 0) > 0) {
+        summaryMsg = `No se agregaron contactos nuevos. Revisá si el Excel tiene números válidos o si los contactos ya estaban cargados. Omitidos: ${Number(data.skipped || 0)} | Cola limpiada: ${Number(cleared.deleted || 0)}.`;
+      } else {
+        summaryMsg = `Difusión actualizada. Nuevos: ${Number(data.inserted || 0)} | Omitidos: ${Number(data.skipped || 0)} | Cola limpiada: ${Number(cleared.deleted || 0)}.`;
+      }
     } else if (sourceFile && fs.existsSync(sourceFile)) {
       await planBroadcastQueue({
         campaignName,
@@ -2715,7 +2914,7 @@ app.post("/broadcast/save", (req, res, next) => {
       }).catch(() => null);
     }
 
-    return broadcastPanelRedirect(res, summaryMsg, false, campaignName);
+    return broadcastPanelRedirect(res, `${summaryMsg}${stateMsg}`, false, campaignName);
   } catch (e) {
     return broadcastPanelRedirect(res, e?.message || 'No pude guardar la difusión.', true, String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME);
   }
@@ -2817,6 +3016,12 @@ app.post("/broadcast/toggle", async (req, res) => {
   try {
     const campaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
     const action = String(req.body?.action || '').trim().toLowerCase();
+
+    if (action === 'activate_only' || action === 'activate_this' || action === 'activate_exclusive') {
+      await activateBroadcastCampaignExclusive(campaignName);
+      return broadcastPanelRedirect(res, 'Esta campaña quedó activa y las demás quedaron pausadas.', false, campaignName);
+    }
+
     const enable = action === 'resume' || action === 'start' || action === 'on' || action === 'enable';
     await db.query(
       `UPDATE broadcast_campaigns
@@ -2828,6 +3033,15 @@ app.post("/broadcast/toggle", async (req, res) => {
   } catch (e) {
     const safeCampaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
     return broadcastPanelRedirect(res, e?.message || 'No pude cambiar el estado de la difusión.', true, safeCampaignName);
+  }
+});
+
+app.post("/broadcast/clear-all", async (req, res) => {
+  try {
+    await clearAllBroadcastCampaignData();
+    return broadcastPanelRedirect(res, 'Se borraron todas las campañas, colas e historial de difusión.', false, '');
+  } catch (e) {
+    return broadcastPanelRedirect(res, e?.message || 'No pude borrar toda la difusión.', true, '');
   }
 });
 
