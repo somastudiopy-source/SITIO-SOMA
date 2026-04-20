@@ -2106,54 +2106,55 @@ async function updateBroadcastDeliveryFromWebhook(statusObj = {}) {
 async function processBroadcastQueue() {
   if (!broadcastCanOperate()) return { sent_api: 0, failed: 0, attempted: 0, ready: false };
 
-  const campaignConfig = await getBroadcastCampaignConfig(BROADCAST_CAMPAIGN_NAME);
-  if (campaignConfig.exists && !campaignConfig.isActive) {
-    return { sent_api: 0, failed: 0, attempted: 0, ready: true, paused: true };
-  }
-
   await ensureBroadcastCampaignLoaded({
     campaignName: BROADCAST_CAMPAIGN_NAME,
     excelPath: BROADCAST_EXCEL_PATH,
     offerType: BROADCAST_OFFER_TYPE,
     offerItems: BROADCAST_OFFER_ITEMS,
     offerSelectedName: BROADCAST_OFFER_SELECTED_NAME,
-  });
+  }).catch(() => null);
 
   await db.query(
-    `UPDATE broadcast_queue
+    `UPDATE broadcast_queue q
         SET status = 'pending',
-            send_at = NOW() + ($2 || ' minutes')::interval,
+            send_at = NOW() + ($1 || ' minutes')::interval,
             updated_at = NOW(),
             last_error = COALESCE(last_error, 'Sin confirmación de entrega. Reprogramado automáticamente.')
-      WHERE campaign_name = $1
-        AND status = 'sent_api'
-        AND api_accepted_at IS NOT NULL
-        AND api_accepted_at < NOW() - ($3 || ' minutes')::interval
-        AND attempts < $4`,
-    [BROADCAST_CAMPAIGN_NAME, Math.max(2, Math.floor(BROADCAST_SAME_RECIPIENT_GAP_MS / 60000)), Math.max(2, Math.floor(BROADCAST_SENT_API_STALE_MS / 60000)), BROADCAST_MAX_CONFIRM_RETRIES]
+       FROM broadcast_campaigns c
+      WHERE q.campaign_name = c.campaign_name
+        AND c.is_active = TRUE
+        AND q.status = 'sent_api'
+        AND q.api_accepted_at IS NOT NULL
+        AND q.api_accepted_at < NOW() - ($2 || ' minutes')::interval
+        AND q.attempts < $3`,
+    [Math.max(2, Math.floor(BROADCAST_SAME_RECIPIENT_GAP_MS / 60000)), Math.max(2, Math.floor(BROADCAST_SENT_API_STALE_MS / 60000)), BROADCAST_MAX_CONFIRM_RETRIES]
   );
 
   await db.query(
-    `UPDATE broadcast_queue
+    `UPDATE broadcast_queue q
         SET status = 'error',
             delivery_status = 'failed',
             updated_at = NOW(),
             last_error = COALESCE(last_error, 'Sin confirmación de entrega luego de varios intentos.')
-      WHERE campaign_name = $1
-        AND status = 'sent_api'
-        AND attempts >= $2
-        AND api_accepted_at IS NOT NULL
-        AND api_accepted_at < NOW() - ($3 || ' minutes')::interval`,
-    [BROADCAST_CAMPAIGN_NAME, BROADCAST_MAX_CONFIRM_RETRIES, Math.max(2, Math.floor(BROADCAST_SENT_API_STALE_MS / 60000))]
+       FROM broadcast_campaigns c
+      WHERE q.campaign_name = c.campaign_name
+        AND c.is_active = TRUE
+        AND q.status = 'sent_api'
+        AND q.attempts >= $1
+        AND q.api_accepted_at IS NOT NULL
+        AND q.api_accepted_at < NOW() - ($2 || ' minutes')::interval`,
+    [BROADCAST_MAX_CONFIRM_RETRIES, Math.max(2, Math.floor(BROADCAST_SENT_API_STALE_MS / 60000))]
   );
 
   const due = await db.query(
-    `SELECT id
-       FROM broadcast_queue
-      WHERE status = 'pending'
-        AND send_at IS NOT NULL
-        AND send_at <= NOW()
-      ORDER BY send_at ASC, id ASC
+    `SELECT q.id
+       FROM broadcast_queue q
+       JOIN broadcast_campaigns c ON c.campaign_name = q.campaign_name
+      WHERE c.is_active = TRUE
+        AND q.status = 'pending'
+        AND q.send_at IS NOT NULL
+        AND q.send_at <= NOW()
+      ORDER BY q.send_at ASC, q.id ASC
       LIMIT $1`,
     [BROADCAST_MAX_PER_RUN]
   );
@@ -2166,6 +2167,15 @@ async function processBroadcastQueue() {
     if (!processing) continue;
 
     try {
+      const currentCampaign = await getBroadcastCampaignConfig(processing.campaign_name || BROADCAST_CAMPAIGN_NAME);
+      if (currentCampaign.exists && currentCampaign.isActive === false) {
+        await db.query(
+          `UPDATE broadcast_queue SET status = 'pending', updated_at = NOW() WHERE id = $1`,
+          [processing.id]
+        );
+        continue;
+      }
+
       const recipient = normalizeWhatsAppRecipient(processing.wa_phone);
       if (!recipient) throw new Error('Número inválido');
 
@@ -2200,7 +2210,6 @@ async function processBroadcastQueue() {
       const messageText = await broadcastRenderMessageForSend(messageTemplate, processing);
       if (!messageText) throw new Error('Mensaje vacío');
 
-      const currentCampaign = await getBroadcastCampaignConfig(processing.campaign_name || BROADCAST_CAMPAIGN_NAME);
       const campaignAssets = Array.isArray(currentCampaign.assets) ? currentCampaign.assets : [];
       if (campaignAssets.length) {
         await sendBroadcastAssetsToRecipient(recipient, campaignAssets);
@@ -2222,28 +2231,30 @@ async function processBroadcastQueue() {
       });
 
       const offer = broadcastDefaultOfferFromRow(processing);
-      if (offer.type && offer.items.length) {
-        if (offer.type === 'COURSE') clearProductMemory(waId);
-        if (offer.type === 'PRODUCT') clearLastCourseContext(waId);
+      const effectiveType = String((currentCampaign.campaignType || offer.type || '')).trim().toUpperCase();
+      const effectiveItems = normalizeActiveOfferItems((offer.items && offer.items.length) ? offer.items : BROADCAST_OFFER_ITEMS);
+      if (effectiveType && effectiveItems.length) {
+        if (effectiveType === 'COURSE') clearProductMemory(waId);
+        if (effectiveType === 'PRODUCT') clearLastCourseContext(waId);
         setActiveAssistantOffer(waId, {
-          type: offer.type,
-          items: normalizeActiveOfferItems(offer.items),
-          selectedName: offer.selectedName || (offer.items.length === 1 ? offer.items[0] : ''),
+          type: effectiveType,
+          items: effectiveItems,
+          selectedName: offer.selectedName || currentCampaign.aiCta || (effectiveItems.length === 1 ? effectiveItems[0] : ''),
           mode: 'DETAIL',
           questionKind: 'MANUAL_BROADCAST',
           lastAssistantText: messageText,
           campaignName: processing.campaign_name || currentCampaign.campaignName || BROADCAST_CAMPAIGN_NAME,
-          campaignType: currentCampaign.campaignType || offer.type,
+          campaignType: currentCampaign.campaignType || effectiveType,
         });
-        if (offer.type === 'COURSE') {
-          const courseRows = (offer.items || []).map((nombre) => ({ nombre }));
+        if (effectiveType === 'COURSE') {
+          const courseRows = effectiveItems.map((nombre) => ({ nombre }));
           setLastCourseContext(waId, {
-            query: offer.selectedName || offer.items[0] || 'cursos',
-            selectedName: offer.selectedName || offer.items[0] || '',
-            currentCourseName: offer.selectedName || offer.items[0] || '',
-            lastOptions: normalizeActiveOfferItems(offer.items).slice(0, 10),
-            recentCourses: mergeCourseContextRows(courseRows, []),
-            requestedInterest: buildHubSpotCourseInterestLabel(offer.selectedName || offer.items[0] || 'cursos'),
+            query: offer.selectedName || effectiveItems[0] || 'cursos',
+            selectedName: offer.selectedName || effectiveItems[0] || '',
+            currentCourseName: offer.selectedName || effectiveItems[0] || '',
+            lastOptions: effectiveItems.slice(0, 10),
+            recentCourses: mergeCourseContextRows(courseRows, getLastCourseContext(waId)?.recentCourses || []),
+            requestedInterest: buildHubSpotCourseInterestLabel(offer.selectedName || effectiveItems[0] || 'cursos'),
           });
         }
       }
@@ -2724,7 +2735,8 @@ app.post("/broadcast/context", async (req, res) => {
     });
     return broadcastPanelRedirect(res, 'Contexto IA guardado correctamente.', false, campaignName);
   } catch (e) {
-    return broadcastPanelRedirect(res, e?.message || 'No pude guardar el contexto IA.', true, campaignName);
+    const safeCampaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    return broadcastPanelRedirect(res, e?.message || 'No pude guardar el contexto IA.', true, safeCampaignName);
   }
 });
 
@@ -2772,7 +2784,8 @@ app.post("/broadcast/assets", (req, res, next) => {
 
     return broadcastPanelRedirect(res, `Archivos cargados correctamente: ${files.length}.`, false, campaignName);
   } catch (e) {
-    return broadcastPanelRedirect(res, e?.message || 'No pude subir los archivos de la campaña.', true, campaignName);
+    const safeCampaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    return broadcastPanelRedirect(res, e?.message || 'No pude subir los archivos de la campaña.', true, safeCampaignName);
   }
 });
 
@@ -2795,7 +2808,8 @@ app.post("/broadcast/messages", async (req, res) => {
     await updateBroadcastPendingMessages(campaignName, broadcastMessages);
     return broadcastPanelRedirect(res, 'Mensajes guardados correctamente.', false, campaignName);
   } catch (e) {
-    return broadcastPanelRedirect(res, e?.message || 'No pude guardar los mensajes.', true, campaignName);
+    const safeCampaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    return broadcastPanelRedirect(res, e?.message || 'No pude guardar los mensajes.', true, safeCampaignName);
   }
 });
 
@@ -2812,7 +2826,8 @@ app.post("/broadcast/toggle", async (req, res) => {
     );
     return broadcastPanelRedirect(res, enable ? 'Difusión prendida.' : 'Difusión pausada.', false, campaignName);
   } catch (e) {
-    return broadcastPanelRedirect(res, e?.message || 'No pude cambiar el estado de la difusión.', true, campaignName);
+    const safeCampaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+    return broadcastPanelRedirect(res, e?.message || 'No pude cambiar el estado de la difusión.', true, safeCampaignName);
   }
 });
 
@@ -2878,7 +2893,8 @@ app.post("/broadcast/upload", (req, res, next) => {
     });
   } catch (e) {
     if (req.headers.accept && String(req.headers.accept).includes('text/html')) {
-      return broadcastPanelRedirect(res, e?.message || 'No pude importar el Excel.', true, campaignName);
+      const safeCampaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+      return broadcastPanelRedirect(res, e?.message || 'No pude importar el Excel.', true, safeCampaignName);
     }
     return res.status(500).json({ ok: false, error: e?.message || 'error_broadcast_upload' });
   }
@@ -2951,7 +2967,8 @@ app.post("/broadcast/retry-errors", async (req, res) => {
     return res.json({ ok: true, ...data });
   } catch (e) {
     if (req.headers.accept && String(req.headers.accept).includes('text/html')) {
-      return broadcastPanelRedirect(res, e?.message || 'No pude restaurar los errores.', true, campaignName);
+      const safeCampaignName = String(req.body?.campaign_name || BROADCAST_CAMPAIGN_NAME || '').trim() || BROADCAST_CAMPAIGN_NAME;
+      return broadcastPanelRedirect(res, e?.message || 'No pude restaurar los errores.', true, safeCampaignName);
     }
     return res.status(500).json({ ok: false, error: e?.message || 'error_broadcast_retry' });
   }
@@ -12341,8 +12358,6 @@ ${body}`.trim() : String(oneShotPrefix || '').trim();
     lastSentOutByPeer.set(dedupKey, now);
   }
 
-  if (!disableDedup) lastSentOutByPeer.set(dedupKey, now);
-
   const wa_msg_id = resp?.data?.messages?.[0]?.id || null;
 
   await dbInsertMessage({
@@ -12399,6 +12414,10 @@ async function sendWhatsAppTemplate(to, templateName, bodyVars = [], meta = {}, 
       },
     }
   );
+
+  if (!disableDedup) {
+    lastSentOutByPeer.set(dedupKey, now);
+  }
 
   const wa_msg_id = resp?.data?.messages?.[0]?.id || null;
   await dbInsertMessage({
