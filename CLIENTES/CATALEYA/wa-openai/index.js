@@ -3081,6 +3081,14 @@ function hasGoogleContactsSyncEnabled() {
     && GOOGLE_CONTACTS_TARGETS.some((target) => !isGoogleContactsTargetDisabled(target));
 }
 
+const RESET_SECRET_COMMAND = String(
+  process.env.RESET_SECRET_COMMAND || "SOMA RESET 7719 | BORRAR TODO HISTORIAL, YA"
+).trim();
+
+const RESET_HUBSPOT_DELETE_CONTACT = String(
+  process.env.RESET_HUBSPOT_DELETE_CONTACT || "false"
+).toLowerCase() === "true";
+
 const pendingContactNameRequests = new Map();
 const oneShotReplyPrefixByPhone = new Map();
 const contactIdentityCache = new Map();
@@ -3141,6 +3149,191 @@ function consumeOneShotReplyPrefix(phone = '') {
   const value = oneShotReplyPrefixByPhone.get(key) || '';
   if (value) oneShotReplyPrefixByPhone.delete(key);
   return value;
+}
+
+function normalizeResetCommand(value = '') {
+  return normalize(String(value || ''))
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isSecretResetCommand(value = '') {
+  const incoming = normalizeResetCommand(value);
+  const expected = normalizeResetCommand(RESET_SECRET_COMMAND);
+  return !!incoming && !!expected && incoming === expected;
+}
+
+function clearTimerMapEntry(map, key) {
+  const timer = map.get(key);
+  if (timer) clearTimeout(timer);
+  map.delete(key);
+}
+
+function clearOutboundDedupForPhone(phone = '') {
+  const candidates = [...new Set([
+    normalizeWhatsAppRecipient(phone),
+    normalizePhone(phone),
+    String(phone || '').replace(/[^\d]/g, ''),
+  ].filter(Boolean))];
+
+  if (!candidates.length) return;
+
+  for (const key of Array.from(lastSentOutByPeer.keys())) {
+    if (candidates.some((candidate) => key.startsWith(`${candidate}::`))) {
+      lastSentOutByPeer.delete(key);
+    }
+  }
+}
+
+function clearLocalConversationState({ waId = '', phone = '', phoneRaw = '' } = {}) {
+  const phoneDigits = String(phone || phoneRaw || '').replace(/[^\d]/g, '');
+  const replyPrefixKey = getReplyPrefixPhoneKey(phone || phoneRaw || '');
+
+  clearTimerMapEntry(inactivityTimers, waId);
+  clearTimerMapEntry(closeTimers, waId);
+
+  conversations.delete(waId);
+  lastCloseContext.delete(waId);
+  clearPendingContactNameRequest(waId);
+  clearCachedIdentityByWaId(waId);
+  clearProductMemory(waId);
+  clearLastCourseContext(waId);
+  clearActiveAssistantOffer(waId);
+  clearPendingAmbiguousBeauty(waId);
+  clearLastResolvedBeauty(waId);
+  lastServiceByUser.delete(waId);
+  pendingTurnos.delete(waId);
+  clearPendingStylistSuggestion(waId);
+  inboundMergeState.delete(waId);
+  lastTurnoInfoSentDay.delete(waId);
+
+  if (replyPrefixKey) oneShotReplyPrefixByPhone.delete(replyPrefixKey);
+  if (phoneDigits) dailyLeads.delete(phoneDigits);
+
+  clearOutboundDedupForPhone(phone || phoneRaw || '');
+}
+
+async function clearPersistedConversationState({ waId = '', phone = '', phoneRaw = '' } = {}) {
+  const phones = [...new Set([
+    normalizePhone(phone || phoneRaw || ''),
+    normalizeWhatsAppRecipient(phone || phoneRaw || ''),
+    String(phone || phoneRaw || '').replace(/[^\d]/g, ''),
+  ].filter(Boolean))];
+
+  const safePhones = phones.length ? phones : [''];
+
+  const tasks = [
+    db.query(
+      `DELETE FROM commercial_followups
+       WHERE wa_id = $1
+          OR wa_phone = ANY($2::text[])`,
+      [waId || '', safePhones]
+    ),
+    db.query(
+      `DELETE FROM commercial_followup_logs
+       WHERE wa_id = $1
+          OR wa_phone = ANY($2::text[])`,
+      [waId || '', safePhones]
+    ),
+    db.query(
+      `DELETE FROM appointment_drafts
+       WHERE wa_id = $1
+          OR wa_phone = ANY($2::text[])`,
+      [waId || '', safePhones]
+    ),
+    db.query(
+      `DELETE FROM course_enrollment_drafts
+       WHERE wa_id = $1
+          OR wa_phone = ANY($2::text[])`,
+      [waId || '', safePhones]
+    ),
+  ];
+
+  if (phones.length) {
+    tasks.push(
+      db.query(
+        `DELETE FROM messages
+         WHERE client_id = $1
+           AND wa_peer = ANY($2::text[])`,
+        [CLIENT_ID, phones]
+      )
+    );
+
+    tasks.push(
+      db.query(
+        `DELETE FROM broadcast_queue
+         WHERE wa_phone = ANY($1::text[])`,
+        [phones]
+      )
+    );
+  }
+
+  await Promise.allSettled(tasks);
+}
+
+async function clearHubSpotForSecretReset({ waId = '', phoneRaw = '' } = {}) {
+  if (!hasHubSpotEnabled()) {
+    return { ok: true, action: 'hubspot_disabled' };
+  }
+
+  let contact = null;
+
+  if (waId) {
+    contact = await findHubSpotContactByWaId(waId);
+  }
+
+  if (!contact && phoneRaw) {
+    const matches = await findHubSpotContactsByPhone(phoneRaw);
+    contact = chooseBestHubSpotMatch(matches, phoneRaw);
+  }
+
+  if (!contact?.id) {
+    return { ok: true, action: 'not_found' };
+  }
+
+  if (RESET_HUBSPOT_DELETE_CONTACT) {
+    await hubspotRequest('delete', `/crm/v3/objects/contacts/${contact.id}`);
+    return { ok: true, action: 'deleted_contact', id: contact.id };
+  }
+
+  const properties = Object.fromEntries(
+    Object.entries({
+      [HUBSPOT_PROPERTY.observacion]: '',
+      [HUBSPOT_PROPERTY.producto]: '',
+      [HUBSPOT_PROPERTY.categoria]: '',
+      [HUBSPOT_PROPERTY.ultimoContacto]: '',
+      [HUBSPOT_PROPERTY.whatsappWaId]: '',
+      [HUBSPOT_PROPERTY.whatsappPhoneRaw]: '',
+      [HUBSPOT_PROPERTY.whatsappPhoneNormalized]: '',
+    }).filter(([key]) => !!key)
+  );
+
+  await hubspotRequest('patch', `/crm/v3/objects/contacts/${contact.id}`, { properties });
+
+  return { ok: true, action: 'cleared_conversation_fields', id: contact.id };
+}
+
+async function secretResetContactSession({ waId = '', phone = '', phoneRaw = '' } = {}) {
+  clearLocalConversationState({ waId, phone, phoneRaw });
+  await clearPersistedConversationState({ waId, phone, phoneRaw });
+
+  let hubspotResult = { ok: true, action: 'skipped' };
+  try {
+    hubspotResult = await clearHubSpotForSecretReset({
+      waId,
+      phoneRaw: phoneRaw || phone,
+    });
+  } catch (e) {
+    console.error('❌ Error limpiando HubSpot en reset secreto:', e?.response?.data || e?.message || e);
+    hubspotResult = {
+      ok: false,
+      action: 'hubspot_error',
+      error: e?.message || 'hubspot_error',
+    };
+  }
+
+  return { ok: true, hubspotResult };
 }
 
 function extractNameAnswer(text = '') {
@@ -13554,6 +13747,15 @@ if (closeTimers.has(waId)) {
       text
     ).trim();
 
+    if (isSecretResetCommand(text) || isSecretResetCommand(userIntentText)) {
+      await secretResetContactSession({ waId, phone, phoneRaw });
+      await sendWhatsAppText(
+        phone,
+        "Listo. Reinicié esta conversación y borré la memoria operativa de este contacto. A partir de ahora lo tomo como nuevo 😊"
+      );
+      return;
+    }
+
 
 // ✅ Contexto para seguimiento al cierre (se actualiza durante la conversación)
 let contactInfoFromText = extractContactInfo(text);
@@ -13619,6 +13821,15 @@ lastCloseContext.set(waId, {
       lastUserText: text,
       profileName: name || lastCloseContext.get(waId)?.profileName || '',
     });
+
+    if (isSecretResetCommand(text) || isSecretResetCommand(userIntentText)) {
+      await secretResetContactSession({ waId, phone, phoneRaw });
+      await sendWhatsAppText(
+        phone,
+        "Listo. Reinicié esta conversación y borré la memoria operativa de este contacto. A partir de ahora lo tomo como nuevo 😊"
+      );
+      return;
+    }
 
 
     const courseManagerHandled = await handleCourseManagerApprovalInbound({ msg, text, phone, phoneRaw });
