@@ -7823,6 +7823,23 @@ async function notifyStylistTurnConfirmed(apptRow) {
     ],
   });
 
+  await sleep(700);
+
+  await forwardAppointmentProofToStylist({
+    id: appt.id,
+    wa_id: appt.wa_id || apptRow.wa_id || '',
+    wa_phone: appt.wa_phone || apptRow.wa_phone || '',
+    client_name: appt.client_name || apptRow.client_name || '',
+    contact_phone: appt.contact_phone || apptRow.contact_phone || '',
+    service_name: appt.service_name || apptRow.service_name || '',
+    appointment_date: appt.appointment_date || apptRow.appointment_date || '',
+    appointment_time: appt.appointment_time || apptRow.appointment_time || '',
+    payment_proof_filename: apptRow.payment_proof_filename || '',
+  }).catch((e) => {
+    console.error('❌ Error reenviando comprobante del turno a la peluquera:', e?.response?.data || e?.message || e);
+    return false;
+  });
+
   return true;
 }
 
@@ -13028,6 +13045,17 @@ function buildCourseProofCaption(enrollment = {}) {
   return 'Comprobante enviado';
 }
 
+function buildAppointmentProofCaption(appt = {}) {
+  return [
+    'Comprobante de seña recibido',
+    appt.client_name ? `Cliente: ${String(appt.client_name || '').trim()}` : '',
+    appt.service_name ? `Servicio: ${String(appt.service_name || '').trim()}` : '',
+    appt.appointment_date ? `Día: ${formatAppointmentDateForTemplate(appt.appointment_date)}` : '',
+    appt.appointment_time ? `Hora: ${formatAppointmentTimeForTemplate(appt.appointment_time)}` : '',
+    'Estado: comprobante recibido',
+  ].filter(Boolean).join('\n');
+}
+
 function guessMimeTypeFromFilename(filename = '') {
   const lower = String(filename || '').trim().toLowerCase();
   if (lower.endsWith('.png')) return 'image/png';
@@ -13080,6 +13108,27 @@ async function forwardCourseProofToManager(enrollment = {}) {
   } else {
     await sendWhatsAppDocumentById(recipient, mediaId, savedName, caption);
   }
+  return true;
+}
+
+async function forwardAppointmentProofToStylist(appt = {}) {
+  const recipient = normalizeWhatsAppRecipient(STYLIST_NOTIFY_PHONE_RAW);
+  const savedName = String(appt.payment_proof_filename || '').trim();
+  if (!recipient || !savedName) return false;
+
+  const filePath = path.join(MEDIA_DIR, savedName);
+  if (!fs.existsSync(filePath)) return false;
+
+  const mimeType = guessMimeTypeFromFilename(savedName);
+  const mediaId = await uploadMediaToWhatsApp(filePath, mimeType);
+  const caption = buildAppointmentProofCaption(appt);
+
+  if (mimeType.startsWith('image/')) {
+    await sendWhatsAppImageById(recipient, mediaId, caption);
+  } else {
+    await sendWhatsAppDocumentById(recipient, mediaId, savedName, caption);
+  }
+
   return true;
 }
 
