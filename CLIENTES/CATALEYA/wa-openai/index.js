@@ -5935,6 +5935,38 @@ function clearLastCourseContext(waId) {
 // ✅ Última oferta/respuesta activa del asistente (para interpretar mejor respuestas como
 // "pasá fotos", "quiero ese", "más info", "quiero avanzar", etc.)
 const activeAssistantOfferByUser = new Map();
+const sentProductPhotoKeysByUser = new Map();
+
+function getSentProductPhotoKey(phone = '') {
+  return normalizePhone(phone || '');
+}
+
+function wasProductPhotoAlreadySent(phone, product) {
+  const key = getSentProductPhotoKey(phone);
+  if (!key || !product?.nombre) return false;
+  const sent = sentProductPhotoKeysByUser.get(key);
+  if (!sent || !(sent instanceof Set)) return false;
+  const productKey = normalizeCatalogSearchText(`${product?.nombre || ''} ${product?.marca || ''}`);
+  return sent.has(productKey);
+}
+
+function markProductPhotoAsSent(phone, product) {
+  const key = getSentProductPhotoKey(phone);
+  if (!key || !product?.nombre) return;
+  const productKey = normalizeCatalogSearchText(`${product?.nombre || ''} ${product?.marca || ''}`);
+  if (!productKey) return;
+  let sent = sentProductPhotoKeysByUser.get(key);
+  if (!sent || !(sent instanceof Set)) {
+    sent = new Set();
+    sentProductPhotoKeysByUser.set(key, sent);
+  }
+  sent.add(productKey);
+}
+
+function clearSentProductPhotos(phone = '') {
+  const key = getSentProductPhotoKey(phone);
+  if (key) sentProductPhotoKeysByUser.delete(key);
+}
 const ACTIVE_ASSISTANT_OFFER_TTL_MS = Number(process.env.ACTIVE_ASSISTANT_OFFER_TTL_MS || 7 * 24 * 60 * 60 * 1000);
 
 function normalizeActiveOfferItems(items = []) {
@@ -6028,7 +6060,7 @@ function rememberAssistantServiceOffer(waId, rows = [], extra = {}) {
 function looksLikeActiveOfferFollowup(text = '') {
   const t = normalize(text || '');
   if (!t) return false;
-  if (/^(ese|esa|esos|esas|de ese|de esa|de esos|de esas|ese curso|ese servicio|ese producto|el primero|la primera|el segundo|la segunda|el tercero|la tercera|quiero ese|quiero esa|mas info|más info|info|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|cuanto dura|cuánto dura|cuando empieza|cuándo empieza|horario|horarios|cupos|requisitos|quiero avanzar|quiero seguir|quiero continuar|quiero reservar|quiero inscribirme|quiero anotarme|quiero turno|pasame foto|pásame foto|pasame fotos|pásame fotos|mandame foto|mandame fotos|mostrame|mostrame fotos|ver|ok|oka|dale|bien|perfecto)$/.test(t)) return true;
+  if (/^(ese|esa|esos|esas|de ese|de esa|de esos|de esas|ese curso|ese servicio|ese producto|el primero|la primera|el segundo|la segunda|el tercero|la tercera|quiero ese|quiero esa|mas info|más info|info|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|cuanto dura|cuánto dura|cuando empieza|cuándo empieza|horario|horarios|cupos|requisitos|quiero avanzar|quiero seguir|quiero continuar|quiero reservar|quiero inscribirme|quiero anotarme|quiero turno|pasame foto|pásame foto|pasame fotos|pásame fotos|mandame foto|mandame fotos|mostrame fotos|ok|oka|dale|bien|perfecto)$/.test(t)) return true;
   if (userAsksForPhoto(text)) return true;
   if (/(quiero (ese|esa|seguir|continuar|avanzar|reservar|inscribirme|anotarme|turno)|de ese|de esa|precio del primero|precio del segundo|foto del primero|foto del segundo|material del curso|pasame el material|pasame material|me interesa ese)/i.test(t)) return true;
   return false;
@@ -11159,6 +11191,14 @@ function isGenericProductOptionsFollowUp(text) {
   return /(que otras opciones|qué otras opciones|otras opciones|que mas tenes|qué más tenés|que más tenes|qué mas tenés|que mas hay|qué más hay|alguna otra|alguna mas|alguna más|otras que tengas|otras tenes|otras tenés|de ese|de esa|de eso|de estas|de estos|de esa linea|de esa línea)/i.test(t);
 }
 
+function excludeAlreadyOfferedRows(rows, offeredNames = []) {
+  const list = Array.isArray(rows) ? rows : [];
+  const offered = new Set((Array.isArray(offeredNames) ? offeredNames : []).map((x) => normalizeCatalogSearchText(x)).filter(Boolean));
+  if (!list.length || !offered.size) return list;
+  const filtered = list.filter((row) => !offered.has(normalizeCatalogSearchText(row?.nombre || '')));
+  return filtered.length ? filtered : [];
+}
+
 function extractProductTypeKeywords(query) {
   const furnitureFamily = detectFurnitureFamily(query);
   if (furnitureFamily) {
@@ -14453,17 +14493,13 @@ async function maybeSendMultipleProductPhotos(phone, products, userText) {
   const seen = new Set();
   for (const product of products) {
     const key = normalizeCatalogSearchText(`${product?.nombre || ''} ${product?.marca || ''}`);
-    if (!product?.nombre || seen.has(key)) continue;
+    if (!product?.nombre || seen.has(key) || wasProductPhotoAlreadySent(phone, product)) continue;
     seen.add(key);
     unique.push(product);
   }
 
   const limited = unique.slice(0, 8);
   if (!limited.length) return false;
-
-  if (limited.length > 1) {
-    await sendWhatsAppText(phone, 'Le paso las fotos de estas opciones 😊');
-  }
 
   let sentCount = 0;
   const missing = [];
@@ -14472,6 +14508,7 @@ async function maybeSendMultipleProductPhotos(phone, products, userText) {
   for (const product of limited) {
     const result = await sendProductPhotoDirect(phone, product);
     if (result.ok) {
+      markProductPhotoAsSent(phone, product);
       sentCount += 1;
     } else if (result.reason === 'missing_link') {
       missing.push(product.nombre || 'Producto');
@@ -14493,14 +14530,6 @@ async function maybeSendMultipleProductPhotos(phone, products, userText) {
   return sentCount > 0 || missing.length > 0 || failed.length > 0;
 }
 
-function hasPhotoableProductRows(rows) {
-  if (!Array.isArray(rows) || !rows.length) return false;
-  return rows.some((row) => {
-    const foto = String(row?.foto || row?.Foto || row?.imagen || row?.image || '').trim();
-    return !!extractDriveFileId(foto);
-  });
-}
-
 async function trySendExceptionalProductPhotos(phone, products, { domain = '', family = '', query = '' } = {}) {
   const selected = selectAutoPhotoExceptionalRows(products, { domain, family, query });
   if (!selected.length) return { attempted: false, handled: false, sentCount: 0, missing: [], failed: [] };
@@ -14517,10 +14546,6 @@ async function trySendExceptionalProductPhotos(phone, products, { domain = '', f
   const limited = unique.slice(0, 8);
   if (!limited.length) return { attempted: false, handled: false, sentCount: 0, missing: [], failed: [] };
 
-  if (limited.length > 1) {
-    await sendWhatsAppText(phone, 'Le paso las opciones con foto 😊');
-  }
-
   let sentCount = 0;
   const missing = [];
   const failed = [];
@@ -14528,6 +14553,7 @@ async function trySendExceptionalProductPhotos(phone, products, { domain = '', f
   for (const product of limited) {
     const result = await sendProductPhotoDirect(phone, product);
     if (result.ok) {
+      markProductPhotoAsSent(phone, product);
       sentCount += 1;
     } else if (result.reason === 'missing_link') {
       missing.push(product.nombre || 'Producto');
@@ -14565,7 +14591,10 @@ async function maybeSendProductPhoto(phone, product, userText) {
   if (!userAsksForPhoto(userText)) return false;
 
   const result = await sendProductPhotoDirect(phone, product);
-  if (result.ok) return true;
+  if (result.ok) {
+    markProductPhotoAsSent(phone, product);
+    return true;
+  }
 
   if (result.reason === 'missing_link') {
     await sendWhatsAppText(
@@ -14590,7 +14619,7 @@ async function maybeAutoSendProductPhotos(phone, products, { maxItems = 3 } = {}
   const seen = new Set();
   for (const product of products) {
     const key = normalizeCatalogSearchText(`${product?.nombre || ''} ${product?.marca || ''}`);
-    if (!product?.nombre || seen.has(key)) continue;
+    if (!product?.nombre || seen.has(key) || wasProductPhotoAlreadySent(phone, product)) continue;
     seen.add(key);
     unique.push(product);
   }
@@ -14599,13 +14628,13 @@ async function maybeAutoSendProductPhotos(phone, products, { maxItems = 3 } = {}
   const limited = withPhoto.slice(0, Math.max(1, Number(maxItems || 3)));
   if (!limited.length) return false;
 
-  if (limited.length > 1) {
-  }
-
   let sentCount = 0;
   for (const product of limited) {
     const result = await sendProductPhotoDirect(phone, product);
-    if (result.ok) sentCount += 1;
+    if (result.ok) {
+      markProductPhotoAsSent(phone, product);
+      sentCount += 1;
+    }
   }
 
   return sentCount > 0;
@@ -16764,6 +16793,18 @@ Si después necesita algo, estoy acá ✨`;
       related = filterRowsForRequestedFamily(related, { family: resolvedFamily, domain: resolvedDomain, query: `${resolvedQuery || ''} ${text || ''}` });
       broader = filterRowsForRequestedFamily(broader, { family: resolvedFamily, domain: resolvedDomain, query: `${resolvedQuery || ''} ${text || ''}` });
 
+      const genericMoreOptionsAsked = isGenericProductOptionsFollowUp(text);
+      const currentActiveOffer = getActiveAssistantOffer(waId);
+      const alreadyOfferedNames = genericMoreOptionsAsked
+        ? normalizeActiveOfferItems((currentActiveOffer?.type === 'PRODUCT' ? currentActiveOffer.items : []).concat(lastProductCtx?.lastOptions || []))
+        : [];
+
+      if (alreadyOfferedNames.length) {
+        matches = excludeAlreadyOfferedRows(matches, alreadyOfferedNames);
+        related = excludeAlreadyOfferedRows(related, alreadyOfferedNames);
+        broader = excludeAlreadyOfferedRows(broader, alreadyOfferedNames);
+      }
+
       const unavailableMatchesBase = detailQuery ? findStock(stockAll, detailQuery, 'DETAIL') : [];
       const unavailableMatches = filterRowsForRequestedFamily(unavailableMatchesBase, {
         family: resolvedFamily,
@@ -16781,6 +16822,16 @@ Si después necesita algo, estoy acá ✨`;
         });
         pushHistory(waId, 'assistant', msgNoStock);
         await sendWhatsAppText(phone, msgNoStock);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+
+      if (!matches.length && !related.length && !broader.length && alreadyOfferedNames.length) {
+        const msgNoMore = resolvedFamily
+          ? `Por ahora esas eran las opciones diferentes que tengo cargadas de ${resolvedDomain === 'furniture' ? (getFurnitureFamilyDef(resolvedFamily)?.label || resolvedFamily) : getProductFamilyLabel(resolvedFamily)}. Si quiere, se las filtro mejor según lo que necesite.`
+          : 'Por ahora esas eran las opciones diferentes que tengo cargadas. Si quiere, se las filtro mejor según lo que necesite.';
+        pushHistory(waId, 'assistant', msgNoMore);
+        await sendWhatsAppText(phone, msgNoMore);
         scheduleInactivityFollowUp(waId, phone);
         return;
       }
