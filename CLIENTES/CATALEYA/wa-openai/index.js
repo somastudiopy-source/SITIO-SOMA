@@ -10847,16 +10847,30 @@ function buildTreatmentQuestion(knowledge, useType = '') {
   return info.followup || '';
 }
 
-function buildTreatmentRecommendationPool(stockRows, { knowledge = null, family = '', query = '', useType = '', need = '', hairType = '' } = {}) {
+function isExplicitFamilyRequest(text = '', family = '') {
+  const fam = normalizeCatalogSearchText(family || '');
+  if (!fam) return false;
+  const hay = normalizeCatalogSearchText(text || '');
+  if (!hay) return false;
+  const aliases = getProductFamilyAliases(fam);
+  return aliases.some((alias) => containsCatalogPhrase(hay, alias));
+}
+
+function buildTreatmentRecommendationPool(stockRows, { knowledge = null, family = '', query = '', useType = '', need = '', hairType = '', explicitFamilyRequested = false } = {}) {
   const info = knowledge || null;
   const rows = Array.isArray(stockRows) ? stockRows.filter((row) => detectRowProductDomain(row) === 'hair') : [];
   if (!info || !rows.length) return [];
 
+  const requestedFamily = normalizeCatalogSearchText(family || '');
   const primaryFamilies = Array.from(new Set([family, ...(info.primaryFamilies || [])].filter(Boolean)));
   const complementFamilies = Array.from(new Set(getTreatmentComplementFamilies(info, useType).filter(Boolean)));
   const relevantFamilies = Array.from(new Set([...primaryFamilies, ...complementFamilies]));
+  const mustStayInRequestedFamily = !!(explicitFamilyRequested && requestedFamily);
 
   const scored = rows.map((row) => {
+    const matchesRequestedFamily = requestedFamily ? rowMatchesHairFamily(row, requestedFamily) : false;
+    if (mustStayInRequestedFamily && !matchesRequestedFamily) return null;
+
     let score = scoreProductCandidate(row, {
       query,
       family,
@@ -10866,15 +10880,16 @@ function buildTreatmentRecommendationPool(stockRows, { knowledge = null, family 
       useType,
     });
 
+    if (matchesRequestedFamily) score += 5.2;
     if (primaryFamilies.some((fam) => rowMatchesHairFamily(row, fam))) score += 3.4;
-    if (complementFamilies.some((fam) => rowMatchesHairFamily(row, fam))) score += 1.6;
+    if (!mustStayInRequestedFamily && complementFamilies.some((fam) => rowMatchesHairFamily(row, fam))) score += 1.6;
 
     const bag = buildStockHaystack(row);
     if (normalizeUseType(useType) === 'profesional' && /(profesional|salon|salón|barber)/i.test(bag)) score += 1.1;
     if (normalizeUseType(useType) === 'personal' && /(personal|hogar|casa)/i.test(bag)) score += 0.6;
 
     return { row, score };
-  }).filter((item) => item.score > 0.2);
+  }).filter((item) => item && item.score > 0.2);
 
   scored.sort((a, b) => b.score - a.score);
 
@@ -10884,7 +10899,9 @@ function buildTreatmentRecommendationPool(stockRows, { knowledge = null, family 
     const key = normalizeCatalogSearchText(`${item.row?.nombre || ''} ${item.row?.marca || ''}`);
     if (!key || seen.has(key)) continue;
 
-    if (relevantFamilies.length) {
+    if (mustStayInRequestedFamily && !rowMatchesHairFamily(item.row, requestedFamily)) continue;
+
+    if (!mustStayInRequestedFamily && relevantFamilies.length) {
       const matchesRelevant = relevantFamilies.some((fam) => rowMatchesHairFamily(item.row, fam));
       if (!matchesRelevant && item.score < 1.4) continue;
     }
@@ -11017,16 +11034,16 @@ function isGenericProductQuery(query) {
 function buildProductFollowupQuestion({ domain = '', familyLabel = '', useType = '' } = {}) {
   const readableFamily = familyLabel ? (domain === 'furniture' ? (getFurnitureFamilyDef(familyLabel)?.label || familyLabel) : getProductFamilyLabel(familyLabel)) : '';
   if (domain === 'furniture') {
-    return `✨ Si quiere, le ayudo a elegir. ¿Es para uso personal o para salón?`;
+    return `✨ Si después quiere, también le muestro opciones según el espacio y el uso.`;
   }
 
   const treatmentKnowledge = detectHairTreatmentKnowledge({ family: familyLabel, text: readableFamily });
   const treatmentQuestion = buildTreatmentQuestion(treatmentKnowledge, useType);
   if (treatmentQuestion) {
-    return `✨ Si quiere, le ayudo a elegir. ${treatmentQuestion}`;
+    return `✨ Si después quiere, también le muestro cómo complementarlo bien.`;
   }
 
-  return `✨ Si quiere, le ayudo a elegir. ¿Es para uso personal o para trabajar?`;
+  return `✨ Si después quiere, también le muestro opciones para complementar el cuidado.`;
 }
 
 function looksLikeFurniturePreferenceReply(text) {
@@ -11573,7 +11590,7 @@ function shortlistProductsForRecommendation(rows, criteria = {}) {
   return out.length ? out : scopedItems.slice(0, criteria.limit || 10);
 }
 
-async function recommendProductsWithAI({ text, domain = '', familyLabel = '', hairType = '', need = '', useType = '', businessType = '', style = '', seatsNeeded = '', treatmentKnowledge = null, historySnippet = '', products = [] } = {}) {
+async function recommendProductsWithAI({ text, domain = '', familyLabel = '', hairType = '', need = '', useType = '', businessType = '', style = '', seatsNeeded = '', treatmentKnowledge = null, historySnippet = '', products = [], explicitFamilyRequested = false } = {}) {
   const candidates = Array.isArray(products)
     ? products.filter((p) => p?.nombre).slice(0, 10).map((row) => buildProductAICandidate(row, { treatmentKnowledge, useType }))
     : [];
@@ -11606,13 +11623,17 @@ Tu trabajo:
 - Priorizá el contexto completo de historial_reciente y no solo el último mensaje.
 - Si el historial ya marca una necesidad concreta, no la contradigas después.
 - Cuando el cliente pide "la mejor" opción, elegí primero la más alineada al problema, no la más genérica.
+- Si el cliente pidió una categoría exacta (por ejemplo shampoo, baño de crema, máscara, sérum, aceite, tintura, plancha, camilla), quedate SOLO dentro de esa categoría. No cambies a otra aunque sea complementaria.
+- Si el cliente pregunta por un complemento puntual después de una sugerencia anterior, respondé a ESE complemento puntual.
+- No metas preguntas de turno, reserva o aplicación salvo que el cliente lo haya pedido.
+- El follow_up debe quedar vacío si no hace falta. Solo usalo si suma de verdad.
 - No agregues productos fuera de las opciones enviadas.
 - Usá un tono lindo y simple, con como mucho un emoji suave como ✨.
 
 Respondé SOLO JSON con:
 - intro: string (máximo 1 oración corta)
 - recommended_names: string[] (hasta 4 nombres exactos)
-- follow_up: string (máximo 1 oración corta)
+- follow_up: string (máximo 1 oración corta, opcional, puede ser vacío)
 - rationale: string (muy breve, opcional, máximo 10 palabras)
 - step_summary: string (muy breve, opcional, máximo 10 palabras)
 - sales_angle: string (muy breve, opcional, máximo 10 palabras)`,
@@ -11637,6 +11658,7 @@ Respondé SOLO JSON con:
               familias_base: treatmentKnowledge.primaryFamilies || [],
               familias_complementarias: getTreatmentComplementFamilies(treatmentKnowledge, useType),
             } : null,
+            categoria_pedida_explicita: !!explicitFamilyRequested,
             opciones: candidates,
           }),
         },
@@ -11686,9 +11708,10 @@ function formatRecommendedProductsReply(aiPayload, rows, { domain = '', familyLa
     return `${getCatalogItemEmoji(p.nombre, { kind: 'product' })} *${p.nombre}*\n• Precio: *${precio}*${desc ? `\n• ${desc}` : ''}`;
   });
 
-  const followUp = aiPayload?.follow_up || buildProductFollowupQuestion({ domain, familyLabel, useType });
+  const followUp = String(aiPayload?.follow_up || '').trim() || buildProductFollowupQuestion({ domain, familyLabel, useType });
+  const ending = followUp ? `\n\n${followUp}` : '';
 
-  return `${bodyParts.filter(Boolean).join('\n')}\n\n${lines.join('\n\n')}\n\n${followUp}`.trim();
+  return `${bodyParts.filter(Boolean).join('\n')}\n\n${lines.join('\n\n')}${ending}`.trim();
 }
 
 function detectFemaleContext(text) {
@@ -16610,6 +16633,7 @@ Si después necesita algo, estoy acá ✨`;
       const resolvedBusinessType = productAI?.business_type || lastProductCtx?.businessType || '';
       const resolvedStyle = productAI?.style || lastProductCtx?.style || '';
       const resolvedSeatsNeeded = productAI?.seats_needed || lastProductCtx?.seatsNeeded || '';
+      const explicitFamilyRequested = isExplicitFamilyRequest(`${text} ${resolvedQuery} ${intent.query || ''}`, resolvedFamily);
       const treatmentKnowledge = resolvedDomain === 'hair'
         ? (getHairTreatmentKnowledgeById(lastProductCtx?.treatmentId || '') || detectHairTreatmentKnowledge({
             text: `${text} ${resolvedQuery} ${productAI?.treatment_context || ''}`,
@@ -16755,6 +16779,7 @@ Si después necesita algo, estoy acá ✨`;
               useType: resolvedUseType,
               need: resolvedNeed,
               hairType: resolvedHairType,
+              explicitFamilyRequested,
             })
           : [];
 
@@ -16804,6 +16829,7 @@ Si después necesita algo, estoy acá ✨`;
             treatmentKnowledge,
             historySnippet: buildConversationHistorySnippet(convForAI, 18, 2200),
             products: shortlist,
+            explicitFamilyRequested,
           });
 
           const picked = recoAI?.recommended_names?.length
