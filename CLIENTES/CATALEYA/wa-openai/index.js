@@ -11082,21 +11082,33 @@ function isAccessoryOnlyMatch(row, family = '') {
 function filterRowsForRequestedFamily(rows, { family = '', domain = '', query = '' } = {}) {
   let out = Array.isArray(rows) ? rows.slice() : [];
   if (!out.length) return out;
+
   const activeDomain = domain || detectProductDomain(query, family);
   if (activeDomain) out = out.filter((row) => detectRowProductDomain(row) === activeDomain);
+
   const q = normalizeCatalogSearchText(query || '');
   const wantsAmpolla = /ampolla/.test(q);
   if (wantsAmpolla) {
     const onlyAmpolla = out.filter((row) => /ampolla/i.test(buildStockHaystack(row)));
     if (onlyAmpolla.length) out = onlyAmpolla;
   }
+
   if (family) {
     const aliases = activeDomain === 'furniture' ? getFurnitureFamilyAliases(family) : getProductFamilyAliases(family);
     if (aliases.length) {
-      const strict = out.filter((row) => aliases.some((alias) => containsCatalogPhrase(buildStockHaystack(row), alias)) && !isAccessoryOnlyMatch(row, family));
-      if (strict.length) out = strict;
+      const strict = out.filter((row) =>
+        aliases.some((alias) => containsCatalogPhrase(buildStockHaystack(row), alias)) && !isAccessoryOnlyMatch(row, family)
+      );
+
+      const familyWasExplicitlyRequested = isExplicitFamilyRequest(`${query || ''} ${family || ''}`, family);
+      if (strict.length) {
+        out = strict;
+      } else if (familyWasExplicitlyRequested) {
+        return [];
+      }
     }
   }
+
   return out;
 }
 
@@ -14547,6 +14559,36 @@ async function maybeSendProductPhoto(phone, product, userText) {
   return true;
 }
 
+
+async function maybeAutoSendProductPhotos(phone, products, { maxItems = 3 } = {}) {
+  if (!Array.isArray(products) || !products.length) return false;
+
+  const unique = [];
+  const seen = new Set();
+  for (const product of products) {
+    const key = normalizeCatalogSearchText(`${product?.nombre || ''} ${product?.marca || ''}`);
+    if (!product?.nombre || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(product);
+  }
+
+  const withPhoto = unique.filter((product) => !!extractDriveFileId(product?.foto || ''));
+  const limited = withPhoto.slice(0, Math.max(1, Number(maxItems || 3)));
+  if (!limited.length) return false;
+
+  if (limited.length > 1) {
+    await sendWhatsAppText(phone, 'Le paso también las fotos de estas opciones 😊');
+  }
+
+  let sentCount = 0;
+  for (const product of limited) {
+    const result = await sendProductPhotoDirect(phone, product);
+    if (result.ok) sentCount += 1;
+  }
+
+  return sentCount > 0;
+}
+
 function imageExtFromMime(mimeType) {
   const mime = String(mimeType || '').toLowerCase();
   if (mime.includes('png')) return '.png';
@@ -16874,6 +16916,7 @@ Si después necesita algo, estoy acá ✨`;
             }
             pushHistory(waId, 'assistant', replyReco);
             await sendWhatsAppText(phone, replyReco);
+            await maybeAutoSendProductPhotos(phone, pickedRows, { maxItems: pickedRows.length === 1 ? 1 : 3 });
             scheduleInactivityFollowUp(waId, phone);
             return;
           }
@@ -16921,6 +16964,7 @@ Si después necesita algo, estoy acá ✨`;
             pushHistory(waId, 'assistant', part);
             await sendWhatsAppText(phone, part);
           }
+          await maybeAutoSendProductPhotos(phone, relatedSlice, { maxItems: 3 });
           scheduleInactivityFollowUp(waId, phone);
           return;
         }
@@ -16990,6 +17034,7 @@ Si después necesita algo, estoy acá ✨`;
           rememberAssistantProductOffer(waId, matches, { mode: matches.length === 1 ? 'DETAIL' : 'LIST', domain: resolvedDomain || '', family: resolvedFamily || '', focusTerm: resolvedFocusTerm || '', selectedName: matches.length === 1 ? (matches[0]?.nombre || '') : '', questionKind: matches.length === 1 ? 'DETAIL' : 'LIST', lastAssistantText: replyCatalog });
           pushHistory(waId, 'assistant', replyCatalog);
           await sendWhatsAppText(phone, replyCatalog);
+          await maybeAutoSendProductPhotos(phone, matches.length === 1 ? [matches[0]] : matches.slice(0, 3), { maxItems: matches.length === 1 ? 1 : 3 });
           scheduleInactivityFollowUp(waId, phone);
           return;
         }
@@ -17031,6 +17076,7 @@ Si después necesita algo, estoy acá ✨`;
           pushHistory(waId, 'assistant', part);
           await sendWhatsAppText(phone, part);
         }
+        await maybeAutoSendProductPhotos(phone, broaderSlice, { maxItems: 3 });
         scheduleInactivityFollowUp(waId, phone);
         return;
       }
