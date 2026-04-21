@@ -5695,6 +5695,7 @@ Si preguntan por precios, stock u opciones, usá los catálogos cuando sea posib
 Para productos capilares, razoná como una profesional del rubro: entendé el paso del tratamiento, el objetivo (hidratación, reparación, color, alisado, barbería, finalización) y sugerí complementos reales SOLO si existen en catálogo.
 Si detectás uso personal, recomendá en tono de cuidado y mantenimiento. Si detectás uso profesional, recomendá en tono de trabajo, rendimiento, terminación y venta complementaria para el salón.
 Cuando respondas con productos/servicios/cursos, NO reescribas los nombres: copiá el "Nombre" tal cual figura en el Excel.
+- Si el cliente manda varias líneas o varios mensajes seguidos con la misma idea, interpretalos como un solo pedido antes de responder.
 `.trim();
 
 // ===================== MEMORIA DIARIA (leads) =====================
@@ -6655,18 +6656,103 @@ const LAST_SERVICE_TTL_MS = 6 * 60 * 60 * 1000; // 6 horas
 const processedMsgIds = new Set();
 
 // ===================== ENTRADA AGRUPADA (mensajes seguidos) =====================
-const INBOUND_MERGE_MS = Number(process.env.INBOUND_MERGE_MS || 1800);
+const INBOUND_MERGE_MS = Number(process.env.INBOUND_MERGE_MS || 2200);
+const INBOUND_MERGE_EXTENDED_MS = Number(process.env.INBOUND_MERGE_EXTENDED_MS || 6500);
+const INBOUND_MERGE_MAX_WAIT_MS = Number(process.env.INBOUND_MERGE_MAX_WAIT_MS || 12000);
 const inboundMergeState = new Map();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function inboundTextLooksLikeContinuation(text = '') {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return false;
+
+  const t = normalize(raw);
+  const wordCount = t ? t.split(/\s+/).filter(Boolean).length : 0;
+
+  if (raw.length <= 18) return true;
+  if (wordCount <= 3) return true;
+  if (/^(si|sí|no|ok|oka|dale|perfecto|bueno|bien|aja|ajá|ahi va|ahí va|ahora|y|pero|igual|otra cosa|otro turno|para mi hija|mi hija|para ella|para mi|para el|ella|el|alisado|botox|keratina|nutricion|nutrición|corte|mechitas|reflejos|balayage)$/i.test(t)) return true;
+  if (/^(quiero|quisiera|necesito|busco|para|de|del|con|sin)\b/i.test(t) && wordCount <= 6) return true;
+  if (!/[.!?:]$/.test(raw) && wordCount <= 8) return true;
+
+  return false;
+}
+
+function compactMergedInboundText(text = '') {
+  const lines = String(text || '')
+    .split(/\r?\n+/)
+    .map((x) => String(x || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+
+  if (!lines.length) return '';
+  if (lines.length === 1) return lines[0];
+
+  let out = lines[0];
+  for (const line of lines.slice(1)) {
+    const compact = String(line || '').trim();
+    if (!compact) continue;
+    const normalized = normalize(compact);
+    const words = normalized ? normalized.split(/\s+/).filter(Boolean).length : 0;
+    const joinInline = (
+      compact.length <= 36
+      || words <= 6
+      || inboundTextLooksLikeContinuation(compact)
+    );
+    out += joinInline ? ` ${compact}` : `\n${compact}`;
+  }
+
+  return out.replace(/\s+\n/g, '\n').replace(/\n\s+/g, '\n').trim();
+}
+
+function getInboundMergeTargetMs(state = {}) {
+  const items = Array.isArray(state?.items) ? state.items : [];
+  const latest = items[items.length - 1] || {};
+  const latestText = String(latest?.userIntentText || latest?.text || '').trim();
+  const mergedText = compactMergedInboundText(
+    items
+      .map((item) => String(item?.userIntentText || item?.text || '').trim())
+      .filter(Boolean)
+      .join('\n')
+  );
+
+  if (items.length >= 2) return INBOUND_MERGE_EXTENDED_MS;
+  if (inboundTextLooksLikeContinuation(latestText)) return INBOUND_MERGE_EXTENDED_MS;
+  if (inboundTextLooksLikeContinuation(mergedText)) return INBOUND_MERGE_EXTENDED_MS;
+  return INBOUND_MERGE_MS;
+}
+
+async function waitForInboundMergeSilence(waId, version) {
+  const startedAt = Date.now();
+
+  while (true) {
+    const state = inboundMergeState.get(waId);
+    if (!state || state.version !== version) return null;
+
+    const targetMs = getInboundMergeTargetMs(state);
+    const lastTs = Number(state.lastTs || startedAt);
+    const elapsedSinceLastChunk = Date.now() - lastTs;
+    const totalElapsed = Date.now() - startedAt;
+
+    if (elapsedSinceLastChunk >= targetMs || totalElapsed >= INBOUND_MERGE_MAX_WAIT_MS) {
+      return consumeInboundMergeChunk(waId, version);
+    }
+
+    const missing = Math.max(120, Math.min(450, targetMs - elapsedSinceLastChunk));
+    await sleep(missing);
+  }
+}
+
 function appendInboundMergeChunk(waId, chunk) {
-  const prev = inboundMergeState.get(waId) || { version: 0, items: [] };
+  const now = Date.now();
+  const prev = inboundMergeState.get(waId) || { version: 0, items: [], firstTs: now, lastTs: now };
   const next = {
     version: Number(prev.version || 0) + 1,
-    items: [...(Array.isArray(prev.items) ? prev.items : []), { ...chunk, ts: Date.now() }].slice(-12),
+    firstTs: Number(prev.firstTs || now),
+    lastTs: now,
+    items: [...(Array.isArray(prev.items) ? prev.items : []), { ...chunk, ts: now }].slice(-12),
   };
   inboundMergeState.set(waId, next);
   return next.version;
@@ -6679,16 +6765,20 @@ function consumeInboundMergeChunk(waId, version) {
 
   const items = Array.isArray(state.items) ? state.items : [];
   const latest = items[items.length - 1] || {};
-  const mergedText = items
-    .map((item) => String(item?.text || '').trim())
-    .filter(Boolean)
-    .join('\n')
-    .trim();
-  const mergedUserIntentText = items
-    .map((item) => String(item?.userIntentText || item?.text || '').trim())
-    .filter(Boolean)
-    .join('\n')
-    .trim();
+  const mergedText = compactMergedInboundText(
+    items
+      .map((item) => String(item?.text || '').trim())
+      .filter(Boolean)
+      .join('\n')
+      .trim()
+  );
+  const mergedUserIntentText = compactMergedInboundText(
+    items
+      .map((item) => String(item?.userIntentText || item?.text || '').trim())
+      .filter(Boolean)
+      .join('\n')
+      .trim()
+  );
   const latestMedia = [...items].reverse().find((item) => !!item?.mediaMeta)?.mediaMeta || null;
 
   return {
@@ -12888,6 +12978,9 @@ Importante:
 - Respuestas como "el lunes a las 17", "lunes 17 hs", "a las 17", "el martes" o similares son CONTINUE_APPOINTMENT.
 - "otros horarios", "otro horario", "otra fecha", "otro día", "qué más tenés" u "otras opciones" también son CONTINUE_APPOINTMENT si siguen hablando del turno.
 
+- Si el cliente manda el pedido en varias líneas o en 2 o 3 mensajes cortos seguidos, interpretalo como una sola intención.
+- Si aparece algo como "quiero otro turno para mi hija" y luego abajo manda el servicio, tenés que unirlo mentalmente y resolverlo junto.
+
 Respondé SOLO JSON.`
         },
         {
@@ -14535,15 +14628,13 @@ lastCloseContext.set(waId, {
       msgId: msg.id,
     });
 
-    await sleep(INBOUND_MERGE_MS);
-
-    const mergedInbound = consumeInboundMergeChunk(waId, inboundVersion);
+    const mergedInbound = await waitForInboundMergeSilence(waId, inboundVersion);
     if (!mergedInbound) return;
 
     const mergedTextRaw = String(mergedInbound.text || '').trim();
     const mergedIntentRaw = String(mergedInbound.userIntentText || userIntentText || mergedTextRaw).trim();
-    text = stripSoftConversationPrefix(mergedTextRaw) || mergedTextRaw;
-    userIntentText = stripSoftConversationPrefix(mergedIntentRaw) || mergedIntentRaw || text;
+    text = stripSoftConversationPrefix(compactMergedInboundText(mergedTextRaw)) || compactMergedInboundText(mergedTextRaw) || mergedTextRaw;
+    userIntentText = stripSoftConversationPrefix(compactMergedInboundText(mergedIntentRaw)) || compactMergedInboundText(mergedIntentRaw) || mergedIntentRaw || text;
     mediaMeta = mergedInbound.mediaMeta || mediaMeta || null;
     contactInfoFromText = extractContactInfo(text);
 
