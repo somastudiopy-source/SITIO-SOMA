@@ -6196,9 +6196,16 @@ async function reviewInboundMessageFirstWithAI(text, context = {}) {
     const productDomain = detectProductDomain(raw, detectFurnitureFamily(raw) || detectProductFamily(raw));
     const productFamily = productDomain === 'furniture' ? detectFurnitureFamily(raw) : detectProductFamily(raw);
 
+    const bareAppointmentWithoutService = (
+      looksLikeAppointmentIntent(raw, { pendingDraft: context.pendingDraft || null, lastService: context.lastService || null })
+      && !isExplicitProductIntent(raw)
+      && !isExplicitCourseKeyword(raw)
+      && !hasConcreteServiceSignal(raw)
+    );
+
     const inferredType = explicitCourse.isCourse
       ? 'COURSE'
-      : (fastIntent?.type || (isExplicitProductIntent(raw) ? 'PRODUCT' : (isExplicitServiceIntent(raw) ? 'SERVICE' : 'OTHER')));
+      : (bareAppointmentWithoutService ? 'SERVICE' : (fastIntent?.type || (isExplicitProductIntent(raw) ? 'PRODUCT' : (isExplicitServiceIntent(raw) ? 'SERVICE' : 'OTHER'))));
 
     const followsActiveOffer = !!activeType
       && looksLikeActiveOfferFollowup(raw)
@@ -6226,7 +6233,7 @@ async function reviewInboundMessageFirstWithAI(text, context = {}) {
       mode: explicitCourse.isCourse ? (explicitCourse.mode || 'DETAIL') : (fastIntent?.mode || 'DETAIL'),
       query: explicitCourse.isCourse
         ? (explicitCourse.query || raw)
-        : (fastIntent?.query || raw),
+        : (bareAppointmentWithoutService ? '' : (fastIntent?.query || raw)),
       product_domain: productDomain || '',
       product_family: productFamily || '',
       follows_active_offer: followsActiveOffer,
@@ -6269,6 +6276,9 @@ Reglas:
 - “sí, quiero esa”, “pasame foto”, “precio del primero”, “más info” suelen follows_active_offer=true solo si realmente responden a la última oferta.
 - “barbería” dentro de “sillones de barbería” sigue siendo PRODUCT/furniture, no SERVICE.
 - keep_appointment_flow=true solo si realmente sigue un turno activo con fecha, hora, nombre, teléfono, comprobante o confirmación clara del turno.
+- Si el cliente pide un turno pero todavía no dijo el servicio, interpretalo como SERVICE con query vacía.
+- Si habla de un turno para su hija, hermana, mamá o para otra persona y no dijo el servicio, también interpretalo como SERVICE con query vacía.
+- Si el pedido vino partido en 2 o 3 mensajes cortos, interpretalo como una sola intención.
 - No inventes productos, servicios ni cursos.`,
         },
         {
@@ -8995,11 +9005,16 @@ Reglas:
 - Si el texto NO es un pedido de turno NI una continuación de reserva, ok=false.
 - Si te paso un contexto con datos ya conocidos, mantenelos y completá lo faltante.
 - Si el contexto ya trae servicio y el cliente responde solo con fecha, hora o ambas cosas, eso sigue siendo continuación de turno y ok=true.
+- Si el cliente claramente quiere sacar un turno aunque todavía no diga el servicio, también es ok=true y faltantes debe incluir servicio, fecha y/u hora según corresponda.
+- Mensajes como "quiero un turno", "quiero un turno para mi hija", "quiero un turno para mi hermana", "necesito reservar" o "quiero agendar" siguen siendo pedidos de turno aunque no tengan servicio todavía.
 - Ejemplos de continuación válida con contexto previo:
   - servicio=Alisado + mensaje="el lunes a las 17" => ok=true, fecha y hora completas.
   - servicio=Alisado + mensaje="lunes 17 hs" => ok=true.
   - servicio=Alisado + mensaje="a las 17:30" => ok=true, conservar fecha del contexto si ya existía.
   - servicio=Alisado + mensaje="el lunes" => ok=true, completar fecha y dejar hora faltante.
+- Ejemplos sin servicio todavía:
+  - mensaje="quiero un turno" => ok=true, servicio="", fecha="", hora="", faltantes=["servicio","fecha","hora"]
+  - mensaje="quiero un turno para mi hermana" => ok=true, servicio="", fecha="", hora="", faltantes=["servicio","fecha","hora"]
 `,
       },
       {
@@ -9021,15 +9036,31 @@ Reglas:
     const horaNormalizada = normalizeHourHM((obj.hora || '').trim());
     const fechaInterpretadaPorTexto = extractLikelyDateFromText(text);
     const fechaInterpretadaPorIA = toYMD((obj.fecha || "").trim());
+    const servicioExtraido = (obj.servicio || "").trim();
+    const fechaFinal = fechaInterpretadaPorTexto || fechaInterpretadaPorIA || "";
+    const horaFinal = horaNormalizada;
+    const fallbackTurno = looksLikeBareAppointmentRequest(text) || (!!(ctx?.servicio || '') && (fechaFinal || horaFinal));
+    const okFinal = !!obj.ok || fallbackTurno;
+    const faltantesSet = new Set(
+      Array.isArray(obj.faltantes)
+        ? obj.faltantes.map(x => String(x || "").trim()).filter(Boolean)
+        : []
+    );
+
+    if (okFinal) {
+      if (!servicioExtraido && !(ctx?.servicio || '')) faltantesSet.add('servicio');
+      if (!fechaFinal && !(ctx?.fecha || '')) faltantesSet.add('fecha');
+      if (!horaFinal && !(ctx?.hora || '')) faltantesSet.add('hora');
+    }
 
     return {
-      ok: !!obj.ok,
-      fecha: fechaInterpretadaPorTexto || fechaInterpretadaPorIA || "",
-      hora: horaNormalizada,
+      ok: okFinal,
+      fecha: fechaFinal,
+      hora: horaFinal,
       duracion_min: Number(obj.duracion_min || 60) || 60,
-      servicio: (obj.servicio || "").trim(),
+      servicio: servicioExtraido,
       notas: (obj.notas || "").trim(),
-      faltantes: Array.isArray(obj.faltantes) ? obj.faltantes.map(x => String(x || "").trim()).filter(Boolean) : [],
+      faltantes: Array.from(faltantesSet),
     };
   } catch {
     return { ok: false, fecha: "", hora: "", duracion_min: 60, servicio: "", notas: "", faltantes: [] };
@@ -12858,6 +12889,14 @@ function looksLikeAppointmentIntent(text, { pendingDraft, lastService } = {}) {
   return false;
 }
 
+function looksLikeBareAppointmentRequest(text) {
+  const t = normalize(text || '');
+  if (!t) return false;
+  if (isExplicitProductIntent(text)) return false;
+  if (!/(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b)/i.test(t)) return false;
+  return true;
+}
+
 function isWarmAffirmativeReply(text) {
   const t = normalize(text || '');
   return /^(si|sí|sii+|dale|ok|oka|perfecto|bueno|de una|claro|quiero|quiero turno|quiero reservar|quiero sacar turno)$/i.test(t);
@@ -13181,8 +13220,188 @@ function inferDraftFlowStep(base) {
   return 'ready_to_book';
 }
 
+function cleanAiRoutedText(value = '') {
+  return String(value || '')
+    .replace(/\r/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\s+([,.;:!?])/g, '$1')
+    .trim();
+}
+
+function hasConcreteServiceSignal(text = '') {
+  const t = normalize(text || '');
+  if (!t) return false;
+  return /(alisado|botox|keratina|nutricion|nutrición|corte(?: de pelo)?(?: femenino| femenino)?|mechitas|mechas|reflejos|balayage|color(?: completo)?(?:s)?|tintura|emulsion|emulsión|lavado|brushing|peinado|bano de crema|baño de crema|depilacion|depilación|uñas|unas|manicuria|manicuría|facial|masaje|cejas|pestañas|pestanias|shock de keratina|shock de botox|barberia|barbería|barber)\b/i.test(t);
+}
+
+function isGenericAppointmentOnlyQuery(query = '') {
+  const t = normalize(query || '');
+  if (!t) return true;
+  return /^(turno|turnos|reservar|reserva|agendar|agenda|cita|citas|servicio|servicios|otro turno|quiero un turno|quiero sacar un turno|quiero reservar|mi hija|mi hermana|para mi hija|para mi hermana|para ella|ella|para otra persona|mi mama|mi mamá|mi sobrina|mi esposa|mi senora|mi señora|para mi mama|para mi mamá|para mi esposa)$/i.test(t);
+}
+
+function buildFallbackInboundRoutingText(rawText = '', context = {}) {
+  const raw = cleanAiRoutedText(compactMergedInboundText(rawText));
+  if (!raw) return '';
+
+  const flowStep = String(context?.flowStep || context?.pendingDraft?.flow_step || '').trim();
+  const lastAssistantMessage = normalize(context?.lastAssistantMessage || '');
+  const assistantAskedForService = /(que servicio|qué servicio|cual servicio|cuál servicio|que desea reservar|qué desea reservar|con cual desea sacar turno|con cuál desea sacar turno|primero necesito que me diga que servicio|primero necesito que me diga qué servicio)/i.test(lastAssistantMessage);
+
+  if (
+    hasConcreteServiceSignal(raw)
+    && !isExplicitProductIntent(raw)
+    && (
+      flowStep === 'awaiting_service'
+      || assistantAskedForService
+      || (!!context?.pendingDraft && !context?.pendingDraft?.servicio)
+    )
+  ) {
+    return `quiero sacar un turno para ${raw}`;
+  }
+
+  if (
+    looksLikeAppointmentIntent(raw, {
+      pendingDraft: context?.pendingDraft || null,
+      lastService: context?.lastService || null,
+    })
+    && !isExplicitProductIntent(raw)
+    && !isExplicitCourseKeyword(raw)
+    && !hasConcreteServiceSignal(raw)
+  ) {
+    return 'quiero sacar un turno';
+  }
+
+  return raw;
+}
+
+async function normalizeInboundForRoutingWithAI(rawText, context = {}) {
+  const raw = cleanAiRoutedText(compactMergedInboundText(rawText));
+  if (!raw) {
+    return {
+      routed_text: '',
+      flow_hint: 'OTHER',
+      goal: '',
+      source: 'empty',
+    };
+  }
+
+  const fallbackText = buildFallbackInboundRoutingText(raw, context) || raw;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Tu tarea es NORMALIZAR el mensaje del cliente para el enrutamiento interno del bot.
+
+No respondas como asistente. No redactes una contestación. Solo devolvé JSON.
+
+Claves:
+- routed_text: string
+- flow_hint: SERVICE | PRODUCT | COURSE | OTHER
+- goal: string breve
+
+Reglas:
+- Interpretá el bloque completo como una sola intención, aunque el cliente haya mandado 2 o 3 mensajes cortos separados.
+- Si hay saludo + pedido, quitá el saludo y dejá el pedido.
+- Conservá el significado real. No inventes productos, servicios, cursos, fechas ni nombres.
+- Si el cliente quiere un turno, reservar o agendar pero TODAVÍA NO dijo el servicio, routed_text debe ser exactamente: "quiero sacar un turno".
+- Si dice "quiero un turno para mi hija", "para mi hermana", "para ella" o similar y no dijo el servicio, routed_text debe seguir siendo exactamente: "quiero sacar un turno".
+- Si el cliente sí dijo el servicio dentro del mismo bloque o es clarísimo por el contexto inmediato, routed_text debe quedar como: "quiero sacar un turno para <servicio>".
+- Si ya hay un flujo de turno activo y el mensaje solo aporta fecha, hora, nombre, teléfono, comprobante o una continuación corta, mantené esos datos en routed_text sin inventar nada.
+- Si el mensaje continúa un flujo de curso, producto o servicio, reescribilo de forma corta pero fiel para que el bot lo enrute mejor.
+- Si el mensaje original ya está claro, podés devolverlo casi igual.
+- No conviertas consultas de producto en turnos.
+- No conviertas cursos en turnos.
+- Si el mensaje es solo un saludo, dejalo como saludo.`
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje: raw,
+            flujo_turno_activo: !!context?.pendingDraft,
+            paso_turno_actual: context?.flowStep || context?.pendingDraft?.flow_step || '',
+            servicio_actual: context?.lastServiceName || context?.pendingDraft?.servicio || '',
+            producto_actual: context?.lastProductName || '',
+            curso_actual: context?.lastCourseName || context?.pendingCourseDraft?.curso_nombre || '',
+            hay_contexto_producto: !!context?.hasProductContext,
+            hay_contexto_curso: !!context?.hasCourseContext,
+            ultimo_mensaje_asistente: context?.lastAssistantMessage || '',
+            historial_reciente: context?.historySnippet || '',
+          }),
+        },
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    let routedText = cleanAiRoutedText(obj?.routed_text || '') || fallbackText;
+    const flowHint = String(obj?.flow_hint || 'OTHER').trim().toUpperCase();
+    const goal = cleanAiRoutedText(obj?.goal || '');
+
+    if (
+      looksLikeAppointmentIntent(raw, {
+        pendingDraft: context?.pendingDraft || null,
+        lastService: context?.lastService || null,
+      })
+      && !isExplicitProductIntent(raw)
+      && !isExplicitCourseKeyword(raw)
+      && !hasConcreteServiceSignal(`${raw} ${routedText}`)
+    ) {
+      routedText = 'quiero sacar un turno';
+    }
+
+    if (routedText.length > 240) routedText = fallbackText;
+
+    return {
+      routed_text: routedText || fallbackText || raw,
+      flow_hint: ['SERVICE', 'PRODUCT', 'COURSE', 'OTHER'].includes(flowHint) ? flowHint : 'OTHER',
+      goal,
+      source: 'ai',
+    };
+  } catch {
+    return {
+      routed_text: fallbackText,
+      flow_hint: 'OTHER',
+      goal: '',
+      source: 'fallback',
+    };
+  }
+}
+
 // ===================== INTENCIÓN =====================
 async function classifyAndExtract(text, context = {}) {
+  const raw = String(text || '').trim();
+  const normalizedRaw = normalize(raw);
+  const bareAppointmentWithoutService = (
+    looksLikeAppointmentIntent(raw, {
+      pendingDraft: context?.hasDraft ? (context?.pendingDraft || { servicio: context?.lastServiceName || '' }) : null,
+      lastService: context?.lastServiceName ? { nombre: context.lastServiceName } : null,
+    })
+    && !isExplicitProductIntent(raw)
+    && !isExplicitCourseKeyword(raw)
+    && !hasConcreteServiceSignal(raw)
+  );
+
+  const deterministicFallback = () => {
+    if (bareAppointmentWithoutService) return { type: 'SERVICE', query: '', mode: 'DETAIL' };
+    if (/(curso|cursos|inscrib|capacitacion|capacitación|masterclass|taller)/i.test(normalizedRaw)) {
+      return { type: 'COURSE', query: raw.trim(), mode: 'DETAIL' };
+    }
+    if (/(ampolla|ampollas|secador|secadores|plancha|planchas|camilla|camillas|sillon|sillón|sillones|espejo|espejos|mueble|muebles|equipamiento)/i.test(normalizedRaw)) {
+      return { type: 'PRODUCT', query: raw.trim(), mode: 'DETAIL' };
+    }
+    if (/(cuanto dura|cuánto dura|cuanto demora|cuánto demora|duracion|duración)/i.test(normalizedRaw) && /(shock de keratina|keratina|shock de botox|botox|nutricion|nutrición|alisado)/i.test(normalizedRaw)) {
+      return { type: 'SERVICE', query: raw.trim(), mode: 'DETAIL' };
+    }
+    return { type: 'OTHER', query: '', mode: 'DETAIL' };
+  };
+
   const completion = await openai.chat.completions.create({
     model: PRIMARY_MODEL,
     temperature: 0,
@@ -13210,6 +13429,9 @@ Reglas de negocio:
 - Si el mensaje es genérico y pide opciones, lista, qué tienen o si hay disponible, mode=LIST.
 - Si nombra algo puntual o sigue una conversación ya abierta sobre ese tema, mode=DETAIL.
 - Si hay borrador de turno activo o servicio_actual cargado y el cliente manda fecha, hora, nombre, teléfono, comprobante o una continuación tipo "el lunes a las 17", priorizá SERVICE.
+- Si el cliente pide un turno/reserva/cita pero TODAVÍA NO ACLARÓ el servicio, devolvé type=SERVICE, query="" y mode=DETAIL.
+- Si dice algo como "quiero un turno para mi hija", "para mi hermana", "para ella" o similar y no dijo el servicio, también devolvé type=SERVICE, query="" y mode=DETAIL.
+- Si el mensaje fue armado con 2 o 3 fragmentos cortos seguidos, interpretalo como una sola consulta.
 
 Tené en cuenta el contexto previo:
 - servicio_actual: si existe, mensajes como "quiero el turno", "dale", "quiero ese", "bien" suelen referirse a ese servicio.
@@ -13230,6 +13452,7 @@ Ejemplos:
 - "precio del espejo led" => PRODUCT + DETAIL
 - "qué servicios hacen" => SERVICE + LIST
 - "quiero turno para corte" => SERVICE + DETAIL
+- "quiero un turno para mi hija" => SERVICE + query "" + DETAIL
 - "precio del alisado" => OTHER
 - "tienen ampollas para el pelo" => PRODUCT + query "ampollas" + LIST
 - "cual es la mejor ampolla para reparacion profunda" => PRODUCT + query "ampolla reparacion" + DETAIL
@@ -13244,7 +13467,7 @@ Respondé SOLO JSON.`
       {
         role: "user",
         content: JSON.stringify({
-          mensaje: text,
+          mensaje: raw,
           servicio_actual: context.lastServiceName || "",
           producto_actual: context.lastProductName || "",
           producto_contexto_activo: !!context.hasProductContext,
@@ -13266,34 +13489,40 @@ Respondé SOLO JSON.`
 
   try {
     const obj = JSON.parse(completion.choices[0].message.content);
-    const rawType = obj.type || "OTHER";
-    const rawQuery = (obj.query || "").trim();
-    const rawMode = obj.mode || "DETAIL";
-    const t = normalize(text || '');
+    const rawType = String(obj.type || "OTHER").trim().toUpperCase();
+    let rawQuery = String(obj.query || "").trim();
+    const rawMode = String(obj.mode || "DETAIL").trim().toUpperCase() === 'LIST' ? 'LIST' : 'DETAIL';
 
-    if (/(curso|cursos|inscrib|capacitacion|capacitación|masterclass|taller)/i.test(t)) {
-      return { type: 'COURSE', query: rawQuery || text.trim(), mode: rawMode || 'DETAIL' };
+    if (bareAppointmentWithoutService) {
+      return { type: 'SERVICE', query: '', mode: 'DETAIL' };
     }
 
-    if (/(ampolla|ampollas|secador|secadores|plancha|planchas|camilla|camillas|sillon|sillón|sillones|espejo|espejos|mueble|muebles|equipamiento)/i.test(t) && rawType !== 'COURSE') {
-      return { type: 'PRODUCT', query: rawQuery || text.trim(), mode: rawMode || 'DETAIL' };
+    if (/(curso|cursos|inscrib|capacitacion|capacitación|masterclass|taller)/i.test(normalizedRaw)) {
+      return { type: 'COURSE', query: rawQuery || raw.trim(), mode: rawMode || 'DETAIL' };
     }
 
-    if (/(cuanto dura|cuánto dura|cuanto demora|cuánto demora|duracion|duración)/i.test(t) && /(shock de keratina|keratina|shock de botox|botox|nutricion|nutrición|alisado)/i.test(t)) {
-      return { type: 'SERVICE', query: rawQuery || text.trim(), mode: 'DETAIL' };
+    if (/(ampolla|ampollas|secador|secadores|plancha|planchas|camilla|camillas|sillon|sillón|sillones|espejo|espejos|mueble|muebles|equipamiento)/i.test(normalizedRaw) && rawType !== 'COURSE') {
+      return { type: 'PRODUCT', query: rawQuery || raw.trim(), mode: rawMode || 'DETAIL' };
+    }
+
+    if (/(cuanto dura|cuánto dura|cuanto demora|cuánto demora|duracion|duración)/i.test(normalizedRaw) && /(shock de keratina|keratina|shock de botox|botox|nutricion|nutrición|alisado)/i.test(normalizedRaw)) {
+      return { type: 'SERVICE', query: rawQuery || raw.trim(), mode: 'DETAIL' };
+    }
+
+    if (rawType === 'SERVICE' && isGenericAppointmentOnlyQuery(rawQuery) && looksLikeAppointmentIntent(raw, {
+      pendingDraft: context?.hasDraft ? (context?.pendingDraft || { servicio: context?.lastServiceName || '' }) : null,
+      lastService: context?.lastServiceName ? { nombre: context.lastServiceName } : null,
+    })) {
+      rawQuery = '';
     }
 
     return {
-      type: rawType,
+      type: ['PRODUCT', 'SERVICE', 'COURSE', 'OTHER'].includes(rawType) ? rawType : 'OTHER',
       query: rawQuery,
       mode: rawMode,
     };
   } catch {
-    const t = normalize(text || '');
-    if (/(curso|cursos|inscrib|capacitacion|capacitación|masterclass|taller)/i.test(t)) return { type: 'COURSE', query: text.trim(), mode: 'DETAIL' };
-    if (/(ampolla|ampollas|secador|secadores|plancha|planchas|camilla|camillas|sillon|sillón|sillones|espejo|espejos|mueble|muebles|equipamiento)/i.test(t)) return { type: 'PRODUCT', query: text.trim(), mode: 'DETAIL' };
-    if (/(cuanto dura|cuánto dura|cuanto demora|cuánto demora|duracion|duración)/i.test(t) && /(shock de keratina|keratina|shock de botox|botox|nutricion|nutrición|alisado)/i.test(t)) return { type: 'SERVICE', query: text.trim(), mode: 'DETAIL' };
-    return { type: "OTHER", query: "", mode: "DETAIL" };
+    return deterministicFallback();
   }
 }
 
@@ -14738,7 +14967,36 @@ lastCloseContext.set(waId, {
       updateLastCloseContext(waId, { explicitName: explicitNameAnswer, profileName: name || explicitNameAnswer });
     }
 
-    pushHistory(waId, "user", text);
+    const rawInboundTextForHistory = compactMergedInboundText(text || userIntentText || '');
+    const routingPendingDraft = await getAppointmentDraft(waId);
+    const routingPendingCourseDraft = await getCourseEnrollmentDraft(waId);
+    const routingLastService = getLastKnownService(waId, routingPendingDraft);
+    const routingLastCourseContext = getLastCourseContext(waId);
+    const routingLastProductContext = getLastProductContext(waId);
+    const routingHistorySnippet = buildConversationHistorySnippet(ensureConv(waId).messages || [], 14, 1800);
+    const inboundRouting = await normalizeInboundForRoutingWithAI(userIntentText || text, {
+      pendingDraft: routingPendingDraft,
+      pendingCourseDraft: routingPendingCourseDraft,
+      flowStep: routingPendingDraft?.flow_step || '',
+      lastService: routingLastService,
+      lastServiceName: routingLastService?.nombre || '',
+      lastCourseContext: routingLastCourseContext,
+      lastCourseName: routingLastCourseContext?.selectedName || routingLastCourseContext?.query || routingPendingCourseDraft?.curso_nombre || '',
+      lastProductName: lastProductByUser.get(waId)?.nombre || '',
+      hasProductContext: !!routingLastProductContext,
+      hasCourseContext: !!routingLastCourseContext,
+      lastAssistantMessage: getLastAssistantMessage(waId)?.content || '',
+      historySnippet: routingHistorySnippet,
+    });
+
+    const routedInboundText = cleanAiRoutedText(inboundRouting?.routed_text || '');
+    if (routedInboundText) {
+      text = routedInboundText;
+      userIntentText = routedInboundText;
+      updateLastCloseContext(waId, { lastUserText: routedInboundText });
+    }
+
+    pushHistory(waId, "user", rawInboundTextForHistory || text);
 
     const activeOfferForReview = getActiveAssistantOffer(waId);
     if (activeOfferForReview && !looksLikeDifferentTopicThanActiveBroadcast(text, activeOfferForReview) && (looksLikeActiveOfferFollowup(text) || isAmbiguousBroadcastFollowup(text))) {
@@ -15944,7 +16202,7 @@ Seña recibida ✔`.trim();
 
       const relativeTurno = resolveRelativeTurnoReference(text, { pendingDraft, lastBooked: lastBookedTurno });
 
-      if (turno?.ok || pendingDraft || lastKnownService || (isWarmAffirmativeReply(text) && lastKnownService) || relativeTurno?.fecha || relativeTurno?.hora) {
+      if (turno?.ok || looksLikeBareAppointmentRequest(text) || pendingDraft || lastKnownService || (isWarmAffirmativeReply(text) && lastKnownService) || relativeTurno?.fecha || relativeTurno?.hora) {
         const servicesForTurn = await getServicesCatalog();
         const reliableTurnService = resolveReliableTurnService({
           services: servicesForTurn,
@@ -16804,6 +17062,37 @@ Si después necesita algo, estoy acá ✨`;
         await sendWhatsAppText(phone, replyCatalog);
         // ✅ INACTIVIDAD
         scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+
+      const wantsTurnButDidNotSayService = looksLikeBareAppointmentRequest(text) && !reliableServiceQuery && !matches.length;
+      if (wantsTurnButDidNotSayService) {
+        const baseTurno = {
+          ...(pendingDraft || {}),
+          appointment_id: pendingDraft?.appointment_id || null,
+          availability_mode: normalizeAvailabilityMode(pendingDraft?.availability_mode || (textRequestsSiestaAvailability(text) ? 'siesta' : 'commercial')),
+          servicio: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
+          duracion_min: Number(pendingDraft?.duracion_min || 60) || 60,
+          fecha: toYMD(pendingDraft?.fecha || ''),
+          hora: normalizeHourHM(pendingDraft?.hora || ''),
+          notas: pendingDraft?.notas || '',
+          cliente_full: pendingDraft?.cliente_full || '',
+          telefono_contacto: normalizePhone(pendingDraft?.telefono_contacto || ''),
+          payment_status: pendingDraft?.payment_status || 'not_paid',
+          payment_amount: pendingDraft?.payment_amount ?? null,
+          payment_sender: pendingDraft?.payment_sender || '',
+          payment_receiver: pendingDraft?.payment_receiver || '',
+          payment_proof_text: pendingDraft?.payment_proof_text || '',
+          payment_proof_media_id: pendingDraft?.payment_proof_media_id || '',
+          payment_proof_filename: pendingDraft?.payment_proof_filename || '',
+          awaiting_contact: !!pendingDraft?.awaiting_contact,
+          flow_step: pendingDraft?.flow_step || '',
+          last_intent: 'book_appointment',
+          last_service_name: pendingDraft?.last_service_name || '',
+        };
+        await saveAppointmentDraft(waId, phone, baseTurno);
+        updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+        await askForMissingTurnoData(baseTurno);
         return;
       }
 
