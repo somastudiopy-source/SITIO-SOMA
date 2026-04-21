@@ -8225,15 +8225,8 @@ async function notifyStylistTurnConfirmed(apptRow) {
   });
 
   if (!proofForwarded && (appt.payment_proof_text || appt.payment_sender || appt.payment_receiver)) {
-    const fallbackLines = [
-      buildAppointmentProofCaption(appt),
-      appt.payment_sender ? `Pagador: ${appt.payment_sender}` : '',
-      appt.payment_receiver ? `Titular detectado: ${appt.payment_receiver}` : '',
-      appt.payment_proof_text ? `Texto detectado: ${String(appt.payment_proof_text || '').slice(0, 1500)}` : '',
-    ].filter(Boolean);
-
     try {
-      await sendWhatsAppText(recipient, fallbackLines.join('\n\n'));
+      await sendWhatsAppText(recipient, 'Comprobante enviado');
     } catch (e) {
       console.error('❌ Error enviando fallback de comprobante del turno a la peluquera:', e?.response?.data || e?.message || e);
     }
@@ -13513,14 +13506,7 @@ function buildCourseProofCaption(enrollment = {}) {
 }
 
 function buildAppointmentProofCaption(appt = {}) {
-  return [
-    'Comprobante de seña recibido',
-    appt.client_name ? `Cliente: ${String(appt.client_name || '').trim()}` : '',
-    appt.service_name ? `Servicio: ${String(appt.service_name || '').trim()}` : '',
-    appt.appointment_date ? `Día: ${formatAppointmentDateForTemplate(appt.appointment_date)}` : '',
-    appt.appointment_time ? `Hora: ${formatAppointmentTimeForTemplate(appt.appointment_time)}` : '',
-    'Estado: comprobante recibido',
-  ].filter(Boolean).join('\n');
+  return 'Comprobante enviado';
 }
 
 function guessMimeTypeFromFilename(filename = '') {
