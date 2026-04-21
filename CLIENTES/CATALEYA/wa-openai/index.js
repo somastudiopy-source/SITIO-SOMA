@@ -9073,19 +9073,41 @@ function getUpcomingTurnoDays(limit = 6) {
   return out;
 }
 
+const TURNO_MIN_ADVANCE_HOURS = Math.max(0, Number(process.env.TURNO_MIN_ADVANCE_HOURS || 5));
+const TURNOS_SAME_DAY_CUTOFF_HOUR = Math.max(0, Number(process.env.TURNOS_SAME_DAY_CUTOFF_HOUR || 17));
+
+function getTurnoMinAllowedStart() {
+  const nowLocal = formatYMDHMInTZ(new Date());
+  const nowHour = Number(String(nowLocal.hm || '00:00').slice(0, 2)) || 0;
+
+  if (nowHour >= TURNOS_SAME_DAY_CUTOFF_HOUR) {
+    return { ymd: addDaysToYMD(nowLocal.ymd, 1), hm: '00:00' };
+  }
+
+  return addMinutesToYMDHM(
+    { ymd: nowLocal.ymd, hm: nowLocal.hm },
+    TURNO_MIN_ADVANCE_HOURS * 60
+  );
+}
+
 function getAvailableSlotsForDate({ dateYMD, durationMin, events = [], availabilityMode = 'commercial' }) {
   const safeDate = toYMD(dateYMD);
   const safeDuration = Math.max(30, Number(durationMin) || 60);
   if (!safeDate || isSundayYMD(safeDate) || safeDate < todayYMDInTZ()) return [];
 
   const nowLocal = formatYMDHMInTZ(new Date());
-  const nowMinutes = safeDate === nowLocal.ymd ? hmToMinutes(nowLocal.hm) : -1;
+  const minAllowed = getTurnoMinAllowedStart();
+  const minAllowedMinutesSameDay = minAllowed.ymd === safeDate ? hmToMinutes(minAllowed.hm) : NaN;
   const slots = [];
 
   for (const hm of getTurnoAllowedStartTimes(availabilityMode)) {
     const slotMinutes = hmToMinutes(hm);
     if (Number.isNaN(slotMinutes)) continue;
-    if (safeDate === nowLocal.ymd && nowMinutes >= 0 && slotMinutes <= nowMinutes) continue;
+
+    if (safeDate === nowLocal.ymd) {
+      if (minAllowed.ymd !== safeDate) continue;
+      if (slotMinutes < minAllowedMinutesSameDay) continue;
+    }
 
     const block = getTurnoAllowedBlocks(availabilityMode).find((item) => {
       const start = hmToMinutes(item.start);
@@ -9114,14 +9136,17 @@ function isPastAppointmentDateTime(dateYMD, timeHM) {
   const safeDate = toYMD(dateYMD);
   if (!safeDate) return false;
 
-  const nowLocal = formatYMDHMInTZ(new Date());
-  if (safeDate < nowLocal.ymd) return true;
-  if (safeDate > nowLocal.ymd) return false;
-
   const safeHM = normalizeHourHM(timeHM);
   if (!safeHM) return false;
 
-  return hmToMinutes(safeHM) <= hmToMinutes(nowLocal.hm);
+  const nowLocal = formatYMDHMInTZ(new Date());
+  const minAllowed = getTurnoMinAllowedStart();
+
+  if (safeDate < nowLocal.ymd) return true;
+  if (safeDate < minAllowed.ymd) return true;
+  if (safeDate > minAllowed.ymd) return false;
+
+  return hmToMinutes(safeHM) < hmToMinutes(minAllowed.hm);
 }
 
 function formatSlotsByBlock(slots = [], availabilityMode = 'commercial') {
