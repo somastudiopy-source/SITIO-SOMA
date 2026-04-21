@@ -6802,6 +6802,9 @@ const TURNOS_ALLOWED_BLOCKS_SIESTA = [
 ];
 const TURNOS_ALLOWED_START_TIMES_COMMERCIAL = ["10:00", "11:00", "12:00", "17:00", "18:00", "19:00", "20:00"];
 const TURNOS_ALLOWED_START_TIMES_SIESTA = ["14:00", "15:00", "16:00"];
+const TURNO_MIN_ADVANCE_HOURS = Math.max(0, Number(process.env.TURNO_MIN_ADVANCE_HOURS || 5) || 5);
+const TURNOS_CUTOFF_NEXT_DAY_HOUR = Math.max(0, Number(process.env.TURNOS_CUTOFF_NEXT_DAY_HOUR || 17) || 17);
+const TURNOS_AVAILABILITY_SLOT_OCCUPANCY_MIN = Math.max(30, Number(process.env.TURNOS_AVAILABILITY_SLOT_OCCUPANCY_MIN || 60) || 60);
 
 function normalizeAvailabilityMode(mode) {
   return String(mode || '').trim().toLowerCase() === 'siesta' ? 'siesta' : 'commercial';
@@ -6829,6 +6832,22 @@ function textRequestsSiestaAvailability(text = '') {
   const t = normalize(text || '');
   if (!t) return false;
   return /(ninguno de esos horarios|ninguno me sirve|no me sirve ninguno|no me sirven esos horarios|no puedo en esos horarios|no puedo ni a la manana ni a la tarde|no puedo ni a la mañana ni a la tarde|tenes a la siesta|tenes horario de siesta|tienen horario de siesta|siesta|14 hs|15 hs|16 hs|a las 14|a las 15|a las 16)/i.test(t);
+}
+
+function getTurnoMinAllowedStart() {
+  const nowLocal = formatYMDHMInTZ(new Date());
+
+  if ((Number(nowLocal.hour) || 0) >= TURNOS_CUTOFF_NEXT_DAY_HOUR) {
+    return {
+      ymd: addDaysToYMD(nowLocal.ymd, 1),
+      hm: '00:00',
+    };
+  }
+
+  return addMinutesToYMDHM(
+    { ymd: nowLocal.ymd, hm: nowLocal.hm },
+    TURNO_MIN_ADVANCE_HOURS * 60,
+  );
 }
 
 function buildCommercialHoursBridge() {
@@ -9073,32 +9092,15 @@ function getUpcomingTurnoDays(limit = 6) {
   return out;
 }
 
-const TURNO_MIN_ADVANCE_HOURS = Math.max(0, Number(process.env.TURNO_MIN_ADVANCE_HOURS || 5));
-const TURNOS_SAME_DAY_CUTOFF_HOUR = Math.max(0, Number(process.env.TURNOS_SAME_DAY_CUTOFF_HOUR || 17));
-
-function getTurnoMinAllowedStart() {
-  const nowLocal = formatYMDHMInTZ(new Date());
-  const nowHour = Number(String(nowLocal.hm || '00:00').slice(0, 2)) || 0;
-
-  if (nowHour >= TURNOS_SAME_DAY_CUTOFF_HOUR) {
-    return { ymd: addDaysToYMD(nowLocal.ymd, 1), hm: '00:00' };
-  }
-
-  return addMinutesToYMDHM(
-    { ymd: nowLocal.ymd, hm: nowLocal.hm },
-    TURNO_MIN_ADVANCE_HOURS * 60
-  );
-}
-
 function getAvailableSlotsForDate({ dateYMD, durationMin, events = [], availabilityMode = 'commercial' }) {
   const safeDate = toYMD(dateYMD);
-  const safeDuration = Math.max(30, Number(durationMin) || 60);
   if (!safeDate || isSundayYMD(safeDate) || safeDate < todayYMDInTZ()) return [];
 
   const nowLocal = formatYMDHMInTZ(new Date());
   const minAllowed = getTurnoMinAllowedStart();
   const minAllowedMinutesSameDay = minAllowed.ymd === safeDate ? hmToMinutes(minAllowed.hm) : NaN;
   const slots = [];
+  const previewOccupancyMin = Math.max(30, Number(TURNOS_AVAILABILITY_SLOT_OCCUPANCY_MIN || 60) || 60);
 
   for (const hm of getTurnoAllowedStartTimes(availabilityMode)) {
     const slotMinutes = hmToMinutes(hm);
@@ -9106,7 +9108,7 @@ function getAvailableSlotsForDate({ dateYMD, durationMin, events = [], availabil
 
     if (safeDate === nowLocal.ymd) {
       if (minAllowed.ymd !== safeDate) continue;
-      if (slotMinutes < minAllowedMinutesSameDay) continue;
+      if (!Number.isNaN(minAllowedMinutesSameDay) && slotMinutes < minAllowedMinutesSameDay) continue;
     }
 
     const block = getTurnoAllowedBlocks(availabilityMode).find((item) => {
@@ -9116,12 +9118,12 @@ function getAvailableSlotsForDate({ dateYMD, durationMin, events = [], availabil
     });
     if (!block) continue;
 
-    if ((slotMinutes + safeDuration) > hmToMinutes(block.end)) continue;
+    if ((slotMinutes + previewOccupancyMin) > hmToMinutes(block.end)) continue;
 
     const hasConflict = events.some((ev) => eventOverlapsSlot(ev, {
       dateYMD: safeDate,
       startHM: hm,
-      durationMin: safeDuration,
+      durationMin: previewOccupancyMin,
     }));
 
     if (!hasConflict) {
@@ -12732,7 +12734,7 @@ function looksLikeAppointmentContextFollowUp(text, { pendingDraft, lastService }
   if (isExplicitProductIntent(text)) return false;
 
   const t = normalize(text || '');
-  return /(?:\blunes\b|\bmartes\b|\bmiercoles\b|\bmiércoles\b|\bjueves\b|\bviernes\b|\bsabado\b|\bsábado\b|\bdomingo\b|\bhoy\b|\bmañana\b|\bpasado\s+mañana\b|\bproximo\b|\bpróximo\b|\bel\s+dia\b|\bel\s+día\b|\by\s+el\b|\bque\s+horarios\b|\bqué\s+horarios\b|\bque\s+disponibilidad\b|\bqué\s+disponibilidad\b|\btenes\s+lugar\b|\btenés\s+lugar\b|\bdisponible\b|\bdisponibilidad\b|\ba\s+la\s+mañana\b|\bpor\s+la\s+mañana\b|\ba\s+la\s+tarde\b|\bpor\s+la\s+tarde\b|\b\d{1,2}[:.]\d{2}\b|\b\d{1,2}\s*(?:hs|horas?)\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b)/i.test(t);
+  return /(?:\blunes\b|\bmartes\b|\bmiercoles\b|\bmiércoles\b|\bjueves\b|\bviernes\b|\bsabado\b|\bsábado\b|\bdomingo\b|\bhoy\b|\bmañana\b|\bpasado\s+mañana\b|\bproximo\b|\bpróximo\b|\bel\s+dia\b|\bel\s+día\b|\by\s+el\b|\bque\s+horarios\b|\bqué\s+horarios\b|\botros?\s+horarios\b|\botro\s+horario\b|\bmas\s+horarios\b|\bmás\s+horarios\b|\botras?\s+opciones\b|\botra\s+fecha\b|\botro\s+dia\b|\botro\s+día\b|\bque\s+disponibilidad\b|\bqué\s+disponibilidad\b|\btenes\s+lugar\b|\btenés\s+lugar\b|\bdisponible\b|\bdisponibilidad\b|\ba\s+la\s+mañana\b|\bpor\s+la\s+mañana\b|\ba\s+la\s+tarde\b|\bpor\s+la\s+tarde\b|\b\d{1,2}[:.]\d{2}\b|\b\d{1,2}\s*(?:hs|horas?)\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b)/i.test(t);
 }
 
 function looksLikeAppointmentIntent(text, { pendingDraft, lastService } = {}) {
@@ -12805,6 +12807,15 @@ async function classifyAppointmentDraftControl(text, context = {}) {
   const rawPhone = sanitizePossiblePhone(raw);
   const hasName = !!(contactInfo.nombre || cleanFullName);
   const hasPhone = !!(contactInfo.telefono || rawPhone);
+  const contextHasTurnoSignals = looksLikeAppointmentContextFollowUp(raw, {
+    pendingDraft: {
+      servicio: context.serviceName || '',
+      fecha: context.date || '',
+      hora: context.time || '',
+      flow_step: flowStep,
+    },
+    lastService: context.serviceName ? { nombre: context.serviceName } : null,
+  });
 
   if (flowStep === 'awaiting_name' && hasName) {
     return { action: 'CONTINUE_APPOINTMENT', reason: 'provided_name', source: 'deterministic' };
@@ -12820,6 +12831,10 @@ async function classifyAppointmentDraftControl(text, context = {}) {
 
   if (flowStep === 'ready_to_book' && (hasName || hasPhone || isLikelyPaymentText(raw))) {
     return { action: 'CONTINUE_APPOINTMENT', reason: 'provided_completion_data', source: 'deterministic' };
+  }
+
+  if (contextHasTurnoSignals) {
+    return { action: 'CONTINUE_APPOINTMENT', reason: 'turno_followup', source: 'deterministic' };
   }
 
   try {
@@ -12849,6 +12864,7 @@ Importante:
 - Si manda fecha, hora, nombre, teléfono o comprobante, casi siempre es CONTINUE_APPOINTMENT.
 - Si el flujo está esperando nombre o teléfono, respuestas como "María Tolaba", "Juan Pérez" o un número de celular son CONTINUE_APPOINTMENT.
 - Respuestas como "el lunes a las 17", "lunes 17 hs", "a las 17", "el martes" o similares son CONTINUE_APPOINTMENT.
+- "otros horarios", "otro horario", "otra fecha", "otro día", "qué más tenés" u "otras opciones" también son CONTINUE_APPOINTMENT si siguen hablando del turno.
 
 Respondé SOLO JSON.`
         },
