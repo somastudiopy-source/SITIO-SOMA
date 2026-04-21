@@ -14493,6 +14493,14 @@ async function maybeSendMultipleProductPhotos(phone, products, userText) {
   return sentCount > 0 || missing.length > 0 || failed.length > 0;
 }
 
+function hasPhotoableProductRows(rows) {
+  if (!Array.isArray(rows) || !rows.length) return false;
+  return rows.some((row) => {
+    const foto = String(row?.foto || row?.Foto || row?.imagen || row?.image || '').trim();
+    return !!extractDriveFileId(foto);
+  });
+}
+
 async function trySendExceptionalProductPhotos(phone, products, { domain = '', family = '', query = '' } = {}) {
   const selected = selectAutoPhotoExceptionalRows(products, { domain, family, query });
   if (!selected.length) return { attempted: false, handled: false, sentCount: 0, missing: [], failed: [] };
