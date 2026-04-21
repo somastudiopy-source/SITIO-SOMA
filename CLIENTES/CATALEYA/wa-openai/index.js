@@ -14334,11 +14334,26 @@ app.get("/webhook", (req, res) => {
 });
 
 // ===================== HEALTH =====================
+const startupState = {
+  listenStartedAt: null,
+  initStartedAt: null,
+  initFinishedAt: null,
+  initReady: false,
+  initError: "",
+};
+
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
     timeAR: nowARString(),
     tmpDir: getTmpDir(),
+    startup: {
+      listenStartedAt: startupState.listenStartedAt,
+      initStartedAt: startupState.initStartedAt,
+      initFinishedAt: startupState.initFinishedAt,
+      initReady: startupState.initReady,
+      initError: startupState.initError || null,
+    },
     models: { primary: PRIMARY_MODEL, complex: COMPLEX_MODEL, transcribe: TRANSCRIBE_MODEL },
     hubspot: { enabled: hasHubSpotEnabled(), endOfDayTracking: ENABLE_END_OF_DAY_TRACKING },
     googleContacts: {
@@ -17076,77 +17091,99 @@ if (ENABLE_BIRTHDAY_MESSAGES) {
 // ===================== START =====================
 const PORT = process.env.PORT || 3000;
 
-(async () => {
-  await ensureDb();
-  await ensureAppointmentTables();
-  await ensureCourseEnrollmentTables();
-  await ensureCommercialFollowupTables();
-  await ensureBirthdayMessageTables();
-  await ensureBroadcastTables();
-  console.log(hasHubSpotEnabled()
-    ? "✅ HubSpot CRM habilitado para seguimiento al cierre de charla"
-    : "⚠️ HubSpot CRM no configurado: falta HUBSPOT_ACCESS_TOKEN / HUBSPOT_TOKEN");
-  console.log(ENABLE_END_OF_DAY_TRACKING
-    ? "ℹ️ Seguimiento de medianoche activado"
-    : "ℹ️ Seguimiento de medianoche desactivado (se usa cierre por inactividad)");
-  console.log(ENABLE_APPOINTMENT_TEMPLATES
-    ? "ℹ️ Plantillas de turnos activadas"
-    : "ℹ️ Plantillas de turnos desactivadas temporalmente");
-  console.log(`ℹ️ Vencimiento de respuesta de peluquera: ${Math.round(STYLIST_CONFIRMATION_TIMEOUT_MS / 3600000)} hs`);
-  console.log(`ℹ️ Vencimiento de respuesta de responsable de cursos: ${Math.round(COURSE_MANAGER_CONFIRMATION_TIMEOUT_MS / 3600000)} hs`);
-  console.log(ENABLE_COMMERCIAL_FOLLOWUPS
-    ? "ℹ️ Follow-up comercial activado"
-    : "ℹ️ Follow-up comercial desactivado");
-  console.log(ENABLE_BIRTHDAY_MESSAGES
-    ? "ℹ️ Mensajes de cumpleaños activados"
-    : "ℹ️ Mensajes de cumpleaños desactivados");
-  console.log(ENABLE_DAILY_BROADCAST
-    ? (broadcastExcelExists()
-        ? `ℹ️ Difusión diaria activada con Excel cargado en: ${BROADCAST_EXCEL_PATH} | horario 09:00 a 22:00`
-        : 'ℹ️ Difusión diaria lista pero sin Excel cargado todavía. Subilo en https://bot-cataleya.onrender.com/broadcast/panel')
-    : "ℹ️ Difusión diaria desactivada");
-  console.log(hasGoogleContactsSyncEnabled()
-    ? `ℹ️ Google Contacts sincronizado en ${GOOGLE_CONTACTS_TARGETS.map((x) => x.email).join(' y ')}`
-    : "ℹ️ Google Contacts no configurado para sincronización automática");
-  if (ENABLE_APPOINTMENT_TEMPLATES) {
-    await processAppointmentTemplateNotifications().catch((e) => {
-      console.error('❌ Error inicial procesando plantillas de turnos:', e?.response?.data || e?.message || e);
-    });
-    await processAppointmentResponseTimeouts().catch((e) => {
-      console.error('❌ Error inicial procesando vencimientos de turnos:', e?.response?.data || e?.message || e);
-    });
-    await processCourseManagerApprovalTimeouts().catch((e) => {
-      console.error('❌ Error inicial procesando vencimientos de cursos:', e?.response?.data || e?.message || e);
-    });
-  }
-  if (ENABLE_COMMERCIAL_FOLLOWUPS) {
-    await processCommercialFollowups().catch((e) => {
-      console.error('❌ Error inicial procesando follow-up comercial:', e?.response?.data || e?.message || e);
-    });
-  }
-  if (ENABLE_BIRTHDAY_MESSAGES) {
-    await processBirthdayMessages().catch((e) => {
-      console.error('❌ Error inicial procesando cumpleaños:', e?.response?.data || e?.message || e);
-    });
-  }
-  if (ENABLE_DAILY_BROADCAST && BROADCAST_AUTO_IMPORT_ON_START) {
-    await ensureBroadcastCampaignLoaded({
-      campaignName: BROADCAST_CAMPAIGN_NAME,
-      excelPath: BROADCAST_EXCEL_PATH,
-      offerType: BROADCAST_OFFER_TYPE,
-      offerItems: BROADCAST_OFFER_ITEMS,
-      offerSelectedName: BROADCAST_OFFER_SELECTED_NAME,
-    }).catch((e) => {
-      console.error('❌ Error inicial preparando difusión diaria:', e?.response?.data || e?.message || e);
-    });
-    await processBroadcastQueue().catch((e) => {
-      console.error('❌ Error inicial procesando difusión diaria:', e?.response?.data || e?.message || e);
-    });
-  }
+app.listen(PORT, () => {
+  startupState.listenStartedAt = new Date().toISOString();
+  console.log("🚀 Bot de estética activo");
+  console.log(`Webhook: http://localhost:${PORT}/webhook`);
+  console.log(`Health:  http://localhost:${PORT}/health`);
+  console.log("ℹ️ Puerto abierto primero para que Render detecte el servicio a tiempo");
+});
 
-  app.listen(PORT, () => {
-    console.log("🚀 Bot de estética activo");
-    console.log(`Webhook: http://localhost:${PORT}/webhook`);
-    console.log(`Health:  http://localhost:${PORT}/health`);
-  });
+(async () => {
+  startupState.initStartedAt = new Date().toISOString();
+
+  try {
+    await ensureDb();
+    await ensureAppointmentTables();
+    await ensureCourseEnrollmentTables();
+    await ensureCommercialFollowupTables();
+    await ensureBirthdayMessageTables();
+    await ensureBroadcastTables();
+
+    console.log(hasHubSpotEnabled()
+      ? "✅ HubSpot CRM habilitado para seguimiento al cierre de charla"
+      : "⚠️ HubSpot CRM no configurado: falta HUBSPOT_ACCESS_TOKEN / HUBSPOT_TOKEN");
+    console.log(ENABLE_END_OF_DAY_TRACKING
+      ? "ℹ️ Seguimiento de medianoche activado"
+      : "ℹ️ Seguimiento de medianoche desactivado (se usa cierre por inactividad)");
+    console.log(ENABLE_APPOINTMENT_TEMPLATES
+      ? "ℹ️ Plantillas de turnos activadas"
+      : "ℹ️ Plantillas de turnos desactivadas temporalmente");
+    console.log(`ℹ️ Vencimiento de respuesta de peluquera: ${Math.round(STYLIST_CONFIRMATION_TIMEOUT_MS / 3600000)} hs`);
+    console.log(`ℹ️ Vencimiento de respuesta de responsable de cursos: ${Math.round(COURSE_MANAGER_CONFIRMATION_TIMEOUT_MS / 3600000)} hs`);
+    console.log(ENABLE_COMMERCIAL_FOLLOWUPS
+      ? "ℹ️ Follow-up comercial activado"
+      : "ℹ️ Follow-up comercial desactivado");
+    console.log(ENABLE_BIRTHDAY_MESSAGES
+      ? "ℹ️ Mensajes de cumpleaños activados"
+      : "ℹ️ Mensajes de cumpleaños desactivados");
+    console.log(ENABLE_DAILY_BROADCAST
+      ? (broadcastExcelExists()
+          ? `ℹ️ Difusión diaria activada con Excel cargado en: ${BROADCAST_EXCEL_PATH} | horario 09:00 a 22:00`
+          : 'ℹ️ Difusión diaria lista pero sin Excel cargado todavía. Subilo en https://bot-cataleya.onrender.com/broadcast/panel')
+      : "ℹ️ Difusión diaria desactivada");
+    console.log(hasGoogleContactsSyncEnabled()
+      ? `ℹ️ Google Contacts sincronizado en ${GOOGLE_CONTACTS_TARGETS.map((x) => x.email).join(' y ')}`
+      : "ℹ️ Google Contacts no configurado para sincronización automática");
+
+    if (ENABLE_APPOINTMENT_TEMPLATES) {
+      await processAppointmentTemplateNotifications().catch((e) => {
+        console.error('❌ Error inicial procesando plantillas de turnos:', e?.response?.data || e?.message || e);
+      });
+      await processAppointmentResponseTimeouts().catch((e) => {
+        console.error('❌ Error inicial procesando vencimientos de turnos:', e?.response?.data || e?.message || e);
+      });
+      await processCourseManagerApprovalTimeouts().catch((e) => {
+        console.error('❌ Error inicial procesando vencimientos de cursos:', e?.response?.data || e?.message || e);
+      });
+    }
+
+    if (ENABLE_COMMERCIAL_FOLLOWUPS) {
+      await processCommercialFollowups().catch((e) => {
+        console.error('❌ Error inicial procesando follow-up comercial:', e?.response?.data || e?.message || e);
+      });
+    }
+
+    if (ENABLE_BIRTHDAY_MESSAGES) {
+      await processBirthdayMessages().catch((e) => {
+        console.error('❌ Error inicial procesando cumpleaños:', e?.response?.data || e?.message || e);
+      });
+    }
+
+    if (ENABLE_DAILY_BROADCAST && BROADCAST_AUTO_IMPORT_ON_START) {
+      await ensureBroadcastCampaignLoaded({
+        campaignName: BROADCAST_CAMPAIGN_NAME,
+        excelPath: BROADCAST_EXCEL_PATH,
+        offerType: BROADCAST_OFFER_TYPE,
+        offerItems: BROADCAST_OFFER_ITEMS,
+        offerSelectedName: BROADCAST_OFFER_SELECTED_NAME,
+      }).catch((e) => {
+        console.error('❌ Error inicial preparando difusión diaria:', e?.response?.data || e?.message || e);
+      });
+      await processBroadcastQueue().catch((e) => {
+        console.error('❌ Error inicial procesando difusión diaria:', e?.response?.data || e?.message || e);
+      });
+    }
+
+    startupState.initReady = true;
+    startupState.initError = "";
+    startupState.initFinishedAt = new Date().toISOString();
+    console.log("✅ Inicialización completa");
+  } catch (e) {
+    startupState.initReady = false;
+    startupState.initFinishedAt = new Date().toISOString();
+    startupState.initError = String(e?.message || e).slice(0, 500);
+    console.error('❌ Error durante la inicialización del bot:', e?.response?.data || e?.message || e);
+    console.error('⚠️ El servidor quedó levantado para que Render no mate el deploy, pero revisá este error de bootstrap.');
+  }
 })();
