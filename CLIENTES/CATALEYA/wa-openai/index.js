@@ -3196,6 +3196,7 @@ const WHATSAPP_TEMPLATE_LANGUAGE = process.env.WHATSAPP_TEMPLATE_LANGUAGE || "es
 const TEMPLATE_NUEVO_TURNO_PELUQUERA = process.env.TEMPLATE_NUEVO_TURNO_PELUQUERA || "consulta_disponibilidad_peluquera";
 const TEMPLATE_TURNO_CONFIRMADO_PELUQUERA = process.env.TEMPLATE_TURNO_CONFIRMADO_PELUQUERA || "turno_confirmado_peluquera";
 const STYLIST_NOTIFY_PHONE_RAW = process.env.STYLIST_NOTIFY_PHONE || "3868 466370";
+const STYLIST_SECRET_CLEAR_PENDING_TEXT = String(process.env.STYLIST_SECRET_CLEAR_PENDING_TEXT || "BORRAR HISTORIAL PELUQUERA").trim();
 const COURSE_NOTIFY_PHONE_RAW = process.env.COURSE_NOTIFY_PHONE || STYLIST_NOTIFY_PHONE_RAW;
 const APPOINTMENT_ACTIVE_CONFLICT_STATUSES = ['pending_stylist_confirmation', 'awaiting_payment'];
 const TEMPLATE_CURSO_SENA_RECIBIDA = process.env.TEMPLATE_CURSO_SENA_RECIBIDA || "inscripcion_curso_sena_recibida";
@@ -7843,11 +7844,52 @@ async function notifyStylistTurnConfirmed(apptRow) {
   return true;
 }
 
+function isStylistSecretClearPendingCommand(text = '') {
+  return normalize(String(text || '')) === normalize(STYLIST_SECRET_CLEAR_PENDING_TEXT);
+}
+
+async function clearAllPendingStylistAppointments() {
+  const r = await db.query(
+    `SELECT id, wa_id
+       FROM appointments
+      WHERE status = 'pending_stylist_confirmation'
+      ORDER BY updated_at DESC, created_at DESC`
+  );
+
+  const rows = Array.isArray(r.rows) ? r.rows : [];
+  if (!rows.length) return { deleted: 0 };
+
+  for (const row of rows) {
+    try { await deleteAppointmentDraft(row.wa_id || ''); } catch {}
+    try { clearPendingStylistSuggestion(row.wa_id || ''); } catch {}
+  }
+
+  await db.query(
+    `DELETE FROM appointments
+      WHERE status = 'pending_stylist_confirmation'`
+  );
+
+  return { deleted: rows.length };
+}
+
 async function handleStylistWorkflowInbound({ msg, text, phone, phoneRaw }) {
   const stylistPhone = normalizePhone(STYLIST_NOTIFY_PHONE_RAW);
   const inboundPhone = normalizePhone(phoneRaw || phone || '');
   if (!stylistPhone || inboundPhone !== stylistPhone) return false;
   if (parseCourseManagerApprovalAction(msg, text) === 'approve') return false;
+
+  if (isStylistSecretClearPendingCommand(text)) {
+    const result = await clearAllPendingStylistAppointments();
+    if (Number(result?.deleted || 0) > 0) {
+      await sendWhatsAppText(
+        phone,
+        `Listo. Borré ${result.deleted} turno(s) pendiente(s) de aprobación de la peluquera. Ahora el sistema quedó limpio para seguir desde cero.`
+      );
+    } else {
+      await sendWhatsAppText(phone, 'No había turnos pendientes de aprobación para borrar.');
+    }
+    return true;
+  }
 
   const contextMsgId = msg?.context?.id || '';
   let appt = await findAppointmentByNotificationMessageId(contextMsgId);
