@@ -7900,7 +7900,12 @@ async function getAppointmentRowById(appointmentId) {
             reminder_client_2h_at,
             reminder_client_24h_at,
             reminder_stylist_24h_at,
-            reminder_stylist_2h_at
+            reminder_stylist_2h_at,
+            payment_sender,
+            payment_receiver,
+            payment_proof_text,
+            payment_proof_media_id,
+            payment_proof_filename
        FROM appointments
       WHERE id = $1
       LIMIT 1`,
@@ -8177,6 +8182,11 @@ async function notifyStylistTurnConfirmed(apptRow) {
     appointment_time: apptRow.appointment_time || '',
     status: apptRow.status || 'booked',
     stylist_notified_at: apptRow.stylist_notified_at || null,
+    payment_sender: apptRow.payment_sender || '',
+    payment_receiver: apptRow.payment_receiver || '',
+    payment_proof_text: apptRow.payment_proof_text || '',
+    payment_proof_media_id: apptRow.payment_proof_media_id || '',
+    payment_proof_filename: apptRow.payment_proof_filename || '',
   });
 
   await sendAppointmentTemplateAndLog({
@@ -8195,7 +8205,7 @@ async function notifyStylistTurnConfirmed(apptRow) {
 
   await sleep(700);
 
-  await forwardAppointmentProofToStylist({
+  const proofForwarded = await forwardAppointmentProofToStylist({
     id: appt.id,
     wa_id: appt.wa_id || apptRow.wa_id || '',
     wa_phone: appt.wa_phone || apptRow.wa_phone || '',
@@ -8204,11 +8214,30 @@ async function notifyStylistTurnConfirmed(apptRow) {
     service_name: appt.service_name || apptRow.service_name || '',
     appointment_date: appt.appointment_date || apptRow.appointment_date || '',
     appointment_time: appt.appointment_time || apptRow.appointment_time || '',
-    payment_proof_filename: apptRow.payment_proof_filename || '',
+    payment_sender: appt.payment_sender || apptRow.payment_sender || '',
+    payment_receiver: appt.payment_receiver || apptRow.payment_receiver || '',
+    payment_proof_text: appt.payment_proof_text || apptRow.payment_proof_text || '',
+    payment_proof_media_id: appt.payment_proof_media_id || apptRow.payment_proof_media_id || '',
+    payment_proof_filename: appt.payment_proof_filename || apptRow.payment_proof_filename || '',
   }).catch((e) => {
     console.error('❌ Error reenviando comprobante del turno a la peluquera:', e?.response?.data || e?.message || e);
     return false;
   });
+
+  if (!proofForwarded && (appt.payment_proof_text || appt.payment_sender || appt.payment_receiver)) {
+    const fallbackLines = [
+      buildAppointmentProofCaption(appt),
+      appt.payment_sender ? `Pagador: ${appt.payment_sender}` : '',
+      appt.payment_receiver ? `Titular detectado: ${appt.payment_receiver}` : '',
+      appt.payment_proof_text ? `Texto detectado: ${String(appt.payment_proof_text || '').slice(0, 1500)}` : '',
+    ].filter(Boolean);
+
+    try {
+      await sendWhatsAppText(recipient, fallbackLines.join('\n\n'));
+    } catch (e) {
+      console.error('❌ Error enviando fallback de comprobante del turno a la peluquera:', e?.response?.data || e?.message || e);
+    }
+  }
 
   return true;
 }
@@ -8591,7 +8620,7 @@ async function finalizeAppointmentFlow({ waId, phone, merged }) {
     }
 
     try {
-      const bookedRowForStylist = await getAppointmentRowById(merged.appointment_id);
+      const bookedRowForStylist = await getAppointmentById(merged.appointment_id);
       await notifyStylistTurnConfirmed(bookedRowForStylist || bookedRow || currentAppt || {});
     } catch (e) {
       console.error('❌ Error avisando a la peluquera que el turno ya quedó señado:', e?.response?.data || e?.message || e);
@@ -13371,6 +13400,11 @@ function buildAppointmentData(row = {}) {
     appointment_time: formatAppointmentTimeForTemplate(row.appointment_time || ''),
     status: String(row.status || '').trim(),
     stylist_notified_at: row.stylist_notified_at || null,
+    payment_sender: String(row.payment_sender || '').trim(),
+    payment_receiver: String(row.payment_receiver || '').trim(),
+    payment_proof_text: String(row.payment_proof_text || '').trim(),
+    payment_proof_media_id: String(row.payment_proof_media_id || '').trim(),
+    payment_proof_filename: String(row.payment_proof_filename || '').trim(),
   };
 }
 
