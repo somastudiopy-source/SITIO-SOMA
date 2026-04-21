@@ -12473,6 +12473,16 @@ function formatStockReply(matches, mode, opts = {}) {
   if (!matches.length) return null;
 
   const items = mode === "LIST" ? matches.slice(0, 10) : matches.slice(0, 1);
+  const inferredDomain = opts.domain || detectProductDomain(opts.familyLabel || matches.map((x) => `${x?.tab || ''} ${x?.nombre || ''} ${x?.categoria || ''}`).join(' | '));
+  const header = mode === "LIST" ? `Encontré estas opciones:` : `Está en catálogo:`;
+  const followUp = buildProductFollowupQuestion({ domain: inferredDomain, familyLabel: opts.familyLabel || '' });
+
+  if (hasPhotoableProductRows(items)) {
+    return `${header}
+
+${followUp}`.trim();
+  }
+
   const blocks = items.map((p) => {
     const precio = moneyOrConsult(p.precio);
     return [
@@ -12481,9 +12491,7 @@ function formatStockReply(matches, mode, opts = {}) {
     ].join("\n");
   });
 
-  const inferredDomain = opts.domain || detectProductDomain(opts.familyLabel || matches.map((x) => `${x?.tab || ''} ${x?.nombre || ''} ${x?.categoria || ''}`).join(' | '));
-  const header = mode === "LIST" ? `Encontré estas opciones:` : `Está en catálogo:`;
-  const footer = `\n\n${buildProductFollowupQuestion({ domain: inferredDomain, familyLabel: opts.familyLabel || '' })}`;
+  const footer = `\n\n${followUp}`;
   return `${header}\n\n${blocks.join("\n\n— — —\n\n")}${footer}`.trim();
 }
 
@@ -12525,6 +12533,18 @@ function formatStockRelatedListAll(rows, { domain = '', familyLabel = '', chunkS
 
   for (let i = 0; i < items.length; i += chunkSize) {
     const part = items.slice(i, i + chunkSize);
+    const header = i === 0 ? `✨ Tenemos estas opciones${intro}:` : `✨ Más opciones${intro}:`;
+    const footerText = (i + chunkSize) >= items.length
+      ? buildProductFollowupQuestion({ domain: activeDomain, familyLabel })
+      : `(Sigo con más opciones…)`;
+
+    if (hasPhotoableProductRows(part)) {
+      chunks.push(`${header}
+
+${footerText}`.trim());
+      continue;
+    }
+
     const blocks = part.map((p) => {
       const precio = moneyOrConsult(p.precio);
       return [
@@ -12533,12 +12553,7 @@ function formatStockRelatedListAll(rows, { domain = '', familyLabel = '', chunkS
       ].join("\n");
     });
 
-    const header = i === 0 ? `✨ Tenemos estas opciones${intro}:` : `✨ Más opciones${intro}:`;
-    const footer = (i + chunkSize) >= items.length
-      ? `\n\n${buildProductFollowupQuestion({ domain: activeDomain, familyLabel })}`
-      : `\n\n(Sigo con más opciones…)`;
-
-    chunks.push(`${header}\n\n${blocks.join("\n\n— — —\n\n")}${footer}`.trim());
+    chunks.push(`${header}\n\n${blocks.join("\n\n— — —\n\n")}\n\n${footerText}`.trim());
   }
 
   return chunks;
@@ -14577,7 +14592,6 @@ async function maybeAutoSendProductPhotos(phone, products, { maxItems = 3 } = {}
   if (!limited.length) return false;
 
   if (limited.length > 1) {
-    await sendWhatsAppText(phone, 'Le paso también las fotos de estas opciones 😊');
   }
 
   let sentCount = 0;
