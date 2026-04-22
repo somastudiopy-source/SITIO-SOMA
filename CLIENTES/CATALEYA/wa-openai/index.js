@@ -6165,6 +6165,10 @@ async function resolveReplyToActiveAssistantOfferWithAI(text, context = {}) {
     return { action: 'NONE', target_type: '', target_name: '', goal: 'NONE', wants_all_items: false };
   }
 
+  if (shouldIgnoreActiveProductOffer(raw, activeOffer)) {
+    return { action: 'NONE', target_type: '', target_name: '', goal: 'NONE', wants_all_items: false };
+  }
+
   const fallback = (() => {
     const activeType = String(activeOffer?.type || '').toUpperCase();
     const mentionedItem = pickMentionedOfferItemFromText(raw, activeOffer?.items || []);
@@ -9914,10 +9918,180 @@ function lastAssistantWasQuestion(waId) {
 function canonicalizeQuery(text) {
   const t = normalize(text);
   return t
+    .replace(/\bm[aá]scaras capilares\b/g, "mascara capilar")
+    .replace(/\bmascarillas capilares\b/g, "mascarilla capilar")
+    .replace(/\bbanos de crema\b/g, "bano de crema")
+    .replace(/\bbaños de crema\b/g, "bano de crema")
+    .replace(/\bchampues\b/g, "shampoo")
+    .replace(/\bchampus\b/g, "shampoo")
     .replace(/\bchampu\b/g, "shampoo")
     .replace(/\bshampu\b/g, "shampoo")
-    .replace(/\bshampoo\b/g, "shampoo");
+    .replace(/\bshampoos\b/g, "shampoo")
+    .replace(/\bshampoo\b/g, "shampoo")
+    .replace(/\bserums\b/g, "serum")
+    .replace(/\bsérums\b/g, "serum")
+    .replace(/\bm[aá]scaras\b/g, "mascara")
+    .replace(/\bmascarillas\b/g, "mascarilla")
+    .replace(/\bampollas\b/g, "ampolla")
+    .replace(/\blitros\b/g, "litro")
+    .replace(/\bkilos\b/g, "kilo")
+    .replace(/\bmililitros\b/g, "ml")
+    .replace(/\bcc\b/g, "ml")
+    .replace(/\b(\d+)\s*mil\b/g, "$1 ml")
+    .replace(/\bde un kilo\b/g, "1 kilo")
+    .replace(/\bde kilo\b/g, "1 kilo")
+    .replace(/\bun kilo\b/g, "1 kilo")
+    .replace(/\bde un litro\b/g, "1 litro")
+    .replace(/\bde litro\b/g, "1 litro")
+    .replace(/\bun litro\b/g, "1 litro");
 }
+
+function extractRequestedPresentation(text = '') {
+  const q = canonicalizeQuery(text || '');
+  const out = { hasSignal: false, grams: null, ml: null, sizeClass: '', container: '' };
+  if (!q) return out;
+
+  const toNumber = (value) => {
+    const num = Number(String(value || '').replace(',', '.'));
+    return Number.isFinite(num) ? num : null;
+  };
+
+  const kgMatch = q.match(/(?:^|\s)(\d+(?:[.,]\d+)?)\s*(kg|kilo)\b/);
+  if (kgMatch) {
+    const num = toNumber(kgMatch[1]);
+    if (num != null) {
+      out.grams = Math.round(num * 1000);
+      out.hasSignal = true;
+    }
+  }
+
+  const gramMatch = q.match(/(?:^|\s)(\d+(?:[.,]\d+)?)\s*(g|gr|gramo|gramos)\b/);
+  if (!out.grams && gramMatch) {
+    const num = toNumber(gramMatch[1]);
+    if (num != null) {
+      out.grams = Math.round(num);
+      out.hasSignal = true;
+    }
+  }
+
+  const litroMatch = q.match(/(?:^|\s)(\d+(?:[.,]\d+)?)\s*(l|lt|lts|litro)\b/);
+  if (litroMatch) {
+    const num = toNumber(litroMatch[1]);
+    if (num != null) {
+      out.ml = Math.round(num * 1000);
+      out.hasSignal = true;
+    }
+  }
+
+  const mlMatch = q.match(/(?:^|\s)(\d+(?:[.,]\d+)?)\s*(ml|mililitro|mililitros)\b/);
+  if (!out.ml && mlMatch) {
+    const num = toNumber(mlMatch[1]);
+    if (num != null) {
+      out.ml = Math.round(num);
+      out.hasSignal = true;
+    }
+  }
+
+  if (!out.grams && /(\b1 kilo\b|\bkilo\b)/.test(q)) {
+    out.grams = 1000;
+    out.hasSignal = true;
+  }
+  if (!out.ml && /(\b1 litro\b|\blitro\b)/.test(q)) {
+    out.ml = 1000;
+    out.hasSignal = true;
+  }
+
+  if (/\bpote\b/.test(q)) out.container = 'pote';
+  else if (/\bbotella\b/.test(q)) out.container = 'botella';
+  else if (/\bfrasco\b/.test(q)) out.container = 'frasco';
+  if (out.container) out.hasSignal = true;
+
+  if (/(\bgrande\b|\bgrandes\b|\bextra grande\b|\bxl\b|\b1 litro\b|\b1 kilo\b|\bkilo\b|\blitro\b)/.test(q)) {
+    out.sizeClass = 'big';
+    out.hasSignal = true;
+  } else if (/(\bchiquito\b|\bchiquita\b|\bchicos\b|\bchicas\b|\bchico\b|\bchica\b|\bmini\b|\bpequeno\b|\bpequena\b|\bpequeño\b|\bpequeña\b|\btravel\b)/.test(q)) {
+    out.sizeClass = 'small';
+    out.hasSignal = true;
+  } else if (/(\bmediano\b|\bmediana\b|\bmedianos\b|\bmedianas\b)/.test(q)) {
+    out.sizeClass = 'medium';
+    out.hasSignal = true;
+  }
+
+  if (!out.sizeClass) {
+    if ((out.grams || 0) >= 900 || (out.ml || 0) >= 900) out.sizeClass = 'big';
+    else if ((out.grams || 0) > 0 || (out.ml || 0) > 0) out.sizeClass = ((out.grams || out.ml || 0) <= 350) ? 'small' : 'medium';
+  }
+
+  return out;
+}
+
+function extractPresentationFromCatalogText(text = '') {
+  const source = canonicalizeQuery(text || '');
+  const pref = extractRequestedPresentation(source);
+  if (!pref.hasSignal) {
+    if (/\bpote\b/.test(source)) pref.container = 'pote';
+    else if (/\bbotella\b/.test(source)) pref.container = 'botella';
+    else if (/\bfrasco\b/.test(source)) pref.container = 'frasco';
+    if (pref.container) pref.hasSignal = true;
+    if (/(\bgrande\b|\bxl\b)/.test(source)) {
+      pref.sizeClass = pref.sizeClass || 'big';
+      pref.hasSignal = true;
+    } else if (/(\bchiquito\b|\bmini\b|\bpequeno\b|\bpequeño\b)/.test(source)) {
+      pref.sizeClass = pref.sizeClass || 'small';
+      pref.hasSignal = true;
+    }
+  }
+  return pref;
+}
+
+function hasRequestedPresentationSignal(text = '') {
+  return !!extractRequestedPresentation(text || '').hasSignal;
+}
+
+function presentationApproxEqual(a, b) {
+  if (a == null || b == null) return false;
+  const bigger = Math.max(Number(a || 0), Number(b || 0));
+  const diff = Math.abs(Number(a || 0) - Number(b || 0));
+  return diff <= Math.max(20, bigger * 0.12);
+}
+
+function rowOrLabelMatchesRequestedPresentation(input, pref = {}) {
+  const requested = pref?.hasSignal ? pref : extractRequestedPresentation(typeof input === 'string' ? input : `${input?.nombre || ''} ${input?.categoria || ''} ${input?.descripcion || ''}`);
+  if (!requested?.hasSignal) return true;
+
+  const label = typeof input === 'string'
+    ? String(input || '')
+    : `${input?.nombre || ''} ${input?.categoria || ''} ${input?.descripcion || ''} ${input?.tab || ''}`;
+  const rowPref = extractPresentationFromCatalogText(label);
+
+  if (requested.container && rowPref.container && requested.container !== rowPref.container) return false;
+
+  if (requested.grams != null) {
+    if (rowPref.grams == null) return false;
+    if (!presentationApproxEqual(requested.grams, rowPref.grams)) return false;
+  }
+
+  if (requested.ml != null) {
+    if (rowPref.ml == null) return false;
+    if (!presentationApproxEqual(requested.ml, rowPref.ml)) return false;
+  }
+
+  if (requested.sizeClass) {
+    const sizeClass = rowPref.sizeClass || ((rowPref.grams || rowPref.ml) ? (((rowPref.grams || rowPref.ml) >= 900) ? 'big' : ((rowPref.grams || rowPref.ml) <= 350 ? 'small' : 'medium')) : '');
+    if (!sizeClass) return false;
+    if (requested.sizeClass !== sizeClass) return false;
+  }
+
+  return true;
+}
+
+function filterRowsByRequestedPresentation(rows, text = '') {
+  const list = Array.isArray(rows) ? rows : [];
+  const pref = extractRequestedPresentation(text || '');
+  if (!pref.hasSignal || !list.length) return list;
+  return list.filter((row) => rowOrLabelMatchesRequestedPresentation(row, pref));
+}
+
 
 // ===================== CATEGORIA / PRODUCTOS (SOLO LISTA PERMITIDA) =====================
 const CATEGORIAS_OK = [
@@ -11341,7 +11515,10 @@ function buildNoExactCatalogMessage({ domain = '', family = '', query = '', want
   }
   if (family === 'plancha') return 'Por el momento no tenemos una plancha para el pelo cargada en catálogo. Si quiere, cuando la incorporemos le avisamos.';
   if (family === 'secador') return 'Por el momento no tenemos un secador para el pelo cargado en catálogo.';
-  if (/ampolla/.test(normalizeCatalogSearchText(query || ''))) return 'Por el momento no tenemos ampollas cargadas en catálogo. Si quiere, le recomiendo tratamientos o baños de crema según lo que necesite.';
+  if (family === 'shampoo') return 'Por el momento no encuentro shampoos cargados en catálogo con esa búsqueda.';
+  if (family === 'serum') return 'Por el momento no encuentro sérums cargados en catálogo con esa búsqueda.';
+  if (family === 'bano_de_crema') return 'Por el momento no encuentro baños de crema o máscaras capilares cargadas con esa presentación.';
+  if (/\bampolla\b/.test(normalizeCatalogSearchText(query || ''))) return 'Por el momento no tenemos ampollas cargadas en catálogo. Si quiere, le recomiendo tratamientos o baños de crema según lo que necesite.';
   if (family === 'sillon') return 'Por el momento no tenemos sillones de barbería cargados en catálogo.';
   if (family === 'camilla') return 'Por el momento no tenemos camillas para spa cargadas en catálogo.';
   return domain === 'furniture'
@@ -11416,16 +11593,19 @@ function findStock(rows, query, mode) {
   if (!q) return [];
 
   const guardedRows = applyProductTypeGuard(rows, q);
+  const requestedPresentation = extractRequestedPresentation(q);
+  const scopedRows = requestedPresentation.hasSignal ? filterRowsByRequestedPresentation(guardedRows, q) : guardedRows;
+  if (requestedPresentation.hasSignal && !scopedRows.length) return [];
 
-  const exact = guardedRows.filter(r => canonicalizeQuery(r.nombre) === q);
+  const exact = scopedRows.filter(r => canonicalizeQuery(r.nombre) === q);
   if (exact.length) return exact;
 
-  const containsStrong = guardedRows.filter(r => canonicalizeQuery(r.nombre).includes(q) && q.length >= 4);
+  const containsStrong = scopedRows.filter(r => canonicalizeQuery(r.nombre).includes(q) && q.length >= 4);
   if (mode !== 'LIST' && containsStrong.length === 1) return containsStrong;
 
   const hasTypeGuard = extractProductTypeKeywords(q).length > 0;
   const scored = [];
-  for (const r of guardedRows) {
+  for (const r of scopedRows) {
     const sNombre = scoreField(q, r.nombre);
     const sCat = scoreField(q, r.categoria) * 0.82;
     const sMarca = scoreField(q, r.marca) * 0.66;
@@ -11547,6 +11727,9 @@ function findStockRelated(rows, rawQuery, { family = '', focusTerm = '', limit =
     if (dedup.length >= limit) break;
   }
 
+  const presentationFiltered = filterRowsByRequestedPresentation(dedup, rawQuery);
+  if (hasRequestedPresentationSignal(rawQuery || '')) return presentationFiltered;
+
   return dedup;
 }
 
@@ -11593,6 +11776,7 @@ Reglas:
 - Si pregunta por muebles o equipamiento, domain=furniture.
 - Si pregunta por productos para el cabello, domain=hair.
 - Si pregunta genéricamente por una familia, wants_all_related=true.
+- Si el cliente menciona presentación o tamaño (kilo, 1kg, litro, 250 ml, 30 ml, chico, chiquito, grande, pote, botella), conservá ese dato dentro de search_text o specific_name.
 - Si pide stock, precios, lista, catálogo, opciones o qué hay de una familia, is_product_query=true.
 - Si pide foto o precio de un producto puntual, specific_name debe contener ese producto.
 - Si trae detalles para elegir, wants_recommendation=true.
@@ -13616,12 +13800,63 @@ function pickMentionedOfferItemFromText(text = '', items = []) {
     .filter((item) => item.raw && item.norm)
     .sort((a, b) => b.norm.length - a.norm.length);
 
+  const requestedPresentation = extractRequestedPresentation(text || '');
+  if (requestedPresentation.hasSignal) {
+    const byPresentation = normalizedItems.filter((item) => rowOrLabelMatchesRequestedPresentation(item.raw, requestedPresentation));
+    if (byPresentation.length === 1) return byPresentation[0].raw;
+  }
+
   for (const item of normalizedItems) {
     if (hay.includes(item.norm)) return item.raw;
   }
 
   return '';
 }
+
+function shouldIgnoreActiveProductOffer(text = '', activeOffer = null) {
+  const offer = activeOffer || null;
+  if (String(offer?.type || '').toUpperCase() !== 'PRODUCT') return false;
+
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+
+  const requestedDomain = detectProductDomain(raw, '');
+  const requestedFamily = normalizeCatalogSearchText(
+    requestedDomain === 'furniture' ? detectFurnitureFamily(raw) : detectProductFamily(raw)
+  );
+  const offerFamily = normalizeCatalogSearchText(
+    offer?.family
+    || ((offer?.domain || '') === 'furniture'
+      ? detectFurnitureFamily((offer?.items || []).join(' '))
+      : detectProductFamily((offer?.items || []).join(' ')))
+    || ''
+  );
+
+  if (requestedFamily && offerFamily && requestedFamily !== offerFamily) return true;
+
+  const requestedPresentation = extractRequestedPresentation(raw);
+  if (requestedPresentation.hasSignal && Array.isArray(offer?.items) && offer.items.length) {
+    const presentationMatches = offer.items.filter((item) => rowOrLabelMatchesRequestedPresentation(String(item || ''), requestedPresentation));
+    if (!presentationMatches.length) return true;
+  }
+
+  const queryTokens = tokenize(guessQueryFromText(raw), { expandSynonyms: false }).filter((tok) => tok.length >= 4);
+  if (!queryTokens.length) return false;
+
+  const ignoredTokens = new Set([
+    ...STOCK_STOPWORDS,
+    ...tokenize((requestedDomain === 'furniture' ? getFurnitureFamilyAliases(requestedFamily) : getProductFamilyAliases(requestedFamily)).join(' '), { expandSynonyms: false }),
+    'precio', 'foto', 'fotos', 'stock', 'lista', 'catalogo', 'catalogo', 'opciones', 'disponible', 'disponibles'
+  ]);
+  const meaningfulTokens = queryTokens.filter((tok) => !ignoredTokens.has(tok));
+  if (!meaningfulTokens.length) return false;
+
+  const offerHay = normalizeCatalogSearchText((offer?.items || []).join(' | '));
+  const matchedTokens = meaningfulTokens.filter((tok) => containsCatalogPhrase(offerHay, tok));
+  const explicitCatalogAsk = looksLikeProductCatalogAction(raw) || isProductUsageQuestion(raw) || userAsksForPhoto(raw);
+  return !!(explicitCatalogAsk && !matchedTokens.length);
+}
+
 
 function looksLikeOperationalPayloadForCurrentFlow(text = '', context = {}) {
   const raw = String(text || '').trim();
@@ -17606,6 +17841,13 @@ Si después necesita algo, estoy acá ✨`;
       related = filterRowsForRequestedFamily(related, { family: resolvedFamily, domain: resolvedDomain, query: `${resolvedQuery || ''} ${text || ''}` });
       broader = filterRowsForRequestedFamily(broader, { family: resolvedFamily, domain: resolvedDomain, query: `${resolvedQuery || ''} ${text || ''}` });
 
+      const presentationScopeText = `${detailQuery || ''} ${resolvedQuery || ''} ${text || ''}`.trim();
+      if (hasRequestedPresentationSignal(presentationScopeText)) {
+        matches = filterRowsByRequestedPresentation(matches, presentationScopeText);
+        related = filterRowsByRequestedPresentation(related, presentationScopeText);
+        broader = filterRowsByRequestedPresentation(broader, presentationScopeText);
+      }
+
       const genericMoreOptionsAsked = isGenericProductOptionsFollowUp(text);
       const currentActiveOffer = getActiveAssistantOffer(waId);
       const alreadyOfferedNames = genericMoreOptionsAsked
@@ -17619,11 +17861,11 @@ Si después necesita algo, estoy acá ✨`;
       }
 
       const unavailableMatchesBase = detailQuery ? findStock(stockAll, detailQuery, 'DETAIL') : [];
-      const unavailableMatches = filterRowsForRequestedFamily(unavailableMatchesBase, {
+      const unavailableMatches = filterRowsByRequestedPresentation(filterRowsForRequestedFamily(unavailableMatchesBase, {
         family: resolvedFamily,
         domain: resolvedDomain,
         query: `${detailQuery || ''} ${text || ''}`,
-      }).filter((row) => !isCatalogRowAvailable(row));
+      }), `${detailQuery || ''} ${resolvedQuery || ''} ${text || ''}`).filter((row) => !isCatalogRowAvailable(row));
 
       const strictNoApprox = wantsStrictNoApproximation(`${resolvedQuery || ''} ${text || ''}`, resolvedFamily, resolvedDomain);
       const wantsPhotoOnly = !!productAI?.wants_photo || userAsksForPhoto(text);
