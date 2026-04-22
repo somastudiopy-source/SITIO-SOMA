@@ -5982,6 +5982,98 @@ function normalizeActiveOfferItems(items = []) {
   return out.slice(0, 12);
 }
 
+function getProductQuestionKind(text = '', fallback = '') {
+  const raw = String(text || '').trim();
+  const t = normalize(raw);
+  const fb = String(fallback || '').trim().toUpperCase();
+  if (!t && fb) return fb;
+  if (userAsksForPhoto(raw)) return 'PHOTO';
+  if (isProductUsageQuestion(raw)) return 'USAGE';
+  if (/(precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|valor)/i.test(t)) return 'PRICE';
+  if (/(stock|hay\?|hay stock|disponible|disponibles|tenes|tenés|queda|quedan)/i.test(t)) return 'AVAILABILITY';
+  if (/(diferencia entre|compar|cual conviene mas|cuál conviene más)/i.test(t)) return 'COMPARE';
+  if (/(lista|catalogo|catálogo|opciones|mostrame|mostrarme|que tenes|qué tenés|que hay|qué hay|todo|todas|todos)/i.test(t)) return 'LIST';
+  return fb || 'DETAIL';
+}
+
+function buildAskToChooseProductMessage(items = [], { kind = 'DETAIL' } = {}) {
+  const names = normalizeActiveOfferItems(items).slice(0, 6);
+  if (!names.length) return 'Para responderle bien, necesito que me diga cuál producto es.';
+  const prompt = kind === 'PRICE'
+    ? 'Para decirle bien el precio, dígame cuál de estas opciones es:'
+    : kind === 'PHOTO'
+      ? 'Para pasarle la foto correcta, dígame cuál de estas opciones es:'
+      : kind === 'USAGE'
+        ? 'Para explicarle bien cómo se usa, dígame cuál de estas opciones es:'
+        : 'Para responderle bien, dígame cuál de estas opciones es:';
+  return `${prompt}
+
+${names.map((name) => `• *${name}*`).join('\n')}`.trim();
+}
+
+function buildProductTechnicalReply(product, { questionKind = 'USAGE' } = {}) {
+  if (!product?.nombre) return '';
+  const description = cleanCatalogDescription(product?.descripcion || '', 360);
+  const family = getProductFamilyLabel(detectProductFamily(`${product?.nombre || ''} ${product?.categoria || ''}`) || product?.categoria || '');
+  const intro = questionKind === 'COMPARE'
+    ? `Sobre *${product.nombre}*:`
+    : `*${product.nombre}*`;
+
+  if (description) {
+    return `${intro}
+
+Según el catálogo: ${description}
+
+Si quiere, también le paso el precio o la foto 😊`.trim();
+  }
+
+  const generic = family
+    ? `No tengo una explicación más detallada cargada para ese producto, pero corresponde a la línea de *${family}*. Si quiere, le paso el precio o la foto.`
+    : 'No tengo una explicación más detallada cargada para ese producto en este momento, pero si quiere le paso el precio o la foto.';
+
+  return `${intro}
+
+${generic}`.trim();
+}
+
+function finalProductDecision({ text = '', matches = [], related = [], broader = [], mode = 'DETAIL', selectedName = '' } = {}) {
+  const questionKind = getProductQuestionKind(text, mode === 'LIST' ? 'LIST' : 'DETAIL');
+  const responseMode = questionKind === 'PHOTO'
+    ? 'VISUAL_ONLY'
+    : questionKind === 'USAGE'
+      ? 'TECHNICAL_ONLY'
+      : questionKind === 'LIST'
+        ? 'TEXT_ONLY'
+        : 'TEXT_ONLY';
+
+  if (['USAGE', 'PRICE', 'COMPARE'].includes(questionKind)) {
+    if (matches.length === 1) {
+      return { action: questionKind === 'USAGE' ? 'ANSWER_USAGE' : 'SHOW_PRODUCT_DETAIL', response_mode: responseMode, question_kind: questionKind, rows: matches.slice(0, 1), selected_name: matches[0]?.nombre || '' };
+    }
+    const candidates = (matches.length ? matches : related.length ? related : broader).slice(0, 6).map((row) => row?.nombre || '').filter(Boolean);
+    if (candidates.length > 1 && !selectedName) {
+      return { action: 'ASK_TO_CHOOSE', response_mode: 'ASK_CLARIFY', question_kind: questionKind, candidate_items: normalizeActiveOfferItems(candidates) };
+    }
+  }
+
+  if (questionKind === 'PHOTO' && matches.length > 1 && !userAsksForAllPhotos(text)) {
+    return { action: 'ASK_TO_CHOOSE', response_mode: 'ASK_CLARIFY', question_kind: questionKind, candidate_items: matches.slice(0, 6).map((row) => row?.nombre || '').filter(Boolean) };
+  }
+
+  if (mode === 'LIST') {
+    const rows = (related.length ? related : broader).slice(0, 12);
+    if (rows.length) return { action: 'SHOW_PRODUCTS', response_mode: responseMode, question_kind: questionKind, rows };
+  }
+
+  if (matches.length === 1) return { action: 'SHOW_PRODUCT_DETAIL', response_mode: responseMode, question_kind: questionKind, rows: matches.slice(0, 1), selected_name: matches[0]?.nombre || '' };
+  if (matches.length > 1) return { action: 'ASK_TO_CHOOSE', response_mode: 'ASK_CLARIFY', question_kind: questionKind, candidate_items: matches.slice(0, 6).map((row) => row?.nombre || '').filter(Boolean) };
+
+  const rows = (related.length ? related : broader).slice(0, 12);
+  if (rows.length) return { action: 'SHOW_PRODUCTS', response_mode: responseMode, question_kind: questionKind, rows };
+
+  return { action: 'NO_MATCH', response_mode: 'TEXT_ONLY', question_kind: questionKind, rows: [] };
+}
+
 function getActiveAssistantOffer(waId) {
   const row = activeAssistantOfferByUser.get(waId);
   if (!row) return null;
@@ -6076,11 +6168,14 @@ async function resolveReplyToActiveAssistantOfferWithAI(text, context = {}) {
   const fallback = (() => {
     const activeType = String(activeOffer?.type || '').toUpperCase();
     const mentionedItem = pickMentionedOfferItemFromText(raw, activeOffer?.items || []);
-    const explicitSelectedName = String(mentionedItem || activeOffer?.selectedName || '').trim();
+    const explicitSelectedName = String(mentionedItem || '').trim();
     const singleAvailableItem = Array.isArray(activeOffer?.items) && activeOffer.items.length === 1
       ? String(activeOffer.items[0] || '').trim()
       : '';
-    const targetName = String(explicitSelectedName || singleAvailableItem || '').trim();
+    const persistedSelectedName = Array.isArray(activeOffer?.items) && activeOffer.items.length > 1
+      ? ''
+      : String(activeOffer?.selectedName || '').trim();
+    const targetName = String(explicitSelectedName || persistedSelectedName || singleAvailableItem || '').trim();
     const hasMultipleChoices = Array.isArray(activeOffer?.items) && activeOffer.items.length > 1;
     const wantsAllItems = !!(userAsksForAllPhotos(raw) || (!mentionedItem && !activeOffer?.selectedName && hasMultipleChoices));
     const normRaw = normalize(raw);
@@ -6088,7 +6183,7 @@ async function resolveReplyToActiveAssistantOfferWithAI(text, context = {}) {
     if (activeType === 'PRODUCT') {
       if (userAsksForPhoto(raw)) {
         if (!targetName && !wantsAllItems) {
-          return { action: 'NONE', target_type: 'PRODUCT', target_name: '', goal: 'PHOTO', wants_all_items: false };
+          return { action: 'ASK_TO_CHOOSE', target_type: 'PRODUCT', target_name: '', goal: 'PHOTO', wants_all_items: false, question_kind: 'PHOTO', candidate_items: normalizeActiveOfferItems(activeOffer?.items || []) };
         }
         return {
           action: 'CONTINUE_ACTIVE_OFFER',
@@ -6096,22 +6191,23 @@ async function resolveReplyToActiveAssistantOfferWithAI(text, context = {}) {
           target_name: targetName,
           goal: 'PHOTO',
           wants_all_items: wantsAllItems,
+          question_kind: 'PHOTO',
         };
       }
       if (/(precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta)/i.test(normRaw)) {
         if (!targetName && hasMultipleChoices) {
-          return { action: 'NONE', target_type: 'PRODUCT', target_name: '', goal: 'PRICE', wants_all_items: false };
+          return { action: 'ASK_TO_CHOOSE', target_type: 'PRODUCT', target_name: '', goal: 'PRICE', wants_all_items: false, question_kind: 'PRICE', candidate_items: normalizeActiveOfferItems(activeOffer?.items || []) };
         }
-        return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'PRODUCT', target_name: targetName, goal: 'PRICE', wants_all_items: false };
+        return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'PRODUCT', target_name: targetName, goal: 'PRICE', wants_all_items: false, question_kind: 'PRICE' };
       }
       if (/(mostrame|mostrame mas|mostrame más|opciones|disponibles|lista|catalogo|catálogo|que tenes|qué tenés|que hay|qué hay)/i.test(normRaw)) {
-        return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'PRODUCT', target_name: targetName, goal: 'LIST_MORE', wants_all_items: true };
+        return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'PRODUCT', target_name: targetName, goal: 'LIST_MORE', wants_all_items: true, question_kind: 'LIST' };
       }
       if (isProductUsageQuestion(raw)) {
         if (!targetName && hasMultipleChoices) {
-          return { action: 'NONE', target_type: 'PRODUCT', target_name: '', goal: 'DETAIL', wants_all_items: false };
+          return { action: 'ASK_TO_CHOOSE', target_type: 'PRODUCT', target_name: '', goal: 'DETAIL', wants_all_items: false, question_kind: 'USAGE', candidate_items: normalizeActiveOfferItems(activeOffer?.items || []) };
         }
-        return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'PRODUCT', target_name: targetName, goal: 'DETAIL', wants_all_items: false };
+        return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'PRODUCT', target_name: targetName, goal: 'DETAIL', wants_all_items: false, question_kind: 'USAGE' };
       }
     }
 
@@ -6175,12 +6271,33 @@ Reglas:
     });
 
     const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const action = String(obj.action || fallback.action || 'NONE').trim().toUpperCase();
+    const targetType = String(obj.target_type || activeOffer?.type || '').trim().toUpperCase();
+    const goal = String(obj.goal || fallback.goal || 'NONE').trim().toUpperCase();
+    const targetName = String(obj.target_name || fallback.target_name || '').trim();
+    const candidateItems = normalizeActiveOfferItems(activeOffer?.items || []);
+    const questionKind = getProductQuestionKind(raw, goal);
+
+    if (targetType === 'PRODUCT' && ['PRICE', 'DETAIL', 'PHOTO'].includes(goal) && candidateItems.length > 1 && !targetName) {
+      return {
+        action: 'ASK_TO_CHOOSE',
+        target_type: 'PRODUCT',
+        target_name: '',
+        goal,
+        wants_all_items: false,
+        question_kind: questionKind,
+        candidate_items: candidateItems,
+      };
+    }
+
     return {
-      action: String(obj.action || fallback.action || 'NONE').trim().toUpperCase(),
-      target_type: String(obj.target_type || activeOffer?.type || '').trim().toUpperCase(),
-      target_name: String(obj.target_name || '').trim(),
-      goal: String(obj.goal || fallback.goal || 'NONE').trim().toUpperCase(),
+      action,
+      target_type: targetType,
+      target_name: targetName,
+      goal,
       wants_all_items: !!obj.wants_all_items,
+      question_kind: questionKind,
+      candidate_items: candidateItems,
     };
   } catch {
     return fallback;
@@ -6200,9 +6317,12 @@ function buildSyntheticTextFromActiveOfferResolution(resolution, activeOffer = n
   if (!type) return '';
 
   if (type === 'PRODUCT') {
+    const questionKind = String(resolution?.question_kind || '').trim().toUpperCase();
     if (goal === 'PHOTO') return allItems ? 'pasame fotos de todo eso' : (target ? `pasame foto de ${target}`.trim() : '');
-    if (goal === 'PRICE') return target ? `precio de ${target}`.trim() : '';
-    if (goal === 'LIST_MORE') return target ? `mostrame más opciones de ${target}` : 'mostrame más opciones';
+    if (goal === 'PRICE' || questionKind === 'PRICE') return target ? `precio de ${target}`.trim() : '';
+    if (goal === 'LIST_MORE' || questionKind === 'LIST') return target ? `mostrame más opciones de ${target}` : 'mostrame más opciones';
+    if (questionKind === 'USAGE') return target ? `como se usa ${target}`.trim() : '';
+    if (goal === 'DETAIL') return target ? `detalle de ${target}`.trim() : '';
     return target || '';
   }
 
@@ -10394,6 +10514,28 @@ async function readSheetGridWithLinks(spreadsheetId, a1Range) {
 
 // ===================== STOCK CATALOG (con link de foto real) =====================
 // Columnas esperadas: Nombre | Categoría | Marca | Precio | Stock | Descripción | Foto del producto
+function normalizeCatalogHeaderName(value = '') {
+  return normalizeCatalogSearchText(value || '')
+    .replace(/descripcon/g, 'descripcion')
+    .replace(/descripcin/g, 'descripcion')
+    .replace(/promocin/g, 'promocion')
+    .replace(/sin descuento/g, 'precio sin descuento');
+}
+
+function findCatalogHeaderIndex(header = [], aliases = []) {
+  const normalized = (Array.isArray(header) ? header : []).map((value) => normalizeCatalogHeaderName(value));
+  const aliasList = (Array.isArray(aliases) ? aliases : []).map((value) => normalizeCatalogHeaderName(value)).filter(Boolean);
+  for (const alias of aliasList) {
+    const exact = normalized.findIndex((value) => value === alias);
+    if (exact >= 0) return exact;
+  }
+  for (const alias of aliasList) {
+    const partial = normalized.findIndex((value) => value.includes(alias) || alias.includes(value));
+    if (partial >= 0) return partial;
+  }
+  return -1;
+}
+
 async function getStockCatalog() {
   const now = Date.now();
   if (catalogCache.stock.rows.length && (now - catalogCache.stock.loadedAt) < CATALOG_CACHE_TTL_MS) {
@@ -10410,17 +10552,14 @@ async function getStockCatalog() {
     const header = grid.headers;
 
     const idx = {
-      nombre: header.findIndex(h => normalize(h) === "nombre"),
-      categoria: header.findIndex(h => normalize(h) === "categoria"),
-      marca: header.findIndex(h => normalize(h) === "marca"),
-      precio: header.findIndex(h => normalize(h) === "precio"),
-      precioSinPromocion: header.findIndex(h => {
-        const v = normalize(h);
-        return v === "precio sin promocion" || v.includes("precio sin promocion");
-      }),
-      stock: header.findIndex(h => normalize(h) === "stock"),
-      descripcion: header.findIndex(h => normalize(h) === "descripcion"),
-      foto: header.findIndex(h => normalize(h).includes("foto")), // “Foto del producto”
+      nombre: findCatalogHeaderIndex(header, ['nombre', 'producto', 'articulo', 'artículo']),
+      categoria: findCatalogHeaderIndex(header, ['categoria', 'categoría', 'rubro', 'tipo']),
+      marca: findCatalogHeaderIndex(header, ['marca', 'linea', 'línea']),
+      precio: findCatalogHeaderIndex(header, ['precio', 'precio actual', 'valor', 'importe']),
+      precioSinPromocion: findCatalogHeaderIndex(header, ['precio sin promocion', 'precio sin promoción', 'precio sin descuento', 'precio lista', 'precio normal']),
+      stock: findCatalogHeaderIndex(header, ['stock', 'cantidad', 'existencia', 'disponible']),
+      descripcion: findCatalogHeaderIndex(header, ['descripcion', 'descripción', 'descripcon', 'descripcón', 'detalle', 'info']),
+      foto: findCatalogHeaderIndex(header, ['foto del producto', 'foto', 'imagen', 'link foto', 'link imagen']),
     };
 
     for (const row of grid.rows) {
@@ -10440,6 +10579,7 @@ async function getStockCatalog() {
         precio: idx.precio >= 0 ? (r[idx.precio] || "").trim() : "",
         precioSinPromocion: idx.precioSinPromocion >= 0 ? (r[idx.precioSinPromocion] || "").trim() : "",
         stock: idx.stock >= 0 ? (r[idx.stock] || "").trim() : "",
+        stockStatus: idx.stock >= 0 ? 'known' : 'unknown',
         descripcion: idx.descripcion >= 0 ? (r[idx.descripcion] || "").trim() : "",
         // ✅ guardamos link real si existe, si no el texto
         foto: fotoLink || fotoText,
@@ -13753,6 +13893,25 @@ async function answerNaturallyFromCurrentContext(text, context = {}) {
   const raw = String(text || '').trim();
   if (!raw) return '';
 
+  if (isProductUsageQuestion(raw) && (context.lastProductContext || String(context.activeAssistantOffer?.type || '').toUpperCase() === 'PRODUCT' || context.inferredType === 'PRODUCT')) {
+    try {
+      const stock = filterSellableCatalogRows(await getStockCatalog(), { includeOutOfStock: false });
+      const activeOffer = context.activeAssistantOffer || null;
+      const candidateNames = normalizeActiveOfferItems([
+        ...(Array.isArray(activeOffer?.items) ? activeOffer.items : []),
+        activeOffer?.selectedName || '',
+        context.lastProductName || '',
+        ...(Array.isArray(context.lastProductContext?.lastOptions) ? context.lastProductContext.lastOptions : []),
+      ]);
+      const mentioned = pickMentionedOfferItemFromText(raw, candidateNames);
+      let rows = resolveProductsByNames(stock, mentioned ? [mentioned] : candidateNames);
+      if (!rows.length && raw) rows = findStock(stock, raw, 'DETAIL');
+      if (!mentioned && rows.length > 1) {
+        return buildAskToChooseProductMessage(rows.map((row) => row?.nombre || ''), { kind: 'USAGE' });
+      }
+    } catch {}
+  }
+
   const knowledge = await gatherNaturalReplyKnowledge(raw, context);
   const model = pickModelForText(raw);
   const messages = [
@@ -14930,7 +15089,7 @@ async function maybeSendMultipleProductPhotos(phone, products, userText) {
 
   const unique = [];
   const seen = new Set();
-  for (const product of products) {
+  for (const product of exceptional) {
     const key = normalizeCatalogSearchText(`${product?.nombre || ''} ${product?.marca || ''}`);
     if (!product?.nombre || seen.has(key) || wasProductPhotoAlreadySent(phone, product)) continue;
     seen.add(key);
@@ -15061,10 +15220,12 @@ async function maybeSendProductPhoto(phone, product, userText) {
 
 async function maybeAutoSendProductPhotos(phone, products, { maxItems = 3 } = {}) {
   if (!Array.isArray(products) || !products.length) return false;
+  const exceptional = products.filter((product) => isAutoPhotoExceptionalRow(product));
+  if (!exceptional.length) return false;
 
   const unique = [];
   const seen = new Set();
-  for (const product of products) {
+  for (const product of exceptional) {
     const key = normalizeCatalogSearchText(`${product?.nombre || ''} ${product?.marca || ''}`);
     if (!product?.nombre || seen.has(key) || wasProductPhotoAlreadySent(phone, product)) continue;
     seen.add(key);
@@ -15093,14 +15254,14 @@ function shouldPreferPhotoOnlyCatalogReply(rows = [], { domain = '', text = '', 
   if (!list.length) return false;
   if (!hasPhotoableProductRows(list)) return false;
   if (isProductUsageQuestion(text)) return false;
-  if (looksLikeConversationalQuestion(text) && !looksLikeProductCatalogAction(text) && !looksLikeProductRecommendationAction(text) && !userAsksForPhoto(text)) return false;
+
+  if (userAsksForPhoto(text)) return true;
+  if (list.some((row) => isAutoPhotoExceptionalRow(row))) return true;
 
   const resolvedDomain = String(domain || detectRowProductDomain(list[0]) || '').trim().toLowerCase();
-  const qk = String(questionKind || '').trim().toUpperCase();
-  const resolvedMode = String(mode || '').trim().toUpperCase();
+  if (resolvedDomain === 'furniture') return true;
 
-  if (resolvedDomain !== 'hair') return false;
-  return ['LIST', 'DETAIL', 'PRICE', 'RECOMMENDATION'].includes(qk) || ['LIST', 'DETAIL', 'RECOMMENDATION'].includes(resolvedMode) || !qk;
+  return false;
 }
 
 async function sendProductCatalogAsPhotosOnly(phone, products, { maxItems = 4 } = {}) {
@@ -15828,6 +15989,17 @@ updateLastCloseContext(waId, {
         })
       : (firstAiReview?.topic_changed ? { action: 'SWITCH_TOPIC' } : null);
 
+    if (activeOfferResolution?.action === 'ASK_TO_CHOOSE' && activeOfferResolution.target_type === 'PRODUCT') {
+      const msgChooseProduct = buildAskToChooseProductMessage(
+        activeOfferResolution.candidate_items || activeAssistantOffer?.items || [],
+        { kind: activeOfferResolution.question_kind || activeOfferResolution.goal || 'DETAIL' }
+      );
+      pushHistory(waId, 'assistant', msgChooseProduct);
+      await sendWhatsAppText(phone, msgChooseProduct);
+      scheduleInactivityFollowUp(waId, phone);
+      return;
+    }
+
     if (activeOfferResolution?.action === 'CONTINUE_ACTIVE_OFFER') {
       if (activeOfferResolution.target_type === 'PRODUCT') {
         const stockForActiveOffer = filterSellableCatalogRows(await getStockCatalog(), { includeOutOfStock: false });
@@ -15837,7 +16009,6 @@ updateLastCloseContext(waId, {
             : [
                 activeOfferResolution.target_name || '',
                 activeAssistantOffer?.selectedName || '',
-                activeAssistantOffer?.items?.[0] || '',
               ]
         );
         const activeProducts = resolveProductsByNames(stockForActiveOffer, activeProductNames);
@@ -15850,6 +16021,25 @@ updateLastCloseContext(waId, {
             lastOptions: activeProducts.map((x) => x.nombre).slice(0, 10),
           });
           if (activeProducts.length === 1) lastProductByUser.set(waId, activeProducts[0]);
+
+          if (activeOfferResolution.question_kind === 'USAGE' && activeProducts.length === 1) {
+            const replyUsage = buildProductTechnicalReply(activeProducts[0], { questionKind: 'USAGE' });
+            if (replyUsage) {
+              rememberAssistantProductOffer(waId, [activeProducts[0]], {
+                mode: 'DETAIL',
+                domain: activeAssistantOffer?.domain || detectRowProductDomain(activeProducts[0]) || '',
+                family: activeAssistantOffer?.family || detectProductFamily(activeProducts[0]?.nombre || '') || '',
+                focusTerm: activeAssistantOffer?.focusTerm || '',
+                selectedName: activeProducts[0]?.nombre || '',
+                questionKind: 'USAGE',
+                lastAssistantText: replyUsage,
+              });
+              pushHistory(waId, 'assistant', replyUsage);
+              await sendWhatsAppText(phone, replyUsage);
+              scheduleInactivityFollowUp(waId, phone);
+              return;
+            }
+          }
 
           if (activeOfferResolution.goal === 'PHOTO') {
             const sent = activeOfferResolution.wants_all_items || activeProducts.length > 1
@@ -17247,7 +17437,7 @@ Si después necesita algo, estoy acá ✨`;
       }
     }
 
-    const lastProductCtx = getLastProductContext(waId);
+    let lastProductCtx = getLastProductContext(waId);
 
     const productAI = (intent.type === 'PRODUCT' || intent.type === 'OTHER' || isExplicitProductIntent(text) || !!lastProductCtx)
       ? await extractProductIntentWithAI(text, {
@@ -17334,6 +17524,21 @@ Si después necesita algo, estoy acá ✨`;
       const resolvedBusinessType = productAI?.business_type || lastProductCtx?.businessType || '';
       const resolvedStyle = productAI?.style || lastProductCtx?.style || '';
       const resolvedSeatsNeeded = productAI?.seats_needed || lastProductCtx?.seatsNeeded || '';
+      const incomingExplicitDomain = forcedDomainFromFirstAI || productAI?.domain || detectProductDomain(aiSearchText || resolvedQuery || text, aiFamily || forcedFamilyFromFirstAI || '') || '';
+      const incomingExplicitFamily = normalizeCatalogSearchText(
+        forcedFamilyFromFirstAI
+        || aiFamily
+        || (incomingExplicitDomain === 'furniture'
+          ? (detectFurnitureFamily(resolvedQuery) || detectFurnitureFamily(text))
+          : (detectProductFamily(resolvedQuery) || detectProductFamily(text)))
+        || ''
+      );
+      const previousProductFamily = normalizeCatalogSearchText(lastProductCtx?.family || '');
+      if (previousProductFamily && incomingExplicitFamily && previousProductFamily !== incomingExplicitFamily) {
+        clearActiveAssistantOffer(waId);
+        clearProductMemory(waId);
+        lastProductCtx = null;
+      }
       const explicitFamilyRequested = isExplicitFamilyRequest(`${text} ${resolvedQuery} ${intent.query || ''}`, resolvedFamily);
       const treatmentKnowledge = resolvedDomain === 'hair'
         ? (getHairTreatmentKnowledgeById(lastProductCtx?.treatmentId || '') || detectHairTreatmentKnowledge({
@@ -17422,6 +17627,14 @@ Si después necesita algo, estoy acá ✨`;
 
       const strictNoApprox = wantsStrictNoApproximation(`${resolvedQuery || ''} ${text || ''}`, resolvedFamily, resolvedDomain);
       const wantsPhotoOnly = !!productAI?.wants_photo || userAsksForPhoto(text);
+      const productDecision = finalProductDecision({
+        text,
+        matches,
+        related,
+        broader,
+        mode: productMode,
+        selectedName: matches.length === 1 ? (matches[0]?.nombre || '') : '',
+      });
       if (!matches.length && unavailableMatches.length && strictNoApprox) {
         const msgNoStock = buildOutOfStockCatalogMessage({
           domain: resolvedDomain,
@@ -17456,6 +17669,41 @@ Si después necesita algo, estoy acá ✨`;
         scheduleInactivityFollowUp(waId, phone);
         return;
       }
+      if (productDecision.action === 'ASK_TO_CHOOSE') {
+        const msgChooseProduct = buildAskToChooseProductMessage(productDecision.candidate_items || [], { kind: productDecision.question_kind || 'DETAIL' });
+        pushHistory(waId, 'assistant', msgChooseProduct);
+        await sendWhatsAppText(phone, msgChooseProduct);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+
+      if (productDecision.action === 'ANSWER_USAGE' && productDecision.rows?.length === 1) {
+        const picked = productDecision.rows[0];
+        lastProductByUser.set(waId, picked);
+        setLastProductContext(waId, {
+          domain: resolvedDomain || detectRowProductDomain(picked) || '',
+          family: resolvedFamily || ((resolvedDomain || detectRowProductDomain(picked)) === 'furniture' ? detectFurnitureFamily(picked.nombre) : detectProductFamily(picked.nombre)) || '',
+          focusTerm: resolvedFocusTerm || detectProductFocusTerm(picked.nombre) || '',
+          hairType: resolvedHairType || '',
+          need: resolvedNeed || '',
+          useType: resolvedUseType || '',
+          businessType: resolvedBusinessType || '',
+          style: resolvedStyle || '',
+          seatsNeeded: resolvedSeatsNeeded || '',
+          treatmentId: treatmentKnowledge?.id || '',
+          mode: 'detail',
+          lastOptions: [picked.nombre],
+        });
+        const replyUsage = buildProductTechnicalReply(picked, { questionKind: 'USAGE' });
+        if (replyUsage) {
+          rememberAssistantProductOffer(waId, [picked], { mode: 'DETAIL', domain: resolvedDomain || '', family: resolvedFamily || '', focusTerm: resolvedFocusTerm || '', selectedName: picked?.nombre || '', questionKind: 'USAGE', lastAssistantText: replyUsage });
+          pushHistory(waId, 'assistant', replyUsage);
+          await sendWhatsAppText(phone, replyUsage);
+          scheduleInactivityFollowUp(waId, phone);
+          return;
+        }
+      }
+
       const wantsRecommendation = !!(
         productAI?.wants_recommendation ||
         resolvedHairType ||
