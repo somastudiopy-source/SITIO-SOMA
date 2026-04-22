@@ -13403,6 +13403,292 @@ function buildFallbackInboundRoutingText(rawText = '', context = {}) {
   return raw;
 }
 
+
+function looksLikeConversationalQuestion(text = '') {
+  const raw = String(text || '').trim();
+  const t = normalize(raw);
+  if (!t) return false;
+  if (/[?¿]/.test(raw)) return true;
+  if (/^(como|cómo|que|qué|cual|cuál|cuanto|cuánto|donde|dónde|por que|por qué|me conviene|sirve|incluye|trae|explicame|explicame|explicá|explica|ayudame|ayudame|recomendame|recomendame|recomendás|recomendas)\b/i.test(t)) return true;
+  return /(como se usa|cómo se usa|como se aplica|cómo se aplica|como funciona|cómo funciona|como seria|cómo sería|para que sirve|para qué sirve|sirve para|cual es la diferencia|cuál es la diferencia|diferencia entre|que incluye|qué incluye|incluye materiales|se descuenta del total|la seña se descuenta|la sena se descuenta|me conviene|cuál me conviene|cual me conviene|cómo sería|que tengo que llevar|qué tengo que llevar|cuanto dura|cuánto dura|cuanto demora|cuánto demora|como hago|cómo hago|como seria el pago|cómo sería el pago)/i.test(t);
+}
+
+function looksLikeOperationalPayloadForCurrentFlow(text = '', context = {}) {
+  const raw = String(text || '').trim();
+  const t = normalize(raw);
+  if (!t) return false;
+
+  const contactInfo = extractContactInfo(raw);
+  const hasContactData = !!(contactInfo?.nombre || contactInfo?.telefono);
+  const hasDni = !!extractStudentDni(raw);
+  const hasProof = looksLikePaymentProofText(raw) || looksLikeProofAlreadySent(raw) || isLikelyPaymentText(raw);
+  const hasHour = !!normalizeHourHM(raw) || /(\b\d{1,2}\s*(hs|horas?)\b)/i.test(raw);
+  const hasDateLike = /(hoy|mañana|manana|pasado|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|\b\d{1,2}[\/.-]\d{1,2}(?:[\/.-]\d{2,4})?\b)/i.test(raw);
+  const hasAffirmativeContinue = isWarmAffirmativeReply(raw) || /^(confirmo|confirmado|listo|perfecto|dale|si|sí|ok|oka|de una)$/i.test(t);
+
+  if (String(context?.activeAssistantOffer?.type || '').toUpperCase() === 'PRODUCT') {
+    if (userAsksForPhoto(raw) || /(precio del|precio de|mostrame|mostrame mas|mostrame más|quiero ese|quiero esa|mandame foto|pasame foto|pasame fotos|stock|catalogo|catálogo)/i.test(t)) {
+      return true;
+    }
+  }
+
+  if (String(context?.activeAssistantOffer?.type || '').toUpperCase() === 'COURSE') {
+    if (/(inscrib|inscripción|inscripcion|anot|reservar lugar|quiero ese curso|quiero avanzar|quiero seguir|seña|sena|pago|transfer)/i.test(t)) {
+      return true;
+    }
+  }
+
+  if (String(context?.activeAssistantOffer?.type || '').toUpperCase() === 'SERVICE') {
+    if (/(turno|reserv|agend|cita|quiero ese servicio|quiero avanzar|quiero seguir)/i.test(t)) {
+      return true;
+    }
+  }
+
+  if (context?.pendingCourseDraft) {
+    if (hasDni || hasProof || hasContactData || hasAffirmativeContinue) return true;
+  }
+
+  if (context?.pendingDraft) {
+    if (hasContactData || hasProof) return true;
+    if (hasHour || hasDateLike) return true;
+    if (hasAffirmativeContinue && !looksLikeConversationalQuestion(raw)) return true;
+  }
+
+  return false;
+}
+
+async function decideUniversalConversationRouteWithAI(text, context = {}) {
+  const raw = String(text || '').trim();
+  const activeOffer = context.activeAssistantOffer || null;
+  const fallbackType = String(
+    context.firstAiType
+    || activeOffer?.type
+    || (context.pendingCourseDraft ? 'COURSE' : '')
+    || (context.pendingDraft ? 'SERVICE' : '')
+    || (context.lastProductContext ? 'PRODUCT' : '')
+    || (context.lastCourseContext ? 'COURSE' : '')
+    || (context.lastServiceName ? 'SERVICE' : '')
+    || 'OTHER'
+  ).trim().toUpperCase();
+
+  const fallback = (() => {
+    if (!raw) return { route: 'FLOW', flow_type: fallbackType || 'OTHER', preserve_flow_state: !!(context.pendingDraft || context.pendingCourseDraft), reason: 'empty' };
+    if (looksLikeOperationalPayloadForCurrentFlow(raw, context)) {
+      return { route: 'FLOW', flow_type: fallbackType || 'OTHER', preserve_flow_state: !!(context.pendingDraft || context.pendingCourseDraft), reason: 'operational_payload' };
+    }
+    if (looksLikeConversationalQuestion(raw)) {
+      return { route: 'CHAT', flow_type: fallbackType || 'OTHER', preserve_flow_state: !!(context.pendingDraft || context.pendingCourseDraft), reason: 'question' };
+    }
+    if ((context.lastProductContext || String(activeOffer?.type || '').toUpperCase() === 'PRODUCT') && !looksLikeAppointmentIntent(raw, { pendingDraft: context.pendingDraft || null, lastService: context.lastServiceName ? { nombre: context.lastServiceName } : null })) {
+      if (/(como se usa|cómo se usa|como se aplica|cómo se aplica|para que sirve|para qué sirve|sirve para|cual me conviene|cuál me conviene|diferencia entre|me conviene|recomend)/i.test(normalize(raw))) {
+        return { route: 'CHAT', flow_type: 'PRODUCT', preserve_flow_state: !!(context.pendingDraft || context.pendingCourseDraft), reason: 'product_followup' };
+      }
+    }
+    return { route: 'FLOW', flow_type: fallbackType || 'OTHER', preserve_flow_state: !!(context.pendingDraft || context.pendingCourseDraft), reason: 'default' };
+  })();
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Decidí si el mensaje actual debe responderse como CHARLA NATURAL o si debe ser consumido por un FLUJO operativo.
+
+Devolvé SOLO JSON con:
+- route: CHAT | FLOW
+- flow_type: PRODUCT | SERVICE | COURSE | OTHER
+- preserve_flow_state: boolean
+- reason: string breve
+
+Reglas:
+- CHAT cuando el cliente hace preguntas, pide explicación, compara, pide recomendación, pregunta cómo se usa, cómo funciona, qué incluye, si la seña se descuenta, materiales, requisitos, diferencias, duración, cuidados o cualquier duda conversacional.
+- FLOW cuando el mensaje aporta datos operativos o quiere ejecutar una acción: elegir opción concreta, pasar foto, pedir precio puntual del primero, enviar comprobante, pasar nombre/teléfono/DNI, elegir fecha u horario, confirmar reserva, avanzar con turno o inscripción.
+- Si hay un flujo de turno o curso activo y el cliente hace una pregunta, route=CHAT y preserve_flow_state=true.
+- Si venían hablando de productos y el cliente pregunta "cómo se usa", "para qué sirve", "cuál me conviene" o similar, route=CHAT con flow_type=PRODUCT.
+- Si venían hablando de un curso y pregunta materiales, modalidad, requisitos, horarios o detalles, route=CHAT con flow_type=COURSE.
+- Si venían hablando de un servicio/turno y pregunta precio, duración, cómo sería, seña o aclaraciones, route=CHAT con flow_type=SERVICE.
+- "pasame foto", "precio del primero", "quiero ese", "quiero turno", "quiero inscribirme", "te mando el comprobante", una fecha, una hora o un DNI son FLOW.
+- No marques FLOW solo porque exista un draft. Priorizá la conversación humana.`
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            mensaje: raw,
+            primer_ruteo_tipo: context.firstAiType || '',
+            flujo_turno_activo: !!context.pendingDraft,
+            paso_turno_actual: context.pendingDraft?.flow_step || '',
+            servicio_actual: context.lastServiceName || context.pendingDraft?.servicio || '',
+            flujo_curso_activo: !!context.pendingCourseDraft,
+            paso_curso_actual: context.pendingCourseDraft?.flow_step || '',
+            curso_actual: context.pendingCourseDraft?.curso_nombre || context.lastCourseContext?.selectedName || context.lastCourseContext?.query || '',
+            producto_actual: context.lastProductName || '',
+            contexto_producto: context.lastProductContext || null,
+            oferta_activa: activeOffer ? {
+              type: activeOffer.type || '',
+              items: Array.isArray(activeOffer.items) ? activeOffer.items.slice(0, 12) : [],
+              selectedName: activeOffer.selectedName || '',
+              mode: activeOffer.mode || '',
+            } : null,
+            historial_reciente: context.historySnippet || '',
+          }),
+        },
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const route = String(obj.route || fallback.route || 'FLOW').trim().toUpperCase() === 'CHAT' ? 'CHAT' : 'FLOW';
+    const flowType = String(obj.flow_type || fallback.flow_type || 'OTHER').trim().toUpperCase();
+    return {
+      route,
+      flow_type: ['PRODUCT', 'SERVICE', 'COURSE', 'OTHER'].includes(flowType) ? flowType : (fallback.flow_type || 'OTHER'),
+      preserve_flow_state: obj.preserve_flow_state === undefined ? !!fallback.preserve_flow_state : !!obj.preserve_flow_state,
+      reason: String(obj.reason || fallback.reason || '').trim(),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+async function gatherNaturalReplyKnowledge(text, context = {}) {
+  const blocks = [];
+  const activeOffer = context.activeAssistantOffer || null;
+
+  if (context.pendingDraft) {
+    blocks.push([
+      'ESTADO DE TURNO ACTIVO:',
+      `- paso_actual: ${context.pendingDraft?.flow_step || ''}`,
+      `- servicio: ${context.pendingDraft?.servicio || context.lastServiceName || ''}`,
+      `- fecha: ${context.pendingDraft?.fecha || ''}`,
+      `- hora: ${context.pendingDraft?.hora || ''}`,
+      `- nombre_cliente: ${context.pendingDraft?.cliente_full || ''}`,
+      `- telefono_contacto: ${context.pendingDraft?.telefono_contacto || ''}`,
+      `- estado_pago: ${context.pendingDraft?.payment_status || 'not_paid'}`,
+    ].filter(Boolean).join('\n'));
+  }
+
+  if (context.pendingCourseDraft) {
+    blocks.push([
+      'ESTADO DE INSCRIPCIÓN ACTIVA:',
+      `- paso_actual: ${context.pendingCourseDraft?.flow_step || ''}`,
+      `- curso: ${context.pendingCourseDraft?.curso_nombre || ''}`,
+      `- alumno: ${context.pendingCourseDraft?.alumno_nombre || ''}`,
+      `- dni: ${context.pendingCourseDraft?.alumno_dni || ''}`,
+      `- telefono_contacto: ${context.pendingCourseDraft?.telefono_contacto || ''}`,
+      `- estado_pago: ${context.pendingCourseDraft?.payment_status || 'not_paid'}`,
+    ].filter(Boolean).join('\n'));
+  }
+
+  const serviceTarget = String(context.pendingDraft?.servicio || context.lastServiceName || '').trim();
+  if (serviceTarget || context.inferredType === 'SERVICE') {
+    const services = await getServicesCatalog();
+    const serviceMatches = serviceTarget
+      ? findServices(services, serviceTarget, 'DETAIL')
+      : findServices(services, text, 'DETAIL');
+    if (serviceMatches.length) {
+      const serviceText = formatServicesReply(serviceMatches, 'DETAIL', { showDuration: true, showDescription: true });
+      if (serviceText) blocks.push(`SERVICIO EN CONTEXTO:\n${serviceText}`);
+    }
+  }
+
+  const courseTarget = String(context.pendingCourseDraft?.curso_nombre || context.lastCourseContext?.selectedName || context.lastCourseContext?.currentCourseName || context.lastCourseContext?.query || '').trim();
+  if (courseTarget || context.inferredType === 'COURSE') {
+    const courses = await getCoursesCatalog();
+    const courseRow = findCourseByContextName(courses, courseTarget) || resolveCourseFromConversationContext(courses, text, context.lastCourseContext || null);
+    if (courseRow?.nombre) {
+      const courseText = formatCourseReplyBlock(courseRow);
+      if (courseText) blocks.push(`CURSO EN CONTEXTO:\n${courseText}`);
+    }
+  }
+
+  const shouldLoadProducts = !!(
+    context.lastProductContext
+    || String(activeOffer?.type || '').toUpperCase() === 'PRODUCT'
+    || context.inferredType === 'PRODUCT'
+  );
+  if (shouldLoadProducts) {
+    const stock = filterSellableCatalogRows(await getStockCatalog(), { includeOutOfStock: false });
+    const candidateNames = normalizeActiveOfferItems([
+      ...(Array.isArray(activeOffer?.items) ? activeOffer.items : []),
+      activeOffer?.selectedName || '',
+      context.lastProductName || '',
+      ...(Array.isArray(context.lastProductContext?.lastOptions) ? context.lastProductContext.lastOptions : []),
+    ]);
+    let productRows = resolveProductsByNames(stock, candidateNames);
+    if (!productRows.length && context.lastProductName) productRows = findStock(stock, context.lastProductName, 'DETAIL');
+    if (!productRows.length && text) productRows = findStock(stock, text, 'DETAIL');
+    productRows = Array.isArray(productRows) ? productRows.slice(0, 4) : [];
+    if (productRows.length) {
+      const blocksText = productRows.map((row) => buildCatalogProductBlock(row, { detail: true })).filter(Boolean).join('\n\n— — —\n\n');
+      if (blocksText) blocks.push(`PRODUCTOS EN CONTEXTO:\n${blocksText}`);
+    }
+  }
+
+  if (activeOffer?.type) {
+    blocks.push([
+      'ÚLTIMA OFERTA ACTIVA DEL ASISTENTE:',
+      `- tipo: ${activeOffer.type || ''}`,
+      `- items: ${Array.isArray(activeOffer.items) ? activeOffer.items.join(' | ') : ''}`,
+      `- seleccionado: ${activeOffer.selectedName || ''}`,
+      `- modo: ${activeOffer.mode || ''}`,
+      activeOffer.lastAssistantText ? `- texto_ultimo: ${String(activeOffer.lastAssistantText).slice(0, 700)}` : '',
+    ].filter(Boolean).join('\n'));
+  }
+
+  return blocks.filter(Boolean).join('\n\n');
+}
+
+async function answerNaturallyFromCurrentContext(text, context = {}) {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+
+  const knowledge = await gatherNaturalReplyKnowledge(raw, context);
+  const model = pickModelForText(raw);
+  const messages = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    {
+      role: 'system',
+      content:
+`Respondé esta intervención como una charla humana y natural, no como un flujo rígido.
+
+Reglas extra:
+- Si hay un flujo activo de turno o curso, respondé la duda con naturalidad y DEJÁ el flujo pendiente. No reinicies la charla ni vuelvas a pedir datos salvo que haga falta.
+- Si vienen hablando de un producto, curso o servicio, respondé sobre ESE contexto. No repitas listas completas ni catálogo salvo que el cliente lo pida explícitamente.
+- Si la pregunta depende de una opción concreta y hay varias opciones activas, respondé de forma útil con lo que comparten o pedí una aclaración breve.
+- No inventes stock, precios, requisitos, materiales ni servicios. Si algo no está claro en el contexto, decilo brevemente.
+- Soná natural, cercana y profesional. Mensajes cortos, claros y útiles.`
+    },
+    {
+      role: 'system',
+      content: `Tipo inferido de la charla actual: ${context.inferredType || 'OTHER'}.`
+    },
+    {
+      role: 'system',
+      content: `Contexto factual disponible:\n${knowledge || 'Sin contexto estructurado extra.'}`
+    },
+  ];
+
+  if (context.name) messages.push({ role: 'system', content: `Nombre del cliente: ${context.name}.` });
+  if (context.historySnippet) messages.push({ role: 'system', content: `Historial reciente resumido:\n${context.historySnippet}` });
+
+  for (const m of (Array.isArray(context.historyMessages) ? context.historyMessages : [])) {
+    if (!m?.role || !m?.content) continue;
+    messages.push(m);
+  }
+
+  messages.push({ role: 'user', content: raw });
+
+  try {
+    const reply = await openai.chat.completions.create({ model, messages });
+    return String(reply.choices?.[0]?.message?.content || '').trim();
+  } catch {
+    return '';
+  }
+}
+
 async function normalizeInboundForRoutingWithAI(rawText, context = {}) {
   const raw = cleanAiRoutedText(compactMergedInboundText(rawText));
   if (!raw) {
@@ -15607,6 +15893,8 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
 
     const recentDbMessages = await getRecentDbMessages(phone, 12);
     const convForAI = mergeConversationForAI(recentDbMessages, ensureConv(waId).messages || []);
+    let lastCourseContext = getLastCourseContext(waId);
+    const previousRecentDraftCourses = Array.isArray(lastCourseContext?.recentCourses) ? lastCourseContext.recentCourses : [];
 
     if (pendingCourseDraft) {
       await clearAppointmentStateForCourseFlow({
@@ -15715,7 +16003,7 @@ Cuando quiera retomarla, me escribe y seguimos desde ahí.`;
           const resultCourse = await finalizeCourseEnrollmentFlow({ waId, phone, draft: mergedCourseDraft });
           if (resultCourse.type === 'reserved') {
             const msgReserved = buildCourseEnrollmentReservedMessage(mergedCourseDraft);
-            const rememberedReservedCourses = mergeCourseContextRows([{ nombre: mergedCourseDraft.curso_nombre || '', categoria: mergedCourseDraft.curso_categoria || '' }], previousRecentCourses);
+            const rememberedReservedCourses = mergeCourseContextRows([{ nombre: mergedCourseDraft.curso_nombre || '', categoria: mergedCourseDraft.curso_categoria || '' }], previousRecentDraftCourses);
             setLastCourseContext(waId, {
               query: mergedCourseDraft.curso_nombre || lastCourseContext?.query || 'cursos',
               selectedName: mergedCourseDraft.curso_nombre || '',
@@ -16615,7 +16903,50 @@ Si después necesita algo, estoy acá ✨`;
       }
     }
 
-    const lastCourseContext = getLastCourseContext(waId);
+    lastCourseContext = getLastCourseContext(waId);
+
+    const activeAssistantOfferForChat = getActiveAssistantOffer(waId);
+    const universalRoute = await decideUniversalConversationRouteWithAI(text, {
+      pendingDraft: pendingDraft || null,
+      pendingCourseDraft: pendingCourseDraft || null,
+      lastServiceName: lastKnownService?.nombre || '',
+      lastCourseContext: lastCourseContext || null,
+      lastProductName: lastProductByUser.get(waId)?.nombre || '',
+      lastProductContext: getLastProductContext(waId),
+      activeAssistantOffer: activeAssistantOfferForChat,
+      firstAiType: firstAiReview?.type || '',
+      historySnippet: buildConversationHistorySnippet(convForAI, 18, 2200),
+    });
+
+    if (universalRoute?.route === 'CHAT') {
+      const naturalReply = await answerNaturallyFromCurrentContext(text, {
+        waId,
+        phone,
+        name,
+        pendingDraft: pendingDraft || null,
+        pendingCourseDraft: pendingCourseDraft || null,
+        lastServiceName: lastKnownService?.nombre || '',
+        lastCourseContext: lastCourseContext || null,
+        lastProductName: lastProductByUser.get(waId)?.nombre || '',
+        lastProductContext: getLastProductContext(waId),
+        activeAssistantOffer: activeAssistantOfferForChat,
+        historyMessages: convForAI,
+        historySnippet: buildConversationHistorySnippet(convForAI, 18, 2200),
+        inferredType: universalRoute.flow_type || firstAiReview?.type || 'OTHER',
+      });
+
+      if (naturalReply) {
+        updateLastCloseContext(waId, {
+          intentType: universalRoute.flow_type || lastCloseContext.get(waId)?.intentType || 'OTHER',
+          lastUserText: text,
+          suppressInactivityPrompt: !!(universalRoute.preserve_flow_state && (pendingDraft || pendingCourseDraft)),
+        });
+        pushHistory(waId, 'assistant', naturalReply);
+        await sendWhatsAppText(phone, naturalReply);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+    }
 
     let intent = await classifyAndExtract(text, {
       lastServiceName: lastKnownService?.nombre || '',
