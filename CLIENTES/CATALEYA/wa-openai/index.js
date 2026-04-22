@@ -13557,89 +13557,98 @@ async function gatherNaturalReplyKnowledge(text, context = {}) {
   const blocks = [];
   const activeOffer = context.activeAssistantOffer || null;
 
-  if (context.pendingDraft) {
-    blocks.push([
-      'ESTADO DE TURNO ACTIVO:',
-      `- paso_actual: ${context.pendingDraft?.flow_step || ''}`,
-      `- servicio: ${context.pendingDraft?.servicio || context.lastServiceName || ''}`,
-      `- fecha: ${context.pendingDraft?.fecha || ''}`,
-      `- hora: ${context.pendingDraft?.hora || ''}`,
-      `- nombre_cliente: ${context.pendingDraft?.cliente_full || ''}`,
-      `- telefono_contacto: ${context.pendingDraft?.telefono_contacto || ''}`,
-      `- estado_pago: ${context.pendingDraft?.payment_status || 'not_paid'}`,
-    ].filter(Boolean).join('\n'));
-  }
-
-  if (context.pendingCourseDraft) {
-    blocks.push([
-      'ESTADO DE INSCRIPCIÓN ACTIVA:',
-      `- paso_actual: ${context.pendingCourseDraft?.flow_step || ''}`,
-      `- curso: ${context.pendingCourseDraft?.curso_nombre || ''}`,
-      `- alumno: ${context.pendingCourseDraft?.alumno_nombre || ''}`,
-      `- dni: ${context.pendingCourseDraft?.alumno_dni || ''}`,
-      `- telefono_contacto: ${context.pendingCourseDraft?.telefono_contacto || ''}`,
-      `- estado_pago: ${context.pendingCourseDraft?.payment_status || 'not_paid'}`,
-    ].filter(Boolean).join('\n'));
-  }
-
-  const serviceTarget = String(context.pendingDraft?.servicio || context.lastServiceName || '').trim();
-  if (serviceTarget || context.inferredType === 'SERVICE') {
-    const services = await getServicesCatalog();
-    const serviceMatches = serviceTarget
-      ? findServices(services, serviceTarget, 'DETAIL')
-      : findServices(services, text, 'DETAIL');
-    if (serviceMatches.length) {
-      const serviceText = formatServicesReply(serviceMatches, 'DETAIL', { showDuration: true, showDescription: true });
-      if (serviceText) blocks.push(`SERVICIO EN CONTEXTO:\n${serviceText}`);
+  try {
+    if (context.pendingDraft) {
+      blocks.push([
+        'ESTADO DE TURNO ACTIVO:',
+        `- paso_actual: ${context.pendingDraft?.flow_step || ''}`,
+        `- servicio: ${context.pendingDraft?.servicio || context.lastServiceName || ''}`,
+        `- fecha: ${context.pendingDraft?.fecha || ''}`,
+        `- hora: ${context.pendingDraft?.hora || ''}`,
+        `- nombre_cliente: ${context.pendingDraft?.cliente_full || ''}`,
+        `- telefono_contacto: ${context.pendingDraft?.telefono_contacto || ''}`,
+        `- estado_pago: ${context.pendingDraft?.payment_status || 'not_paid'}`,
+      ].filter(Boolean).join('\n'));
     }
-  }
 
-  const courseTarget = String(context.pendingCourseDraft?.curso_nombre || context.lastCourseContext?.selectedName || context.lastCourseContext?.currentCourseName || context.lastCourseContext?.query || '').trim();
-  if (courseTarget || context.inferredType === 'COURSE') {
-    const courses = await getCoursesCatalog();
-    const courseRow = findCourseByContextName(courses, courseTarget) || resolveCourseFromConversationContext(courses, text, context.lastCourseContext || null);
-    if (courseRow?.nombre) {
-      const courseText = formatCourseReplyBlock(courseRow);
-      if (courseText) blocks.push(`CURSO EN CONTEXTO:\n${courseText}`);
+    if (context.pendingCourseDraft) {
+      blocks.push([
+        'ESTADO DE INSCRIPCIÓN ACTIVA:',
+        `- paso_actual: ${context.pendingCourseDraft?.flow_step || ''}`,
+        `- curso: ${context.pendingCourseDraft?.curso_nombre || ''}`,
+        `- alumno: ${context.pendingCourseDraft?.alumno_nombre || ''}`,
+        `- dni: ${context.pendingCourseDraft?.alumno_dni || ''}`,
+        `- telefono_contacto: ${context.pendingCourseDraft?.telefono_contacto || ''}`,
+        `- estado_pago: ${context.pendingCourseDraft?.payment_status || 'not_paid'}`,
+      ].filter(Boolean).join('\n'));
     }
-  }
 
-  const shouldLoadProducts = !!(
-    context.lastProductContext
-    || String(activeOffer?.type || '').toUpperCase() === 'PRODUCT'
-    || context.inferredType === 'PRODUCT'
-  );
-  if (shouldLoadProducts) {
-    const stock = filterSellableCatalogRows(await getStockCatalog(), { includeOutOfStock: false });
-    const candidateNames = normalizeActiveOfferItems([
-      ...(Array.isArray(activeOffer?.items) ? activeOffer.items : []),
-      activeOffer?.selectedName || '',
-      context.lastProductName || '',
-      ...(Array.isArray(context.lastProductContext?.lastOptions) ? context.lastProductContext.lastOptions : []),
-    ]);
-    let productRows = resolveProductsByNames(stock, candidateNames);
-    if (!productRows.length && context.lastProductName) productRows = findStock(stock, context.lastProductName, 'DETAIL');
-    if (!productRows.length && text) productRows = findStock(stock, text, 'DETAIL');
-    productRows = Array.isArray(productRows) ? productRows.slice(0, 4) : [];
-    if (productRows.length) {
-      const blocksText = productRows.map((row) => buildCatalogProductBlock(row, { detail: true })).filter(Boolean).join('\n\n— — —\n\n');
-      if (blocksText) blocks.push(`PRODUCTOS EN CONTEXTO:\n${blocksText}`);
+    const serviceTarget = String(context.pendingDraft?.servicio || context.lastServiceName || '').trim();
+    if (serviceTarget || context.inferredType === 'SERVICE') {
+      try {
+        const services = await getServicesCatalog();
+        const serviceMatches = serviceTarget
+          ? findServices(services, serviceTarget, 'DETAIL')
+          : findServices(services, text, 'DETAIL');
+        if (serviceMatches.length) {
+          const serviceText = formatServicesReply(serviceMatches, 'DETAIL', { showDuration: true, showDescription: true });
+          if (serviceText) blocks.push(`SERVICIO EN CONTEXTO:\n${serviceText}`);
+        }
+      } catch {}
     }
-  }
 
-  if (activeOffer?.type) {
-    blocks.push([
-      'ÚLTIMA OFERTA ACTIVA DEL ASISTENTE:',
-      `- tipo: ${activeOffer.type || ''}`,
-      `- items: ${Array.isArray(activeOffer.items) ? activeOffer.items.join(' | ') : ''}`,
-      `- seleccionado: ${activeOffer.selectedName || ''}`,
-      `- modo: ${activeOffer.mode || ''}`,
-      activeOffer.lastAssistantText ? `- texto_ultimo: ${String(activeOffer.lastAssistantText).slice(0, 700)}` : '',
-    ].filter(Boolean).join('\n'));
-  }
+    const courseTarget = String(context.pendingCourseDraft?.curso_nombre || context.lastCourseContext?.selectedName || context.lastCourseContext?.currentCourseName || context.lastCourseContext?.query || '').trim();
+    if (courseTarget || context.inferredType === 'COURSE') {
+      try {
+        const courses = await getCoursesCatalog();
+        const courseRow = findCourseByContextName(courses, courseTarget) || resolveCourseFromConversationContext(courses, text, context.lastCourseContext || null);
+        if (courseRow?.nombre) {
+          const courseText = formatCourseReplyBlock(courseRow);
+          if (courseText) blocks.push(`CURSO EN CONTEXTO:\n${courseText}`);
+        }
+      } catch {}
+    }
+
+    const shouldLoadProducts = !!(
+      context.lastProductContext
+      || String(activeOffer?.type || '').toUpperCase() === 'PRODUCT'
+      || context.inferredType === 'PRODUCT'
+    );
+    if (shouldLoadProducts) {
+      try {
+        const stock = filterSellableCatalogRows(await getStockCatalog(), { includeOutOfStock: false });
+        const candidateNames = normalizeActiveOfferItems([
+          ...(Array.isArray(activeOffer?.items) ? activeOffer.items : []),
+          activeOffer?.selectedName || '',
+          context.lastProductName || '',
+          ...(Array.isArray(context.lastProductContext?.lastOptions) ? context.lastProductContext.lastOptions : []),
+        ]);
+        let productRows = resolveProductsByNames(stock, candidateNames);
+        if (!productRows.length && context.lastProductName) productRows = findStock(stock, context.lastProductName, 'DETAIL');
+        if (!productRows.length && text) productRows = findStock(stock, text, 'DETAIL');
+        productRows = Array.isArray(productRows) ? productRows.slice(0, 4) : [];
+        if (productRows.length) {
+          const blocksText = productRows.map((row) => buildCatalogProductBlock(row, { detail: true })).filter(Boolean).join('\n\n— — —\n\n');
+          if (blocksText) blocks.push(`PRODUCTOS EN CONTEXTO:\n${blocksText}`);
+        }
+      } catch {}
+    }
+
+    if (activeOffer?.type) {
+      blocks.push([
+        'ÚLTIMA OFERTA ACTIVA DEL ASISTENTE:',
+        `- tipo: ${activeOffer.type || ''}`,
+        `- items: ${Array.isArray(activeOffer.items) ? activeOffer.items.join(' | ') : ''}`,
+        `- seleccionado: ${activeOffer.selectedName || ''}`,
+        `- modo: ${activeOffer.mode || ''}`,
+        activeOffer.lastAssistantText ? `- texto_ultimo: ${String(activeOffer.lastAssistantText).slice(0, 700)}` : '',
+      ].filter(Boolean).join('\n'));
+    }
+  } catch {}
 
   return blocks.filter(Boolean).join('\n\n');
 }
+
 
 async function answerNaturallyFromCurrentContext(text, context = {}) {
   const raw = String(text || '').trim();
@@ -13674,9 +13683,13 @@ Reglas extra:
   if (context.name) messages.push({ role: 'system', content: `Nombre del cliente: ${context.name}.` });
   if (context.historySnippet) messages.push({ role: 'system', content: `Historial reciente resumido:\n${context.historySnippet}` });
 
-  for (const m of (Array.isArray(context.historyMessages) ? context.historyMessages : [])) {
-    if (!m?.role || !m?.content) continue;
-    messages.push(m);
+  const historyMessages = Array.isArray(context.historyMessages) ? context.historyMessages.slice(-14) : [];
+  for (const m of historyMessages) {
+    const role = String(m?.role || '').trim();
+    const content = String(m?.content || '').trim();
+    if (!content) continue;
+    if (!['user', 'assistant'].includes(role)) continue;
+    messages.push({ role, content });
   }
 
   messages.push({ role: 'user', content: raw });
