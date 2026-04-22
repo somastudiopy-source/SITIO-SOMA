@@ -5897,7 +5897,7 @@ function isPoliteCatalogDecline(text) {
 function looksLikeProductPreferenceReply(text) {
   const t = normalize(text || '');
   if (!t) return false;
-  return /(cabello|pelo|rulos|rizado|lacio|liso|rubio|decolorado|canas|canoso|seco|graso|fino|grueso|quebradizo|dañado|danado|frizz|hidrata|hidratar|hidratacion|hidratación|reparar|reparacion|reparación|alisar|alisado|matizar|antiamarillo|violeta|uso personal|para trabajar|profesional|personal|me conviene|cual me recomendas|cuál me recomendás|recomendame|recomendáme|quiero opciones|que me recomendas|qué me recomendás)/i.test(t);
+  return /(cabello|pelo|rulos|rizado|lacio|liso|rubio|decolorado|canas|canoso|seco|graso|fino|grueso|quebradizo|dañado|danado|frizz|hidrata|hidratar|hidratacion|hidratación|reparar|reparacion|reparación|alisar|alisado|matizar|antiamarillo|violeta|uso personal|para trabajar|profesional|personal|me conviene|cual me recomendas|cuál me recomendás|recomendame|recomendáme|quiero opciones|que me recomendas|qué me recomendás|medida|medidas|espacio|salon|salón|barberia|barbería|modelo profesional|modelo)/i.test(t);
 }
 // ✅ Último servicio consultado por usuario (para no repetir pregunta en turnos)
 const lastServiceByUser = new Map();
@@ -9793,6 +9793,8 @@ const PRODUCT_KEYWORDS = [
   { label: "Puff", patterns: [/\bpuff\b/] },
   { label: "Planchas", patterns: [/\bplancha\b/, /\bplanchas\b/] },
   { label: "Secadores", patterns: [/\bsecador\b/, /\bsecadores\b/, /\bsecadora\b/] },
+  { label: "Capas", patterns: [/\bcapa\b/, /\bcapas\b/] },
+  { label: "Rociadores", patterns: [/\brociador\b/, /\brociadores\b/, /\bpulverizador\b/, /\bpulverizadores\b/] },
   { label: "Shampoo", patterns: [/\bshampoo\b/, /\bchampu\b/, /\bshampu\b/] },
   { label: "Ampolla", patterns: [/\bampolla\b/, /\bampollas\b/] },
   { label: "Acondicionador", patterns: [/\bacondicionador\b/] },
@@ -10710,6 +10712,9 @@ const FURNITURE_FAMILY_DEFS = [
   { id: 'combo', label: 'combo', aliases: ['combo', 'combos'] },
   { id: 'tocador', label: 'tocador', aliases: ['tocador', 'tocadores'] },
   { id: 'recepcion', label: 'recepción', aliases: ['recepcion', 'recepción', 'mostrador'] },
+  { id: 'tijera', label: 'tijera', aliases: ['tijera', 'tijeras', 'tijera profesional', 'tijera de corte'] },
+  { id: 'capa', label: 'capa', aliases: ['capa', 'capas', 'capa de corte'] },
+  { id: 'rociador', label: 'rociador', aliases: ['rociador', 'rociadores', 'pulverizador', 'pulverizadores'] },
   { id: 'equipamiento', label: 'equipamiento', aliases: ['equipamiento', 'mobiliario', 'mueble', 'muebles'] },
 ];
 
@@ -11042,7 +11047,7 @@ function detectProductDomain(query, family = '') {
 
 function detectRowProductDomain(row) {
   const bag = normalizeCatalogSearchText(`${row?.tab || ''} ${row?.nombre || ''} ${row?.categoria || ''} ${row?.descripcion || ''}`);
-  if (/(muebles|equipamiento|camilla|sillon|sillón|espejo|mesa|puff|respaldo|tocador|mostrador|recepcion|recepción)/i.test(bag)) return 'furniture';
+  if (/(muebles|equipamiento|camilla|sillon|sillón|espejo|mesa|puff|respaldo|tocador|mostrador|recepcion|recepción|plancha|secador|tijera|capa|rociador|pulverizador)/i.test(bag)) return 'furniture';
   return 'hair';
 }
 
@@ -11293,6 +11298,8 @@ function findStockRelated(rows, rawQuery, { family = '', focusTerm = '', limit =
     const hay = buildStockHaystack(row);
     const bag = tokenize(hay, { expandSynonyms: false });
     const bagSet = new Set(bag);
+    const rowName = normalizeCatalogSearchText(row?.nombre || '');
+    const rowBrand = normalizeCatalogSearchText(row?.marca || '');
 
     let familyHits = 0;
     if (aliases.length) {
@@ -11306,23 +11313,35 @@ function findStockRelated(rows, rawQuery, { family = '', focusTerm = '', limit =
       if (bagSet.has(tok) || containsCatalogPhrase(hay, tok)) extraHits += 1;
     }
 
+    const exactNameMatch = q && rowName === q ? 1 : 0;
+    const namePhraseMatch = q && rowName && containsCatalogPhrase(rowName, q) ? 1 : 0;
+    const brandPhraseMatch = q && rowBrand && containsCatalogPhrase(rowBrand, q) ? 1 : 0;
+
     const queryScore = q ? Math.max(
-      scoreField(q, row.nombre) * 1.15,
+      scoreField(q, row.nombre) * 1.45,
       scoreField(q, row.categoria) * 0.95,
-      scoreField(q, row.marca) * 0.72,
+      scoreField(q, row.marca) * 0.95,
       scoreField(q, row.descripcion) * 0.62,
       scoreField(q, row.tab) * 0.55
     ) : 0;
 
-    const score = queryScore + (familyHits * 4.5) + (extraHits * 1.85);
+    const score = queryScore
+      + (exactNameMatch * 14)
+      + (namePhraseMatch * 6)
+      + (brandPhraseMatch * 3.5)
+      + (familyHits * 3.8)
+      + (extraHits * 1.75);
 
-    if (aliases.length && !familyHits && score < 1.2) continue;
-    if (!aliases.length && score < 0.55) continue;
+    if (aliases.length && !familyHits && !exactNameMatch && !namePhraseMatch && score < 1.2) continue;
+    if (!aliases.length && !exactNameMatch && !namePhraseMatch && score < 0.55) continue;
 
-    scored.push({ row, score, familyHits, extraHits });
+    scored.push({ row, score, familyHits, extraHits, exactNameMatch, namePhraseMatch, brandPhraseMatch });
   }
 
   scored.sort((a, b) => {
+    if (b.exactNameMatch !== a.exactNameMatch) return b.exactNameMatch - a.exactNameMatch;
+    if (b.namePhraseMatch !== a.namePhraseMatch) return b.namePhraseMatch - a.namePhraseMatch;
+    if (b.brandPhraseMatch !== a.brandPhraseMatch) return b.brandPhraseMatch - a.brandPhraseMatch;
     if (b.familyHits !== a.familyHits) return b.familyHits - a.familyHits;
     if (b.extraHits !== a.extraHits) return b.extraHits - a.extraHits;
     return b.score - a.score;
@@ -11335,14 +11354,14 @@ function findStockRelated(rows, rawQuery, { family = '', focusTerm = '', limit =
   }
 
   if (aliases.length && extraTokens.length) {
-    const narrowed = scored.filter((x) => x.familyHits > 0 && x.extraHits > 0).map((x) => x.row);
+    const narrowed = scored.filter((x) => (x.exactNameMatch || x.namePhraseMatch) || (x.familyHits > 0 && x.extraHits > 0)).map((x) => x.row);
     if (narrowed.length) out = narrowed;
     else {
-      const familyOnly = scored.filter((x) => x.familyHits > 0).map((x) => x.row);
+      const familyOnly = scored.filter((x) => x.familyHits > 0 || x.exactNameMatch || x.namePhraseMatch).map((x) => x.row);
       if (familyOnly.length) out = familyOnly;
     }
   } else if (aliases.length) {
-    const familyOnly = scored.filter((x) => x.familyHits > 0).map((x) => x.row);
+    const familyOnly = scored.filter((x) => x.familyHits > 0 || x.exactNameMatch || x.namePhraseMatch).map((x) => x.row);
     if (familyOnly.length) out = familyOnly;
   }
 
@@ -12420,8 +12439,8 @@ function formatNaturalCourseFollowupReply(course, goal = 'DETAIL') {
 const COURSE_SIGNAL_RE = /(curso|cursos|clase|clases|capacitacion|capacitaciones|capacitación|capacitaciones|taller|talleres|masterclass|seminario|seminarios|workshop|formacion|formación|certificacion|certificación)/i;
 const COURSE_GENERIC_LIST_RE = /(hay|tenes|tenés|tienen|ofrecen|ofreces|dictan|dan|brindan|hacen|disponibles|abiertos|abiertas|cupos|inscripciones|inscripcion|inscripción|empiezan|arrancan|se dicta|se dictan|se esta dictando|se está dictando|se estan dando|se están dando|busco|ando buscando|quiero info|quisiera info|me pasas info|me pasás info|mostrame|mostrar|mandame|pasame|lista|opciones|catalogo|catálogo|informacion|información)/i;
 const COURSE_FOLLOWUP_RE = /(mas info|más info|info|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|cuando empieza|cuándo empieza|cuando arranca|cuándo arranca|inicio|duracion|duración|horario|horarios|dias|días|cupo|cupos|inscripcion|inscripción|requisitos|modalidad|presencial|online|virtual|de ese|de ese curso|ese curso|de barberia|de barbería|de maquillaje|de colorimetria|de colorimetría|de peinados|de auxiliar|de estetica|de estética|para aprender)/i;
-const PRODUCT_SIGNAL_RE = /(producto|productos|stock|insumo|insumos|shampoo|acondicionador|mascara|mascarilla|serum|aceite|oleo|tintura|oxidante|decolorante|matizador|ampolla|protector|spray|crema|gel|cera|mueble|muebles|espejo|espejos|camilla|camillas|sillon|sillones|silla|sillas|mesa|mesas|respaldo|puff|equipamiento|maquina|máquina|maquinas|máquinas|plancha|planchas|secador|secadores)/i;
-const PRODUCT_LIST_SIGNAL_RE = /(hay|tenes|tenés|tienen|venden|disponible|disponibles|stock|lista|opciones|catalogo|catálogo|mostrar|mostrame|mandame|pasame|busco|ando buscando|quiero ver|foto|fotos|imagen|imagenes)/i;
+const PRODUCT_SIGNAL_RE = /(producto|productos|stock|insumo|insumos|shampoo|acondicionador|mascara|mascarilla|serum|aceite|oleo|tintura|oxidante|decolorante|matizador|ampolla|protector|spray|crema|gel|cera|mueble|muebles|espejo|espejos|camilla|camillas|sillon|sillones|silla|sillas|mesa|mesas|respaldo|puff|equipamiento|maquina|máquina|maquinas|máquinas|plancha|planchas|secador|secadores|tijera|tijeras|capa|capas|rociador|rociadores|pulverizador|pulverizadores)/i;
+const PRODUCT_LIST_SIGNAL_RE = /(hay|tenes|tenés|tienen|venden|disponible|disponibles|stock|lista|opciones|catalogo|catálogo|mostrar|mostrame|mandame|pasame|busco|ando buscando|quiero ver|foto|fotos|imagen|imagenes|ver modelos|ver opciones)/i;
 const SERVICE_SIGNAL_RE = /(turno|turnos|servicio|servicios|reservar|reserva|agendar|agenda|cita|me quiero hacer|quiero hacerme|para hacerme|hacerme|me hago|realizan|trabajan con|atienden|precio del servicio|valor del servicio)/i;
 const SERVICE_LIST_SIGNAL_RE = /(que servicios|qué servicios|servicios tienen|lista de servicios|todos los servicios|mostrar servicios|mostrame servicios|mandame servicios|pasame servicios)/i;
 
@@ -12509,33 +12528,71 @@ function detectCourseIntentFromContext(text, { lastCourseContext = null } = {}) 
 }
 
 // ===================== RESPUESTAS =====================
+function getCatalogStockState(row) {
+  const raw = String(row?.stock || '').trim();
+  const normalized = normalizeCatalogSearchText(raw);
+  if (!normalized) return { state: 'unknown', raw: '' };
+  if (/(sin stock|agotad|no disponible|no hay|sin unidades)/i.test(normalized)) return { state: 'out', raw };
+  if (/^0+(?:[.,]0+)?$/.test(normalized)) return { state: 'out', raw };
+  const m = normalized.match(/\d+(?:[.,]\d+)?/);
+  if (m) {
+    const qty = Number(String(m[0]).replace(',', '.'));
+    if (!Number.isNaN(qty)) return { state: qty > 0 ? 'in' : 'out', raw };
+  }
+  return { state: 'in', raw };
+}
+
+function getCatalogStockText(row, { compact = false } = {}) {
+  const info = getCatalogStockState(row);
+  if (info.state === 'out') return compact ? 'sin stock' : 'Sin stock';
+  if (info.state === 'unknown') return compact ? 'a confirmar' : 'A confirmar';
+  const raw = String(info.raw || '').trim();
+  return raw || (compact ? 'disponible' : 'Disponible');
+}
+
+function cleanCatalogDescription(text, maxLen = 150) {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return '';
+  const cleaned = raw
+    .replace(/^(descripci[oó]n\s*:|detalle\s*:|info\s*:)/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  if (cleaned.length <= maxLen) return cleaned;
+  return `${cleaned.slice(0, Math.max(0, maxLen - 1)).trim()}…`;
+}
+
+function buildCatalogProductBlock(product, { detail = false } = {}) {
+  if (!product?.nombre) return '';
+  const emoji = getCatalogItemEmoji(product.nombre, { kind: 'product' });
+  const priceText = moneyOrConsult(product.precio);
+  const brandText = String(product?.marca || '').trim();
+  const stockText = getCatalogStockText(product);
+  const description = cleanCatalogDescription(product?.descripcion || '', detail ? 180 : 90);
+
+  const lines = [
+    `${emoji} *${product.nombre}*`,
+    brandText ? `• Marca: *${brandText}*` : '',
+    `• Precio: *${priceText}*`,
+    `• Stock: *${stockText}*`,
+    description ? `• Info: ${description}` : '',
+  ].filter(Boolean);
+
+  return lines.join('\n');
+}
+
 function formatStockReply(matches, mode, opts = {}) {
   if (!matches.length) return null;
 
-  const items = mode === "LIST" ? matches.slice(0, 10) : matches.slice(0, 1);
+  const items = mode === 'LIST' ? matches.slice(0, 6) : matches.slice(0, 1);
   const inferredDomain = opts.domain || detectProductDomain(opts.familyLabel || matches.map((x) => `${x?.tab || ''} ${x?.nombre || ''} ${x?.categoria || ''}`).join(' | '));
-  const header = mode === "LIST" ? `Encontré estas opciones:` : `Está en catálogo:`;
+  const header = mode === 'LIST' ? 'Encontré estas opciones:' : 'Está en catálogo:';
   const followUp = buildProductFollowupQuestion({ domain: inferredDomain, familyLabel: opts.familyLabel || '' });
-
-  if (hasPhotoableProductRows(items)) {
-    return `${header}
-
-${followUp}`.trim();
-  }
-
-  const blocks = items.map((p) => {
-    const precio = moneyOrConsult(p.precio);
-    return [
-      `${getCatalogItemEmoji(p.nombre, { kind: 'product' })} *${p.nombre}*`,
-      `• Precio: *${precio}*`,
-    ].join("\n");
-  });
-
-  const footer = `\n\n${followUp}`;
-  return `${header}\n\n${blocks.join("\n\n— — —\n\n")}${footer}`.trim();
+  const blocks = items.map((p) => buildCatalogProductBlock(p, { detail: mode !== 'LIST' || items.length <= 3 })).filter(Boolean);
+  if (!blocks.length) return null;
+  return `${header}\n\n${blocks.join("\n\n— — —\n\n")}\n\n${followUp}`.trim();
 }
 
-// LISTA COMPLETA (sin filtrar por stock): se manda en varios mensajes para no cortar WhatsApp.
 // LISTA COMPLETA (sin filtrar por stock): se manda en varios mensajes para no cortar WhatsApp.
 function formatStockListAll(rows, chunkSize = 12) {
   const items = Array.isArray(rows) ? rows.filter(r => r?.nombre) : [];
@@ -12544,13 +12601,7 @@ function formatStockListAll(rows, chunkSize = 12) {
   const chunks = [];
   for (let i = 0; i < items.length; i += chunkSize) {
     const part = items.slice(i, i + chunkSize);
-    const blocks = part.map((p) => {
-      const precio = moneyOrConsult(p.precio);
-      return [
-        `${getCatalogItemEmoji(p.nombre, { kind: 'product' })} *${p.nombre}*`,
-        `• Precio: *${precio}*`,
-      ].join("\n");
-    });
+    const blocks = part.map((p) => buildCatalogProductBlock(p, { detail: false })).filter(Boolean);
 
     const header = i === 0 ? `Catálogo completo:` : `Más opciones del catálogo:`;
     const footer = (i + chunkSize) >= items.length
@@ -12578,21 +12629,7 @@ function formatStockRelatedListAll(rows, { domain = '', familyLabel = '', chunkS
       ? buildProductFollowupQuestion({ domain: activeDomain, familyLabel })
       : `(Sigo con más opciones…)`;
 
-    if (hasPhotoableProductRows(part)) {
-      chunks.push(`${header}
-
-${footerText}`.trim());
-      continue;
-    }
-
-    const blocks = part.map((p) => {
-      const precio = moneyOrConsult(p.precio);
-      return [
-        `${getCatalogItemEmoji(p.nombre, { kind: 'product' })} *${p.nombre}*`,
-        `• Precio: *${precio}*`,
-      ].join("\n");
-    });
-
+    const blocks = part.map((p) => buildCatalogProductBlock(p, { detail: false })).filter(Boolean);
     chunks.push(`${header}\n\n${blocks.join("\n\n— — —\n\n")}\n\n${footerText}`.trim());
   }
 
@@ -13153,7 +13190,7 @@ Respondé SOLO JSON.`
 
 function isExplicitProductIntent(text) {
   const t = normalize(text || '');
-  return /(producto|productos|stock|insumo|insumos|shampoo|acondicionador|mascara|mascarilla|serum|aceite|oleo|tintura|oxidante|decolorante|matizador|ampolla|protector|spray|crema|gel|cera|comprar|venden|tenes|tenés|hay disponible|te queda|les queda|mueble|muebles|espejo|espejos|camilla|camillas|sillon|sillones|silla|sillas|mesa|mesas|respaldo|puff|equipamiento|maquina|máquina|maquinas|máquinas|plancha|planchas|secador|secadores)/i.test(t);
+  return /(producto|productos|stock|insumo|insumos|shampoo|acondicionador|mascara|mascarilla|serum|aceite|oleo|tintura|oxidante|decolorante|matizador|ampolla|protector|spray|crema|gel|cera|comprar|venden|tenes|tenés|hay disponible|te queda|les queda|mueble|muebles|espejo|espejos|camilla|camillas|sillon|sillones|silla|sillas|mesa|mesas|respaldo|puff|equipamiento|maquina|máquina|maquinas|máquinas|plancha|planchas|secador|secadores|tijera|tijeras|capa|capas|rociador|rociadores|pulverizador|pulverizadores)/i.test(t);
 }
 
 function isExplicitServiceIntent(text) {
@@ -13249,7 +13286,7 @@ function looksLikeHairCareConsultation(text = '') {
 function hasConcreteCommercialContext(text) {
   const t = normalize(text || '');
   if (!t) return false;
-  return /(curso|cursos|capacitacion|capacitación|taller|talleres|servicio|servicios|turno|turnos|producto|productos|promo|promocion|promoción|alisado|botox|keratina|nutricion|nutrición|tratamiento|corte|color|tintura|mechas|balayage|barber|barberia|barbería|shampoo|champu|champú|acondicionador|serum|sérum|ampolla|matizador|decolorante|camilla|camillas|espejo|espejos|sillon|sillón|sillones|mesa|mesas|mueble|muebles|equipamiento|maquina|máquina|maquinas|máquinas)/i.test(t);
+  return /(curso|cursos|capacitacion|capacitación|taller|talleres|servicio|servicios|turno|turnos|producto|productos|promo|promocion|promoción|alisado|botox|keratina|nutricion|nutrición|tratamiento|corte|color|tintura|mechas|balayage|barber|barberia|barbería|shampoo|champu|champú|acondicionador|serum|sérum|ampolla|matizador|decolorante|camilla|camillas|espejo|espejos|sillon|sillón|sillones|mesa|mesas|mueble|muebles|equipamiento|maquina|máquina|maquinas|máquinas|tijera|tijeras|capa|capas|rociador|rociadores|pulverizador|pulverizadores)/i.test(t);
 }
 
 function isAmbiguousBridgeCandidate(text) {
@@ -14451,7 +14488,10 @@ async function sendProductPhotoDirect(phone, product) {
 
     const caption = [
       product.nombre || 'Producto',
+      product.marca ? `Marca: ${String(product.marca).trim()}` : '',
       product.precio ? `Precio: ${moneyOrConsult(product.precio)}` : '',
+      `Stock: ${getCatalogStockText(product, { compact: true })}` ,
+      cleanCatalogDescription(product.descripcion || '', 90),
     ].filter(Boolean).join(' | ');
 
     await sendWhatsAppImageById(phone, mediaId, caption);
