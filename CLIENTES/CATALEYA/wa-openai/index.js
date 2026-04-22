@@ -6076,12 +6076,20 @@ async function resolveReplyToActiveAssistantOfferWithAI(text, context = {}) {
   const fallback = (() => {
     const activeType = String(activeOffer?.type || '').toUpperCase();
     const mentionedItem = pickMentionedOfferItemFromText(raw, activeOffer?.items || []);
-    const targetName = String(mentionedItem || activeOffer?.selectedName || activeOffer?.items?.[0] || '').trim();
-    const wantsAllItems = !!(userAsksForAllPhotos(raw) || (!mentionedItem && Array.isArray(activeOffer?.items) && activeOffer.items.length > 1));
+    const explicitSelectedName = String(mentionedItem || activeOffer?.selectedName || '').trim();
+    const singleAvailableItem = Array.isArray(activeOffer?.items) && activeOffer.items.length === 1
+      ? String(activeOffer.items[0] || '').trim()
+      : '';
+    const targetName = String(explicitSelectedName || singleAvailableItem || '').trim();
+    const hasMultipleChoices = Array.isArray(activeOffer?.items) && activeOffer.items.length > 1;
+    const wantsAllItems = !!(userAsksForAllPhotos(raw) || (!mentionedItem && !activeOffer?.selectedName && hasMultipleChoices));
     const normRaw = normalize(raw);
 
     if (activeType === 'PRODUCT') {
       if (userAsksForPhoto(raw)) {
+        if (!targetName && !wantsAllItems) {
+          return { action: 'NONE', target_type: 'PRODUCT', target_name: '', goal: 'PHOTO', wants_all_items: false };
+        }
         return {
           action: 'CONTINUE_ACTIVE_OFFER',
           target_type: 'PRODUCT',
@@ -6091,13 +6099,19 @@ async function resolveReplyToActiveAssistantOfferWithAI(text, context = {}) {
         };
       }
       if (/(precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta)/i.test(normRaw)) {
+        if (!targetName && hasMultipleChoices) {
+          return { action: 'NONE', target_type: 'PRODUCT', target_name: '', goal: 'PRICE', wants_all_items: false };
+        }
         return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'PRODUCT', target_name: targetName, goal: 'PRICE', wants_all_items: false };
       }
       if (/(mostrame|mostrame mas|mostrame más|opciones|disponibles|lista|catalogo|catálogo|que tenes|qué tenés|que hay|qué hay)/i.test(normRaw)) {
         return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'PRODUCT', target_name: targetName, goal: 'LIST_MORE', wants_all_items: true };
       }
       if (isProductUsageQuestion(raw)) {
-        return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'PRODUCT', target_name: targetName, goal: 'DETAIL', wants_all_items: !targetName && Array.isArray(activeOffer?.items) && activeOffer.items.length > 1 };
+        if (!targetName && hasMultipleChoices) {
+          return { action: 'NONE', target_type: 'PRODUCT', target_name: '', goal: 'DETAIL', wants_all_items: false };
+        }
+        return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'PRODUCT', target_name: targetName, goal: 'DETAIL', wants_all_items: false };
       }
     }
 
@@ -6175,17 +6189,21 @@ Reglas:
 
 function buildSyntheticTextFromActiveOfferResolution(resolution, activeOffer = null) {
   const type = String(resolution?.target_type || activeOffer?.type || '').trim().toUpperCase();
-  const target = String(resolution?.target_name || activeOffer?.selectedName || activeOffer?.items?.[0] || '').trim();
+  const selectedFallback = String(activeOffer?.selectedName || '').trim();
+  const singleFallback = Array.isArray(activeOffer?.items) && activeOffer.items.length === 1
+    ? String(activeOffer.items[0] || '').trim()
+    : '';
+  const target = String(resolution?.target_name || selectedFallback || singleFallback || '').trim();
   const goal = String(resolution?.goal || 'NONE').trim().toUpperCase();
   const allItems = !!resolution?.wants_all_items;
 
   if (!type) return '';
 
   if (type === 'PRODUCT') {
-    if (goal === 'PHOTO') return allItems ? 'pasame fotos de todo eso' : `pasame foto de ${target}`.trim();
-    if (goal === 'PRICE') return `precio de ${target}`.trim();
+    if (goal === 'PHOTO') return allItems ? 'pasame fotos de todo eso' : (target ? `pasame foto de ${target}`.trim() : '');
+    if (goal === 'PRICE') return target ? `precio de ${target}`.trim() : '';
     if (goal === 'LIST_MORE') return target ? `mostrame más opciones de ${target}` : 'mostrame más opciones';
-    return target || 'quiero ese producto';
+    return target || '';
   }
 
   if (type === 'COURSE') {
@@ -13431,7 +13449,7 @@ function looksLikeConversationalQuestion(text = '') {
 function isProductUsageQuestion(text = '') {
   const t = normalize(text || '');
   if (!t) return false;
-  return /(como se usa|cómo se usa|como se aplica|cómo se aplica|para que sirve|para qué sirve|sirve para|cada cuanto|cada cuánto|cada cuanto se usa|cada cuánto se usa|cada cuanto se aplica|cada cuánto se aplica|diferencia entre|cual es la diferencia|cuál es la diferencia|como funciona|cómo funciona|beneficios|ventajas|desventajas|que hace|qué hace)/i.test(t);
+  return /(como se usa|cómo se usa|como se aplica|cómo se aplica|para que sirve|para qué sirve|sirve para|cada cuanto|cada cuánto|cada cuanto se usa|cada cuánto se usa|cada cuanto se aplica|cada cuánto se aplica|diferencia entre|cual es la diferencia|cuál es la diferencia|como funciona|cómo funciona|beneficios|ventajas|desventajas|que hace|qué hace|se enjuaga|se enjuaga\?|va antes o despues|va antes o después|antes o despues|antes o después|todos los dias|todos los días|cada tanto|cuanto tiempo se deja|cuánto tiempo se deja|cuanto tiempo lo dejo|cuánto tiempo lo dejo|cuanto tiempo actua|cuánto tiempo actúa|despues del lavado|después del lavado|en pelo humedo|en pelo húmedo|con el pelo humedo|con el pelo húmedo|sobre el pelo humedo|sobre el pelo húmedo|se usa todos los dias|se usa todos los días|con enjuague|sin enjuague)/i.test(t);
 }
 
 function looksLikeProductCatalogAction(text = '') {
@@ -13534,6 +13552,21 @@ async function decideUniversalConversationRouteWithAI(text, context = {}) {
     if (!raw) return { route: 'FLOW', flow_type: fallbackType || 'OTHER', preserve_flow_state: preserve, reason: 'empty' };
     if (looksLikeOperationalPayloadForCurrentFlow(raw, context)) {
       return { route: 'FLOW', flow_type: fallbackType || 'OTHER', preserve_flow_state: preserve, reason: 'operational_payload' };
+    }
+
+    const explicitProductUsage = !!(
+      isProductUsageQuestion(raw)
+      && (
+        hasProductContext
+        || isExplicitProductIntent(raw)
+        || detectProductFamily(raw)
+        || detectFurnitureFamily(raw)
+        || /(ampolla|ampollas|shampoo|acondicionador|baño de crema|bano de crema|mascara|máscara|serum|sérum|tratamiento|plancha|secador|camilla|sillon|sillón|espejo|mueble|producto|productos)/i.test(normalize(raw))
+      )
+    );
+
+    if (explicitProductUsage && !looksLikeAppointmentIntent(raw, { pendingDraft: context.pendingDraft || null, lastService: context.lastServiceName ? { nombre: context.lastServiceName } : null })) {
+      return { route: 'CHAT', flow_type: 'PRODUCT', preserve_flow_state: preserve, reason: 'explicit_product_usage' };
     }
 
     if (hasProductContext && !looksLikeAppointmentIntent(raw, { pendingDraft: context.pendingDraft || null, lastService: context.lastServiceName ? { nombre: context.lastServiceName } : null })) {
@@ -15054,6 +15087,50 @@ async function maybeAutoSendProductPhotos(phone, products, { maxItems = 3 } = {}
   return sentCount > 0;
 }
 
+
+function shouldPreferPhotoOnlyCatalogReply(rows = [], { domain = '', text = '', mode = '', questionKind = '' } = {}) {
+  const list = Array.isArray(rows) ? rows.filter((row) => !!row?.nombre) : [];
+  if (!list.length) return false;
+  if (!hasPhotoableProductRows(list)) return false;
+  if (isProductUsageQuestion(text)) return false;
+  if (looksLikeConversationalQuestion(text) && !looksLikeProductCatalogAction(text) && !looksLikeProductRecommendationAction(text) && !userAsksForPhoto(text)) return false;
+
+  const resolvedDomain = String(domain || detectRowProductDomain(list[0]) || '').trim().toLowerCase();
+  const qk = String(questionKind || '').trim().toUpperCase();
+  const resolvedMode = String(mode || '').trim().toUpperCase();
+
+  if (resolvedDomain !== 'hair') return false;
+  return ['LIST', 'DETAIL', 'PRICE', 'RECOMMENDATION'].includes(qk) || ['LIST', 'DETAIL', 'RECOMMENDATION'].includes(resolvedMode) || !qk;
+}
+
+async function sendProductCatalogAsPhotosOnly(phone, products, { maxItems = 4 } = {}) {
+  if (!Array.isArray(products) || !products.length) return false;
+
+  const unique = [];
+  const seen = new Set();
+  for (const product of products) {
+    const key = normalizeCatalogSearchText(`${product?.nombre || ''} ${product?.marca || ''}`);
+    if (!product?.nombre || seen.has(key) || wasProductPhotoAlreadySent(phone, product)) continue;
+    seen.add(key);
+    unique.push(product);
+  }
+
+  const withPhoto = unique.filter((product) => !!extractDriveFileId(product?.foto || product?.Foto || product?.imagen || product?.image || ''));
+  const limited = withPhoto.slice(0, Math.max(1, Number(maxItems || 4)));
+  if (!limited.length) return false;
+
+  let sentCount = 0;
+  for (const product of limited) {
+    const result = await sendProductPhotoDirect(phone, product);
+    if (result.ok) {
+      markProductPhotoAsSent(phone, product);
+      sentCount += 1;
+    }
+  }
+
+  return sentCount > 0;
+}
+
 function imageExtFromMime(mimeType) {
   const mime = String(mimeType || '').toLowerCase();
   if (mime.includes('png')) return '.png';
@@ -15799,6 +15876,19 @@ updateLastCloseContext(waId, {
                 questionKind: 'PRICE',
                 lastAssistantText: replyPrice,
               });
+              const photoOnlySent = shouldPreferPhotoOnlyCatalogReply([activeProducts[0]], {
+                domain: activeAssistantOffer?.domain || detectRowProductDomain(activeProducts[0]) || '',
+                text: userIntentText || text,
+                mode: 'DETAIL',
+                questionKind: 'PRICE',
+              })
+                ? await sendProductCatalogAsPhotosOnly(phone, [activeProducts[0]], { maxItems: 1 })
+                : false;
+              if (photoOnlySent) {
+                pushHistory(waId, 'assistant', replyPrice);
+                scheduleInactivityFollowUp(waId, phone);
+                return;
+              }
               pushHistory(waId, 'assistant', replyPrice);
               await sendWhatsAppText(phone, replyPrice);
               await maybeAutoSendProductPhotos(phone, [activeProducts[0]], { maxItems: 1 });
@@ -15822,6 +15912,19 @@ updateLastCloseContext(waId, {
                 questionKind: 'LIST',
                 lastAssistantText: replyList,
               });
+              const photoOnlySent = shouldPreferPhotoOnlyCatalogReply(activeProducts, {
+                domain: activeAssistantOffer?.domain || '',
+                text: userIntentText || text,
+                mode: 'LIST',
+                questionKind: 'LIST',
+              })
+                ? await sendProductCatalogAsPhotosOnly(phone, activeProducts.slice(0, 3), { maxItems: Math.min(3, activeProducts.length) })
+                : false;
+              if (photoOnlySent) {
+                pushHistory(waId, 'assistant', replyList);
+                scheduleInactivityFollowUp(waId, phone);
+                return;
+              }
               pushHistory(waId, 'assistant', replyList);
               await sendWhatsAppText(phone, replyList);
               await maybeAutoSendProductPhotos(phone, activeProducts.slice(0, 3), { maxItems: Math.min(3, activeProducts.length) });
@@ -17492,9 +17595,19 @@ Si después necesita algo, estoy acá ✨`;
             if (exceptionalRecoHandled) {
               return;
             }
+            const photoOnlyReco = shouldPreferPhotoOnlyCatalogReply(pickedRows, {
+              domain: resolvedDomain,
+              text,
+              mode: 'RECOMMENDATION',
+              questionKind: 'RECOMMENDATION',
+            })
+              ? await sendProductCatalogAsPhotosOnly(phone, pickedRows, { maxItems: pickedRows.length === 1 ? 1 : 3 })
+              : false;
             pushHistory(waId, 'assistant', replyReco);
-            await sendWhatsAppText(phone, replyReco);
-            await maybeAutoSendProductPhotos(phone, pickedRows, { maxItems: pickedRows.length === 1 ? 1 : 3 });
+            if (!photoOnlyReco) {
+              await sendWhatsAppText(phone, replyReco);
+              await maybeAutoSendProductPhotos(phone, pickedRows, { maxItems: pickedRows.length === 1 ? 1 : 3 });
+            }
             scheduleInactivityFollowUp(waId, phone);
             return;
           }
@@ -17610,9 +17723,19 @@ Si después necesita algo, estoy acá ✨`;
         const replyCatalog = formatStockReply(matches, matches.length === 1 ? 'DETAIL' : 'LIST', { domain: resolvedDomain, familyLabel: resolvedFamily });
         if (replyCatalog) {
           rememberAssistantProductOffer(waId, matches, { mode: matches.length === 1 ? 'DETAIL' : 'LIST', domain: resolvedDomain || '', family: resolvedFamily || '', focusTerm: resolvedFocusTerm || '', selectedName: matches.length === 1 ? (matches[0]?.nombre || '') : '', questionKind: matches.length === 1 ? 'DETAIL' : 'LIST', lastAssistantText: replyCatalog });
+          const photoOnlyCatalog = shouldPreferPhotoOnlyCatalogReply(matches.length === 1 ? [matches[0]] : matches.slice(0, 3), {
+            domain: resolvedDomain,
+            text,
+            mode: matches.length === 1 ? 'DETAIL' : 'LIST',
+            questionKind: matches.length === 1 ? 'DETAIL' : 'LIST',
+          })
+            ? await sendProductCatalogAsPhotosOnly(phone, matches.length === 1 ? [matches[0]] : matches.slice(0, 3), { maxItems: matches.length === 1 ? 1 : 3 })
+            : false;
           pushHistory(waId, 'assistant', replyCatalog);
-          await sendWhatsAppText(phone, replyCatalog);
-          await maybeAutoSendProductPhotos(phone, matches.length === 1 ? [matches[0]] : matches.slice(0, 3), { maxItems: matches.length === 1 ? 1 : 3 });
+          if (!photoOnlyCatalog) {
+            await sendWhatsAppText(phone, replyCatalog);
+            await maybeAutoSendProductPhotos(phone, matches.length === 1 ? [matches[0]] : matches.slice(0, 3), { maxItems: matches.length === 1 ? 1 : 3 });
+          }
           scheduleInactivityFollowUp(waId, phone);
           return;
         }
