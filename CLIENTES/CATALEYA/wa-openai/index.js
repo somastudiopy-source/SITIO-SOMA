@@ -6075,23 +6075,37 @@ async function resolveReplyToActiveAssistantOfferWithAI(text, context = {}) {
 
   const fallback = (() => {
     const activeType = String(activeOffer?.type || '').toUpperCase();
-    const targetName = String(activeOffer?.selectedName || activeOffer?.items?.[0] || '').trim();
+    const mentionedItem = pickMentionedOfferItemFromText(raw, activeOffer?.items || []);
+    const targetName = String(mentionedItem || activeOffer?.selectedName || activeOffer?.items?.[0] || '').trim();
+    const wantsAllItems = !!(userAsksForAllPhotos(raw) || (!mentionedItem && Array.isArray(activeOffer?.items) && activeOffer.items.length > 1));
+    const normRaw = normalize(raw);
 
-    if (activeType === 'PRODUCT' && userAsksForPhoto(raw)) {
-      return {
-        action: 'CONTINUE_ACTIVE_OFFER',
-        target_type: 'PRODUCT',
-        target_name: targetName,
-        goal: 'PHOTO',
-        wants_all_items: !!(userAsksForAllPhotos(raw) || (!targetName && Array.isArray(activeOffer?.items) && activeOffer.items.length > 1)),
-      };
+    if (activeType === 'PRODUCT') {
+      if (userAsksForPhoto(raw)) {
+        return {
+          action: 'CONTINUE_ACTIVE_OFFER',
+          target_type: 'PRODUCT',
+          target_name: targetName,
+          goal: 'PHOTO',
+          wants_all_items: wantsAllItems,
+        };
+      }
+      if (/(precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta)/i.test(normRaw)) {
+        return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'PRODUCT', target_name: targetName, goal: 'PRICE', wants_all_items: false };
+      }
+      if (/(mostrame|mostrame mas|mostrame más|opciones|disponibles|lista|catalogo|catálogo|que tenes|qué tenés|que hay|qué hay)/i.test(normRaw)) {
+        return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'PRODUCT', target_name: targetName, goal: 'LIST_MORE', wants_all_items: true };
+      }
+      if (isProductUsageQuestion(raw)) {
+        return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'PRODUCT', target_name: targetName, goal: 'DETAIL', wants_all_items: !targetName && Array.isArray(activeOffer?.items) && activeOffer.items.length > 1 };
+      }
     }
 
-    if (activeType === 'COURSE' && /(inscrib|inscripción|inscripcion|anot|reserv(ar|o)? lugar|quiero seguir|quiero avanzar|quiero ese|quiero ese curso|seña|sena)/i.test(normalize(raw))) {
+    if (activeType === 'COURSE' && /(inscrib|inscripción|inscripcion|anot|reserv(ar|o)? lugar|quiero seguir|quiero avanzar|quiero ese|quiero ese curso|seña|sena)/i.test(normRaw)) {
       return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'COURSE', target_name: targetName, goal: 'SIGNUP', wants_all_items: false };
     }
 
-    if (activeType === 'SERVICE' && /(turno|reserv(ar|a)?|agend(ar|a)?|cita|quiero seguir|quiero avanzar|quiero ese servicio)/i.test(normalize(raw))) {
+    if (activeType === 'SERVICE' && /(turno|reserv(ar|a)?|agend(ar|a)?|cita|quiero seguir|quiero avanzar|quiero ese servicio)/i.test(normRaw)) {
       return { action: 'CONTINUE_ACTIVE_OFFER', target_type: 'SERVICE', target_name: targetName, goal: 'BOOK', wants_all_items: false };
     }
 
@@ -13413,6 +13427,44 @@ function looksLikeConversationalQuestion(text = '') {
   return /(como se usa|cómo se usa|como se aplica|cómo se aplica|como funciona|cómo funciona|como seria|cómo sería|para que sirve|para qué sirve|sirve para|cual es la diferencia|cuál es la diferencia|diferencia entre|que incluye|qué incluye|incluye materiales|se descuenta del total|la seña se descuenta|la sena se descuenta|me conviene|cuál me conviene|cual me conviene|cómo sería|que tengo que llevar|qué tengo que llevar|cuanto dura|cuánto dura|cuanto demora|cuánto demora|como hago|cómo hago|como seria el pago|cómo sería el pago)/i.test(t);
 }
 
+
+function isProductUsageQuestion(text = '') {
+  const t = normalize(text || '');
+  if (!t) return false;
+  return /(como se usa|cómo se usa|como se aplica|cómo se aplica|para que sirve|para qué sirve|sirve para|cada cuanto|cada cuánto|cada cuanto se usa|cada cuánto se usa|cada cuanto se aplica|cada cuánto se aplica|diferencia entre|cual es la diferencia|cuál es la diferencia|como funciona|cómo funciona|beneficios|ventajas|desventajas|que hace|qué hace)/i.test(t);
+}
+
+function looksLikeProductCatalogAction(text = '') {
+  const raw = String(text || '').trim();
+  const t = normalize(raw);
+  if (!t) return false;
+  if (userAsksForPhoto(raw)) return true;
+  return /(precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|stock|catalogo|catálogo|lista|opciones disponibles|mostrame las opciones|mostrame opciones|mostrame|pasame|mandame|enviame|ver opciones|que tenes|qué tenés|que hay|qué hay|hay de|disponibles|la primera|el primero|la segunda|el segundo|la tercera|el tercero|quiero ese|quiero esa|reservame|guardame|mas opciones|más opciones|otras opciones)/i.test(t);
+}
+
+function looksLikeProductRecommendationAction(text = '') {
+  const t = normalize(text || '');
+  if (!t) return false;
+  return /(recomend|me conviene|cual me conviene|cuál me conviene|para uso personal|para trabajar|profesional|personal|pelo seco|cabello seco|pelo danado|pelo dañado|cabello dañado|cabello danado|frizz|hidratacion|hidratación|reparacion|reparación|brillo|nutricion|nutrición|matizar|rubio|decolorado|rulos|rizado|lacio|liso|graso|fino|grueso|quebradizo|uso personal|para salon|para salón|barberia|barbería)/i.test(t);
+}
+
+function pickMentionedOfferItemFromText(text = '', items = []) {
+  const hay = normalizeCatalogSearchText(text || '');
+  const list = Array.isArray(items) ? items : [];
+  if (!hay || !list.length) return '';
+
+  const normalizedItems = list
+    .map((item) => ({ raw: String(item || '').trim(), norm: normalizeCatalogSearchText(item || '') }))
+    .filter((item) => item.raw && item.norm)
+    .sort((a, b) => b.norm.length - a.norm.length);
+
+  for (const item of normalizedItems) {
+    if (hay.includes(item.norm)) return item.raw;
+  }
+
+  return '';
+}
+
 function looksLikeOperationalPayloadForCurrentFlow(text = '', context = {}) {
   const raw = String(text || '').trim();
   const t = normalize(raw);
@@ -13472,19 +13524,32 @@ async function decideUniversalConversationRouteWithAI(text, context = {}) {
   ).trim().toUpperCase();
 
   const fallback = (() => {
-    if (!raw) return { route: 'FLOW', flow_type: fallbackType || 'OTHER', preserve_flow_state: !!(context.pendingDraft || context.pendingCourseDraft), reason: 'empty' };
+    const preserve = !!(context.pendingDraft || context.pendingCourseDraft);
+    const hasProductContext = !!(
+      context.lastProductContext
+      || String(activeOffer?.type || '').toUpperCase() === 'PRODUCT'
+      || fallbackType === 'PRODUCT'
+    );
+
+    if (!raw) return { route: 'FLOW', flow_type: fallbackType || 'OTHER', preserve_flow_state: preserve, reason: 'empty' };
     if (looksLikeOperationalPayloadForCurrentFlow(raw, context)) {
-      return { route: 'FLOW', flow_type: fallbackType || 'OTHER', preserve_flow_state: !!(context.pendingDraft || context.pendingCourseDraft), reason: 'operational_payload' };
+      return { route: 'FLOW', flow_type: fallbackType || 'OTHER', preserve_flow_state: preserve, reason: 'operational_payload' };
     }
-    if (looksLikeConversationalQuestion(raw)) {
-      return { route: 'CHAT', flow_type: fallbackType || 'OTHER', preserve_flow_state: !!(context.pendingDraft || context.pendingCourseDraft), reason: 'question' };
-    }
-    if ((context.lastProductContext || String(activeOffer?.type || '').toUpperCase() === 'PRODUCT') && !looksLikeAppointmentIntent(raw, { pendingDraft: context.pendingDraft || null, lastService: context.lastServiceName ? { nombre: context.lastServiceName } : null })) {
-      if (/(como se usa|cómo se usa|como se aplica|cómo se aplica|para que sirve|para qué sirve|sirve para|cual me conviene|cuál me conviene|diferencia entre|me conviene|recomend)/i.test(normalize(raw))) {
-        return { route: 'CHAT', flow_type: 'PRODUCT', preserve_flow_state: !!(context.pendingDraft || context.pendingCourseDraft), reason: 'product_followup' };
+
+    if (hasProductContext && !looksLikeAppointmentIntent(raw, { pendingDraft: context.pendingDraft || null, lastService: context.lastServiceName ? { nombre: context.lastServiceName } : null })) {
+      if (isProductUsageQuestion(raw)) {
+        return { route: 'CHAT', flow_type: 'PRODUCT', preserve_flow_state: preserve, reason: 'product_usage' };
+      }
+      if (looksLikeProductCatalogAction(raw) || looksLikeProductRecommendationAction(raw)) {
+        return { route: 'FLOW', flow_type: 'PRODUCT', preserve_flow_state: preserve, reason: 'product_catalog_action' };
       }
     }
-    return { route: 'FLOW', flow_type: fallbackType || 'OTHER', preserve_flow_state: !!(context.pendingDraft || context.pendingCourseDraft), reason: 'default' };
+
+    if (looksLikeConversationalQuestion(raw)) {
+      return { route: 'CHAT', flow_type: fallbackType || 'OTHER', preserve_flow_state: preserve, reason: 'question' };
+    }
+
+    return { route: 'FLOW', flow_type: fallbackType || 'OTHER', preserve_flow_state: preserve, reason: 'default' };
   })();
 
   try {
@@ -13504,10 +13569,11 @@ Devolvé SOLO JSON con:
 - reason: string breve
 
 Reglas:
-- CHAT cuando el cliente hace preguntas, pide explicación, compara, pide recomendación, pregunta cómo se usa, cómo funciona, qué incluye, si la seña se descuenta, materiales, requisitos, diferencias, duración, cuidados o cualquier duda conversacional.
-- FLOW cuando el mensaje aporta datos operativos o quiere ejecutar una acción: elegir opción concreta, pasar foto, pedir precio puntual del primero, enviar comprobante, pasar nombre/teléfono/DNI, elegir fecha u horario, confirmar reserva, avanzar con turno o inscripción.
+- CHAT cuando el cliente hace preguntas explicativas: cómo se usa, cómo se aplica, para qué sirve, diferencias, cuidados, qué incluye, materiales, requisitos, duración, seña, aclaraciones o cualquier duda conversacional que no requiera consultar el catálogo en vivo.
+- FLOW cuando el mensaje aporta datos operativos o quiere ejecutar una acción: elegir opción concreta, pedir precio, foto, stock o lista de productos, pedir recomendación de productos según necesidad, enviar comprobante, pasar nombre/teléfono/DNI, elegir fecha u horario, confirmar reserva, avanzar con turno o inscripción.
 - Si hay un flujo de turno o curso activo y el cliente hace una pregunta, route=CHAT y preserve_flow_state=true.
-- Si venían hablando de productos y el cliente pregunta "cómo se usa", "para qué sirve", "cuál me conviene" o similar, route=CHAT con flow_type=PRODUCT.
+- Si venían hablando de productos y el cliente pregunta "cómo se usa", "para qué sirve" o "qué diferencia hay", route=CHAT con flow_type=PRODUCT.
+- Si venían hablando de productos y el cliente dice "qué me recomendás", "para pelo seco", "para uso personal", "mostrame opciones", "cuánto sale" o "pasame foto", route=FLOW con flow_type=PRODUCT porque necesita stock y catálogo real.
 - Si venían hablando de un curso y pregunta materiales, modalidad, requisitos, horarios o detalles, route=CHAT con flow_type=COURSE.
 - Si venían hablando de un servicio/turno y pregunta precio, duración, cómo sería, seña o aclaraciones, route=CHAT con flow_type=SERVICE.
 - "pasame foto", "precio del primero", "quiero ese", "quiero turno", "quiero inscribirme", "te mando el comprobante", una fecha, una hora o un DNI son FLOW.
@@ -13666,6 +13732,7 @@ async function answerNaturallyFromCurrentContext(text, context = {}) {
 Reglas extra:
 - Si hay un flujo activo de turno o curso, respondé la duda con naturalidad y DEJÁ el flujo pendiente. No reinicies la charla ni vuelvas a pedir datos salvo que haga falta.
 - Si vienen hablando de un producto, curso o servicio, respondé sobre ESE contexto. No repitas listas completas ni catálogo salvo que el cliente lo pida explícitamente.
+- En productos, usá este modo natural solo para explicar uso, aplicación, diferencias, beneficios o cuidados. Si la persona pide opciones, precio, stock o fotos, eso debe resolverse por catálogo, no inventando texto libre.
 - Si la pregunta depende de una opción concreta y hay varias opciones activas, respondé de forma útil con lo que comparten o pedí una aclaración breve.
 - No inventes stock, precios, requisitos, materiales ni servicios. Si algo no está claro en el contexto, decilo brevemente.
 - Soná natural, cercana y profesional. Mensajes cortos, claros y útiles.`
@@ -15716,6 +15783,52 @@ updateLastCloseContext(waId, {
               return;
             }
           }
+
+          if (activeOfferResolution.goal === 'PRICE' && activeProducts.length === 1) {
+            const replyPrice = formatStockReply([activeProducts[0]], 'DETAIL', {
+              domain: activeAssistantOffer?.domain || detectRowProductDomain(activeProducts[0]) || '',
+              familyLabel: activeAssistantOffer?.family || detectProductFamily(activeProducts[0]?.nombre || '') || '',
+            });
+            if (replyPrice) {
+              rememberAssistantProductOffer(waId, [activeProducts[0]], {
+                mode: 'DETAIL',
+                domain: activeAssistantOffer?.domain || '',
+                family: activeAssistantOffer?.family || '',
+                focusTerm: activeAssistantOffer?.focusTerm || '',
+                selectedName: activeProducts[0]?.nombre || '',
+                questionKind: 'PRICE',
+                lastAssistantText: replyPrice,
+              });
+              pushHistory(waId, 'assistant', replyPrice);
+              await sendWhatsAppText(phone, replyPrice);
+              await maybeAutoSendProductPhotos(phone, [activeProducts[0]], { maxItems: 1 });
+              scheduleInactivityFollowUp(waId, phone);
+              return;
+            }
+          }
+
+          if ((activeOfferResolution.goal === 'LIST_MORE' || (activeOfferResolution.goal === 'DETAIL' && activeProducts.length > 1 && !activeOfferResolution.target_name)) && activeProducts.length) {
+            const replyList = formatStockReply(activeProducts, 'LIST', {
+              domain: activeAssistantOffer?.domain || '',
+              familyLabel: activeAssistantOffer?.family || '',
+            });
+            if (replyList) {
+              rememberAssistantProductOffer(waId, activeProducts, {
+                mode: 'LIST',
+                domain: activeAssistantOffer?.domain || '',
+                family: activeAssistantOffer?.family || '',
+                focusTerm: activeAssistantOffer?.focusTerm || '',
+                selectedName: '',
+                questionKind: 'LIST',
+                lastAssistantText: replyList,
+              });
+              pushHistory(waId, 'assistant', replyList);
+              await sendWhatsAppText(phone, replyList);
+              await maybeAutoSendProductPhotos(phone, activeProducts.slice(0, 3), { maxItems: Math.min(3, activeProducts.length) });
+              scheduleInactivityFollowUp(waId, phone);
+              return;
+            }
+          }
         }
       }
 
@@ -17373,7 +17486,7 @@ Si después necesita algo, estoy acá ✨`;
               lastOptions: (picked.length ? picked : shortlist.slice(0, 4)).map((x) => x.nombre),
             });
             const pickedRows = picked.length ? picked : shortlist.slice(0, 4);
-            rememberAssistantProductOffer(waId, pickedRows, { mode: 'recommendation', domain: resolvedDomain || detectProductDomain(text, resolvedFamily) || '', family: resolvedFamily || '', focusTerm: resolvedFocusTerm || '', questionKind: 'RECOMMENDATION', lastAssistantText: replyReco });
+            rememberAssistantProductOffer(waId, pickedRows, { mode: 'recommendation', domain: resolvedDomain || detectProductDomain(text, resolvedFamily) || '', family: resolvedFamily || '', focusTerm: resolvedFocusTerm || '', selectedName: pickedRows.length === 1 ? (pickedRows[0]?.nombre || '') : '', questionKind: 'RECOMMENDATION', lastAssistantText: replyReco });
             if (pickedRows.length === 1) lastProductByUser.set(waId, pickedRows[0]);
             const exceptionalRecoHandled = await tryExceptionalPhotoReply(pickedRows, { mode: 'recommendation', selectedName: pickedRows.length === 1 ? (pickedRows[0]?.nombre || '') : '', questionKind: 'RECOMMENDATION' });
             if (exceptionalRecoHandled) {
