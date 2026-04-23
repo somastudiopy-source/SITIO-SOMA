@@ -8,6 +8,9 @@ const { google } = require("googleapis");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+const execFileAsync = promisify(execFile);
 const { Pool } = require("pg");
 let XLSX = null;
 try { XLSX = require("xlsx"); } catch {}
@@ -5507,31 +5510,222 @@ Campos:
 }
 
 
+function getFileMimeFromPath(filePath = '') {
+  const ext = path.extname(String(filePath || '')).toLowerCase();
+  if (ext === '.png') return 'image/png';
+  if (ext === '.webp') return 'image/webp';
+  if (ext === '.pdf') return 'application/pdf';
+  return 'image/jpeg';
+}
+
+async function renderPdfFirstPageToPng(pdfPath) {
+  const safePath = String(pdfPath || '').trim();
+  if (!safePath || !fs.existsSync(safePath)) return '';
+
+  const outPrefix = path.join(
+    getTmpDir(),
+    `pdf-proof-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+  );
+
+  try {
+    await execFileAsync('pdftoppm', ['-png', '-f', '1', '-singlefile', safePath, outPrefix], {
+      timeout: 20000,
+      maxBuffer: 20 * 1024 * 1024,
+    });
+    const pngPath = `${outPrefix}.png`;
+    return fs.existsSync(pngPath) ? pngPath : '';
+  } catch {
+    return '';
+  }
+}
+
+function normalizeProofHolderName(value = '') {
+  const cleaned = cleanNameCandidate(value);
+  if (!cleaned) return '';
+  return cleaned;
+}
+
+async function extractStrictCoursePaymentProofFromText(text) {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!raw) {
+    return { ok: false, es_comprobante: false, titular: '', monto: '', texto_visible: '' };
+  }
+
+  const heuristicTitular = detectTitularMonicaPacheco(raw) ? TURNOS_ALIAS_TITULAR : '';
+  const heuristicAmount = detectMonto10000(raw) ? COURSE_SENA_TXT : '';
+
+  try {
+    const resp = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Analizá este texto como posible comprobante de pago o transferencia.
+Devolvé SOLO JSON válido con estas claves:
+- es_comprobante: boolean
+- titular: string
+- monto: string
+- texto_visible: string
+
+Reglas:
+- Solo importan dos datos: el nombre del titular/receptor visible y el monto visible.
+- Ignorá CVU, alias, bancos, operación, motivo y cualquier otro texto.
+- Si aparece Monica Pacheco, devolvé exactamente "Monica Pacheco".
+- Si aparece 10000 o $10.000, devolvé exactamente "$10.000".
+- No inventes nada.`
+        },
+        {
+          role: 'user',
+          content: raw.slice(0, 8000),
+        },
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const obj = safeJsonParseFromText(resp.choices?.[0]?.message?.content || '') || {};
+    const titular = normalizeProofHolderName(obj.titular || heuristicTitular || '');
+    const montoDetected = String(obj.monto || '').trim();
+    const monto = extractMoneyAmountFromText(montoDetected) === COURSE_SENA_AMOUNT
+      ? COURSE_SENA_TXT
+      : (heuristicAmount || montoDetected);
+
+    return {
+      ok: true,
+      es_comprobante: !!obj.es_comprobante || !!titular || !!monto,
+      titular,
+      monto: String(monto || '').trim(),
+      texto_visible: String(obj.texto_visible || raw || '').trim().slice(0, 2000),
+    };
+  } catch {
+    return {
+      ok: !!(heuristicTitular || heuristicAmount),
+      es_comprobante: !!(heuristicTitular || heuristicAmount),
+      titular: heuristicTitular,
+      monto: heuristicAmount,
+      texto_visible: raw.slice(0, 2000),
+    };
+  }
+}
+
+function mergeStrictCourseProofResults(...results) {
+  const valid = results.filter(Boolean);
+  const merged = {
+    ok: false,
+    es_comprobante: false,
+    titular: '',
+    monto: '',
+    texto_visible: '',
+  };
+
+  for (const item of valid) {
+    if (!merged.titular && item.titular) merged.titular = String(item.titular || '').trim();
+    if (!merged.monto && item.monto) merged.monto = String(item.monto || '').trim();
+    if (!merged.texto_visible && item.texto_visible) merged.texto_visible = String(item.texto_visible || '').trim();
+    merged.ok = merged.ok || !!item.ok;
+    merged.es_comprobante = merged.es_comprobante || !!item.es_comprobante;
+  }
+
+  if (!merged.titular) {
+    const joined = valid.map((x) => `${x?.texto_visible || ''} ${x?.titular || ''}`).join(' ');
+    if (detectTitularMonicaPacheco(joined)) merged.titular = TURNOS_ALIAS_TITULAR;
+  }
+  if (!merged.monto) {
+    const joined = valid.map((x) => `${x?.texto_visible || ''} ${x?.monto || ''}`).join(' ');
+    if (detectMonto10000(joined)) merged.monto = COURSE_SENA_TXT;
+  }
+  if (!merged.texto_visible) {
+    merged.texto_visible = valid.map((x) => x?.texto_visible || '').filter(Boolean).join('\n').slice(0, 2000);
+  }
+  merged.ok = merged.ok || !!(merged.titular || merged.monto || merged.texto_visible);
+  merged.es_comprobante = merged.es_comprobante || !!(merged.titular || merged.monto);
+  return merged;
+}
+
 async function extractStrictCoursePaymentProofFromImage(filename) {
-  const safeName = String(filename || "").trim();
+  const safeName = String(filename || '').trim();
   if (!safeName) {
-    return { ok: false, es_comprobante: false, titular: "", monto: "", texto_visible: "" };
+    return { ok: false, es_comprobante: false, titular: '', monto: '', texto_visible: '' };
   }
 
   const fullPath = path.join(MEDIA_DIR, safeName);
   if (!fs.existsSync(fullPath)) {
-    return { ok: false, es_comprobante: false, titular: "", monto: "", texto_visible: "" };
+    return { ok: false, es_comprobante: false, titular: '', monto: '', texto_visible: '' };
   }
 
-  const ext = path.extname(fullPath).toLowerCase();
-  const mime =
-    ext === ".png" ? "image/png" :
-    ext === ".webp" ? "image/webp" :
-    "image/jpeg";
+  const mime = getFileMimeFromPath(fullPath);
 
   try {
-    const dataUrl = fileToDataUrl(fullPath, mime);
+    if (mime === 'application/pdf') {
+      let textResult = { ok: false, es_comprobante: false, titular: '', monto: '', texto_visible: '' };
+      let renderedResult = { ok: false, es_comprobante: false, titular: '', monto: '', texto_visible: '' };
 
+      try {
+        const buf = fs.readFileSync(fullPath);
+        const parsedText = await tryParsePdfBuffer(buf);
+        if (parsedText) {
+          textResult = await extractStrictCoursePaymentProofFromText(parsedText);
+        }
+      } catch {}
+
+      let renderedPng = '';
+      try {
+        renderedPng = await renderPdfFirstPageToPng(fullPath);
+        if (renderedPng) {
+          const dataUrl = fileToDataUrl(renderedPng, 'image/png');
+          const resp = await openai.chat.completions.create({
+            model: COMPLEX_MODEL,
+            messages: [
+              {
+                role: 'system',
+                content:
+`Mirá esta imagen obtenida de un PDF de comprobante.
+Devolvé SOLO JSON válido con estas claves:
+- es_comprobante: boolean
+- titular: string
+- monto: string
+- texto_visible: string
+
+Reglas:
+- Solo importan el titular/receptor visible y el monto visible.
+- Ignorá todo lo demás.
+- Si se ve Monica Pacheco, devolvé exactamente "Monica Pacheco".
+- Si se ve 10000 o $10.000, devolvé exactamente "$10.000".
+- No inventes nada.`
+              },
+              {
+                role: 'user',
+                content: [
+                  { type: 'text', text: 'Extraé solo el titular visible y el monto visible del comprobante.' },
+                  { type: 'image_url', image_url: { url: dataUrl } },
+                ],
+              },
+            ],
+            response_format: { type: 'json_object' },
+          });
+          const obj = safeJsonParseFromText(resp.choices?.[0]?.message?.content || '') || {};
+          renderedResult = {
+            ok: true,
+            es_comprobante: !!obj.es_comprobante || !!obj.titular || !!obj.monto,
+            titular: normalizeProofHolderName(obj.titular || ''),
+            monto: extractMoneyAmountFromText(obj.monto || '') === COURSE_SENA_AMOUNT ? COURSE_SENA_TXT : String(obj.monto || '').trim(),
+            texto_visible: String(obj.texto_visible || '').trim(),
+          };
+        }
+      } catch {} finally {
+        try { if (renderedPng) fs.unlinkSync(renderedPng); } catch {}
+      }
+
+      return mergeStrictCourseProofResults(renderedResult, textResult);
+    }
+
+    const dataUrl = fileToDataUrl(fullPath, mime);
     const resp = await openai.chat.completions.create({
       model: COMPLEX_MODEL,
       messages: [
         {
-          role: "system",
+          role: 'system',
           content:
 `Mirá esta imagen SOLO como comprobante de pago o transferencia.
 
@@ -5542,38 +5736,38 @@ Devolvé SOLO JSON válido con estas claves:
 - texto_visible: string
 
 Reglas:
-- "titular" debe contener únicamente el nombre del titular visible.
-- "monto" debe contener únicamente el monto visible.
+- Solo importan el titular/receptor visible y el monto visible.
 - No pongas CVU, alias, banco, número de operación, motivo ni otros datos dentro de "titular" o "monto".
 - Si se ve "Monica Pacheco", devolvé exactamente "Monica Pacheco".
-- Si se ve "$ 10.000", devolvé exactamente "$10.000".
+- Si se ve "$ 10.000" o "10000", devolvé exactamente "$10.000".
 - En "texto_visible" transcribí solo lo mínimo útil para validar titular y monto.
 - No inventes nada.`
         },
         {
-          role: "user",
+          role: 'user',
           content: [
-            { type: "text", text: "Extraé únicamente el titular y el monto visibles del comprobante." },
-            { type: "image_url", image_url: { url: dataUrl } },
+            { type: 'text', text: 'Extraé únicamente el titular visible y el monto visible del comprobante.' },
+            { type: 'image_url', image_url: { url: dataUrl } },
           ],
         },
       ],
-      response_format: { type: "json_object" },
+      response_format: { type: 'json_object' },
     });
 
-    const obj = safeJsonParseFromText(resp.choices?.[0]?.message?.content || "") || {};
-
-    return {
+    const obj = safeJsonParseFromText(resp.choices?.[0]?.message?.content || '') || {};
+    const rawText = String(obj.texto_visible || '').trim();
+    return mergeStrictCourseProofResults({
       ok: true,
-      es_comprobante: !!obj.es_comprobante,
-      titular: String(obj.titular || "").trim(),
-      monto: String(obj.monto || "").trim(),
-      texto_visible: String(obj.texto_visible || "").trim(),
-    };
+      es_comprobante: !!obj.es_comprobante || !!obj.titular || !!obj.monto,
+      titular: normalizeProofHolderName(obj.titular || ''),
+      monto: extractMoneyAmountFromText(obj.monto || '') === COURSE_SENA_AMOUNT ? COURSE_SENA_TXT : String(obj.monto || '').trim(),
+      texto_visible: rawText,
+    }, await extractStrictCoursePaymentProofFromText(rawText));
   } catch {
-    return { ok: false, es_comprobante: false, titular: "", monto: "", texto_visible: "" };
+    return { ok: false, es_comprobante: false, titular: '', monto: '', texto_visible: '' };
   }
 }
+
 
 
 const PRIMARY_MODEL = process.env.PRIMARY_MODEL || "gpt-4.1-mini";
@@ -7591,10 +7785,11 @@ async function tryApplyPaymentToCourseEnrollmentDraft(base, { text, mediaMeta } 
   const next = { ...(base || {}) };
   const rawText = String(text || '').trim();
   const previousProofText = String(next.payment_proof_text || '').trim();
-  const previousProofExists = !!(next.payment_proof_media_id || previousProofText);
+  const previousProofExists = !!(next.payment_proof_media_id || next.payment_proof_filename || previousProofText);
   const userSaysProofWasSent = looksLikeProofAlreadySent(rawText);
   const maybeProof =
     !!mediaMeta ||
+    !!next.payment_proof_filename ||
     detectSenaPaid({ text: rawText }) ||
     looksLikePaymentProofText(rawText) ||
     userSaysProofWasSent;
@@ -7603,10 +7798,9 @@ async function tryApplyPaymentToCourseEnrollmentDraft(base, { text, mediaMeta } 
 
   next.payment_proof_text = rawText || next.payment_proof_text || '';
   next.payment_proof_media_id = mediaMeta?.id || next.payment_proof_media_id || '';
-  next.payment_proof_filename =
-    mediaMeta?.filename || mediaMeta?.file_name || next.payment_proof_filename || '';
+  next.payment_proof_filename = mediaMeta?.filename || mediaMeta?.file_name || next.payment_proof_filename || '';
 
-  let strictImage = {
+  let strictProof = {
     ok: false,
     es_comprobante: false,
     titular: '',
@@ -7614,47 +7808,50 @@ async function tryApplyPaymentToCourseEnrollmentDraft(base, { text, mediaMeta } 
     texto_visible: '',
   };
 
-  if (mediaMeta?.filename) {
-    strictImage = await extractStrictCoursePaymentProofFromImage(mediaMeta.filename);
+  if (next.payment_proof_filename) {
+    strictProof = await extractStrictCoursePaymentProofFromImage(next.payment_proof_filename);
   }
 
   const evidenceText = [
     rawText,
     previousProofText,
-    strictImage.texto_visible,
-    strictImage.titular,
-    strictImage.monto,
+    strictProof.texto_visible,
+    strictProof.titular,
+    strictProof.monto,
   ]
     .filter(Boolean)
     .join('\n')
     .slice(0, 7000);
 
   const aiPago = await extractPagoInfoWithAI(evidenceText);
-  const strictMonto = extractMoneyAmountFromText(strictImage?.monto || '') || null;
+  const strictMonto = extractMoneyAmountFromText(strictProof?.monto || '') || null;
   const aiMonto = extractMoneyAmountFromText(aiPago?.monto || '') || null;
   const heuristicAmount = extractMoneyAmountFromText(evidenceText) || null;
 
   const receiverDetected =
+    detectTitularMonicaPacheco(strictProof?.titular || '') ||
+    detectTitularMonicaPacheco(strictProof?.texto_visible || '') ||
     detectTitularMonicaPacheco(evidenceText) ||
-    detectTitularMonicaPacheco(strictImage?.titular || '') ||
-    isExpectedReceiver(strictImage?.titular || '') ||
+    isExpectedReceiver(strictProof?.titular || '') ||
     isExpectedReceiver(aiPago?.receptor || '');
 
   const amountLooksRight =
     strictMonto === COURSE_SENA_AMOUNT ||
     aiMonto === COURSE_SENA_AMOUNT ||
     heuristicAmount === COURSE_SENA_AMOUNT ||
+    detectMonto10000(strictProof?.monto || '') ||
+    detectMonto10000(strictProof?.texto_visible || '') ||
     detectMonto10000(evidenceText);
 
-  const canVerifyWithConfidence =
-    receiverDetected &&
-    amountLooksRight &&
-    (
-      !!mediaMeta ||
-      !!strictImage.es_comprobante ||
-      !!strictImage.texto_visible ||
-      !!rawText
-    );
+  const hasStructuredProofEvidence =
+    !!next.payment_proof_filename ||
+    !!mediaMeta ||
+    !!strictProof.texto_visible ||
+    !!strictProof.titular ||
+    !!strictProof.monto ||
+    !!previousProofExists;
+
+  const canVerifyWithConfidence = receiverDetected && amountLooksRight && hasStructuredProofEvidence;
 
   if (canVerifyWithConfidence) {
     next.payment_status = 'paid_verified';
@@ -7665,21 +7862,31 @@ async function tryApplyPaymentToCourseEnrollmentDraft(base, { text, mediaMeta } 
     return next;
   }
 
-  if ((mediaMeta || userSaysProofWasSent || previousProofExists) && !paymentMessageIsTooWeakToVerify(rawText)) {
+  if (hasStructuredProofEvidence && (receiverDetected || amountLooksRight || !!strictProof.es_comprobante || !!aiPago?.es_comprobante)) {
     next.payment_status = next.payment_status === 'paid_verified' ? 'paid_verified' : 'payment_review';
-
     if (next.payment_status !== 'paid_verified') {
       next.payment_amount = strictMonto || aiMonto || heuristicAmount || next.payment_amount || null;
       next.payment_receiver = receiverDetected ? TURNOS_ALIAS_TITULAR : (next.payment_receiver || '');
       if (!next.payment_sender && aiPago?.pagador) next.payment_sender = aiPago.pagador;
       next.payment_proof_text = evidenceText || next.payment_proof_text || '';
     }
+    return next;
+  }
 
+  if ((mediaMeta || next.payment_proof_filename || userSaysProofWasSent || previousProofExists) && !paymentMessageIsTooWeakToVerify(rawText)) {
+    next.payment_status = next.payment_status === 'paid_verified' ? 'paid_verified' : 'payment_review';
+    if (next.payment_status !== 'paid_verified') {
+      next.payment_amount = strictMonto || aiMonto || heuristicAmount || next.payment_amount || null;
+      next.payment_receiver = receiverDetected ? TURNOS_ALIAS_TITULAR : (next.payment_receiver || '');
+      if (!next.payment_sender && aiPago?.pagador) next.payment_sender = aiPago.pagador;
+      next.payment_proof_text = evidenceText || next.payment_proof_text || '';
+    }
     return next;
   }
 
   return next;
 }
+
 
 async function createCourseEnrollmentRecord({ waId, waPhone, draft }) {
   const d = draft || {};
@@ -17999,20 +18206,23 @@ ${some}
         const signupMatches = signupQuery ? findCourses(courses, signupQuery, 'DETAIL') : [];
         const signupCourse = aiSignupSelection.course || activeCourse || referencedCourse || signupMatches[0] || findCourseByContextName(courses, courseEnrollmentIntent.course_query || '') || null;
         const isFreshCourseSignup = courseEnrollmentIntent.action === 'START_SIGNUP';
+        const sameCourseAsPending = !!pendingCourseDraft?.curso_nombre && !!signupCourse?.nombre
+          && normalize(pendingCourseDraft.curso_nombre) === normalize(signupCourse.nombre);
+        const shouldResetExistingCourseDraft = isFreshCourseSignup && (!pendingCourseDraft || !sameCourseAsPending);
         let baseCourseDraft = {
           ...(pendingCourseDraft || {}),
           curso_nombre: signupCourse?.nombre || pendingCourseDraft?.curso_nombre || '',
           curso_categoria: signupCourse?.categoria || pendingCourseDraft?.curso_categoria || '',
-          alumno_nombre: isFreshCourseSignup ? '' : (pendingCourseDraft?.alumno_nombre || ''),
-          alumno_dni: isFreshCourseSignup ? '' : (pendingCourseDraft?.alumno_dni || ''),
+          alumno_nombre: shouldResetExistingCourseDraft ? '' : (pendingCourseDraft?.alumno_nombre || ''),
+          alumno_dni: shouldResetExistingCourseDraft ? '' : (pendingCourseDraft?.alumno_dni || ''),
           telefono_contacto: normalizePhone(phone || pendingCourseDraft?.telefono_contacto || ''),
-          payment_status: isFreshCourseSignup ? 'not_paid' : (pendingCourseDraft?.payment_status || 'not_paid'),
-          payment_amount: isFreshCourseSignup ? null : (pendingCourseDraft?.payment_amount ?? null),
-          payment_sender: isFreshCourseSignup ? '' : (pendingCourseDraft?.payment_sender || ''),
-          payment_receiver: isFreshCourseSignup ? '' : (pendingCourseDraft?.payment_receiver || ''),
-          payment_proof_text: isFreshCourseSignup ? '' : (pendingCourseDraft?.payment_proof_text || ''),
-          payment_proof_media_id: isFreshCourseSignup ? '' : (pendingCourseDraft?.payment_proof_media_id || ''),
-          payment_proof_filename: isFreshCourseSignup ? '' : (pendingCourseDraft?.payment_proof_filename || ''),
+          payment_status: shouldResetExistingCourseDraft ? 'not_paid' : (pendingCourseDraft?.payment_status || 'not_paid'),
+          payment_amount: shouldResetExistingCourseDraft ? null : (pendingCourseDraft?.payment_amount ?? null),
+          payment_sender: shouldResetExistingCourseDraft ? '' : (pendingCourseDraft?.payment_sender || ''),
+          payment_receiver: shouldResetExistingCourseDraft ? '' : (pendingCourseDraft?.payment_receiver || ''),
+          payment_proof_text: shouldResetExistingCourseDraft ? '' : (pendingCourseDraft?.payment_proof_text || ''),
+          payment_proof_media_id: shouldResetExistingCourseDraft ? '' : (pendingCourseDraft?.payment_proof_media_id || ''),
+          payment_proof_filename: shouldResetExistingCourseDraft ? '' : (pendingCourseDraft?.payment_proof_filename || ''),
           last_intent: 'course_signup',
         };
         baseCourseDraft = mergeStudentIntoCourseEnrollment({
