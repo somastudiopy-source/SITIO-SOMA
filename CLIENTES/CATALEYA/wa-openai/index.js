@@ -12568,6 +12568,39 @@ function detectCourseIntentFromContext(text, { lastCourseContext = null } = {}) 
   return { isCourse: false, query: '', mode: 'DETAIL' };
 }
 
+function detectForcedCourseFlowIntent(text, { lastCourseContext = null, pendingCourseDraft = null } = {}) {
+  const raw = String(text || '').trim();
+  const t = normalize(raw);
+  if (!t) return { isCourse: false, query: '', mode: 'DETAIL', reason: '' };
+
+  const explicitFromContext = detectCourseIntentFromContext(raw, { lastCourseContext });
+  const fastCourse = detectFastCatalogIntent(raw, {
+    lastCourseName: lastCourseContext?.selectedName || lastCourseContext?.query || pendingCourseDraft?.curso_nombre || '',
+    hasCourseContext: !!lastCourseContext || !!pendingCourseDraft,
+    hasDraft: false,
+    flowStep: pendingCourseDraft?.flow_step || '',
+  });
+  const quickCourseFlow = looksLikeCourseFlowSignal(raw, { lastCourseContext, pendingCourseDraft });
+  const genericCourseCatalogAsk = isLikelyGenericCourseListQuery(raw)
+    || /(que|qué)\s+(cursos|clases|talleres|capacitaciones)\s+(hay|tienen|tenes|tenés|estan dictando|están dictando|dictan|dan|ofrecen)/i.test(raw)
+    || /(hay|tienen|tenes|tenés|dictan|dan|ofrecen)\s+(cursos|clases|talleres|capacitaciones)/i.test(raw);
+
+  if (!explicitFromContext.isCourse && fastCourse?.type !== 'COURSE' && !quickCourseFlow && !genericCourseCatalogAsk) {
+    return { isCourse: false, query: '', mode: 'DETAIL', reason: '' };
+  }
+
+  const genericList = genericCourseCatalogAsk
+    || explicitFromContext.mode === 'LIST'
+    || fastCourse?.mode === 'LIST';
+
+  return {
+    isCourse: true,
+    query: genericList ? 'cursos' : (explicitFromContext.query || fastCourse?.query || raw),
+    mode: genericList ? 'LIST' : (explicitFromContext.mode || fastCourse?.mode || 'DETAIL'),
+    reason: quickCourseFlow ? 'course_flow_signal' : (genericList ? 'course_catalog' : 'course_detail'),
+  };
+}
+
 // ===================== RESPUESTAS =====================
 function getCatalogStockState(row) {
   const raw = String(row?.stock || '').trim();
@@ -13550,6 +13583,11 @@ async function decideUniversalConversationRouteWithAI(text, context = {}) {
     || 'OTHER'
   ).trim().toUpperCase();
 
+  const forcedCourseFlow = detectForcedCourseFlowIntent(raw, {
+    lastCourseContext: context.lastCourseContext || null,
+    pendingCourseDraft: context.pendingCourseDraft || null,
+  });
+
   const fallback = (() => {
     const preserve = !!(context.pendingDraft || context.pendingCourseDraft);
     const hasProductContext = !!(
@@ -13561,6 +13599,9 @@ async function decideUniversalConversationRouteWithAI(text, context = {}) {
     if (!raw) return { route: 'FLOW', flow_type: fallbackType || 'OTHER', preserve_flow_state: preserve, reason: 'empty' };
     if (looksLikeOperationalPayloadForCurrentFlow(raw, context)) {
       return { route: 'FLOW', flow_type: fallbackType || 'OTHER', preserve_flow_state: preserve, reason: 'operational_payload' };
+    }
+    if (forcedCourseFlow.isCourse) {
+      return { route: 'FLOW', flow_type: 'COURSE', preserve_flow_state: preserve, reason: forcedCourseFlow.reason || 'course_forced_flow' };
     }
 
     const explicitProductUsage = !!(
@@ -13648,13 +13689,19 @@ Reglas:
     });
 
     const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
-    const route = String(obj.route || fallback.route || 'FLOW').trim().toUpperCase() === 'CHAT' ? 'CHAT' : 'FLOW';
-    const flowType = String(obj.flow_type || fallback.flow_type || 'OTHER').trim().toUpperCase();
+    let route = String(obj.route || fallback.route || 'FLOW').trim().toUpperCase() === 'CHAT' ? 'CHAT' : 'FLOW';
+    let flowType = String(obj.flow_type || fallback.flow_type || 'OTHER').trim().toUpperCase();
+
+    if (forcedCourseFlow.isCourse) {
+      route = 'FLOW';
+      flowType = 'COURSE';
+    }
+
     return {
       route,
       flow_type: ['PRODUCT', 'SERVICE', 'COURSE', 'OTHER'].includes(flowType) ? flowType : (fallback.flow_type || 'OTHER'),
       preserve_flow_state: obj.preserve_flow_state === undefined ? !!fallback.preserve_flow_state : !!obj.preserve_flow_state,
-      reason: String(obj.reason || fallback.reason || '').trim(),
+      reason: String(obj.reason || fallback.reason || '').trim() || (forcedCourseFlow.reason || ''),
     };
   } catch {
     return fallback;
@@ -15645,6 +15692,11 @@ lastCloseContext.set(waId, {
       }
     }
 
+    const hardCourseFlowEarly = detectForcedCourseFlowIntent(text, {
+      lastCourseContext: routingLastCourseContext,
+      pendingCourseDraft: routingPendingCourseDraft,
+    });
+
     const firstAiReview = await reviewInboundMessageFirstWithAI(text, {
       activeAssistantOfferType: activeOfferForReview?.type || '',
       activeAssistantOfferDomain: activeOfferForReview?.domain || '',
@@ -15666,7 +15718,7 @@ lastCloseContext.set(waId, {
     if (firstAiReview?.topic_changed) {
       if (firstAiReview?.should_clear_active_offer) clearActiveAssistantOffer(waId);
       if (firstAiReview?.type !== 'PRODUCT') clearProductMemory(waId);
-      if (firstAiReview?.type !== 'COURSE') clearLastCourseContext(waId);
+      if (firstAiReview?.type !== 'COURSE' && !hardCourseFlowEarly.isCourse) clearLastCourseContext(waId);
       if (firstAiReview?.type !== 'SERVICE') lastServiceByUser.delete(waId);
     }
 
@@ -17142,6 +17194,10 @@ Si después necesita algo, estoy acá ✨`;
     }
 
     lastCourseContext = getLastCourseContext(waId);
+    const forcedCourseFlowIntent = detectForcedCourseFlowIntent(text, {
+      lastCourseContext,
+      pendingCourseDraft,
+    });
 
     const activeAssistantOfferForChat = getActiveAssistantOffer(waId);
     const universalRoute = await decideUniversalConversationRouteWithAI(text, {
@@ -17156,7 +17212,7 @@ Si después necesita algo, estoy acá ✨`;
       historySnippet: buildConversationHistorySnippet(convForAI, 18, 2200),
     });
 
-    if (universalRoute?.route === 'CHAT') {
+    if (universalRoute?.route === 'CHAT' && !forcedCourseFlowIntent.isCourse) {
       const naturalReply = await answerNaturallyFromCurrentContext(text, {
         waId,
         phone,
@@ -17254,6 +17310,15 @@ Si después necesita algo, estoy acá ✨`;
           mode: fastIntent.mode || intent.mode || 'DETAIL',
         };
       }
+    }
+
+    if (forcedCourseFlowIntent.isCourse) {
+      intent = {
+        ...intent,
+        type: 'COURSE',
+        query: forcedCourseFlowIntent.query || intent.query || text,
+        mode: forcedCourseFlowIntent.mode || intent.mode || 'DETAIL',
+      };
     }
 
     const lastProductCtx = getLastProductContext(waId);
