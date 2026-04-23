@@ -8012,6 +8012,33 @@ function looksLikeCourseOnsitePaymentIntent(text = '') {
   return /(me acerco|voy al salon|voy al salón|paso por el salon|paso por el salón|lo pago en el salon|lo pago en el salón|pago en el salon|pago en el salón|abono en el salon|abono en el salón|voy a pagar al salon|voy a pagar al salón|prefiero pagar en el salon|prefiero pagar en el salón|quiero pagar en el salon|quiero pagar en el salón|pago directo en el salon|pago directo en el salón|voy directamente al salon|voy directamente al salón)/i.test(t);
 }
 
+function messageLooksLikeCourseSignupData(text = '') {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  if (extractStudentDni(raw)) return true;
+  if (extractStudentFullName(raw)) return true;
+  return /(^|\b)(dni|documento|nombre|apellido|telefono|teléfono|celular|contacto)($|\b)/i.test(raw);
+}
+
+function isInformationalCourseQuestion(text = '', context = {}) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  if (looksLikeCourseEnrollmentPause(raw)) return false;
+  if (detectSenaPaid({ text: raw }) || looksLikePaymentProofText(raw) || looksLikeProofAlreadySent(raw) || looksLikeCourseOnsitePaymentIntent(raw)) return false;
+  if (messageLooksLikeCourseSignupData(raw)) return false;
+
+  const goal = detectCourseFollowupGoal(raw);
+  if (goal && goal !== 'SIGNUP') return true;
+  if (isGenericCurrentCourseContextQuestion(raw)) return true;
+
+  const currentCourseName = String(context?.currentCourseName || '').trim();
+  if (currentCourseName && /\?$/.test(raw) && /\b(curso|taller|clase|capacitacion|capacitación|seminario|workshop|empieza|arranca|incluye|horario|dias|días|duracion|duración|certificado|requisitos|material|pdf|precio|cuanto|cuánto)\b/i.test(raw)) {
+    return true;
+  }
+
+  return false;
+}
+
 async function extractCourseEnrollmentIntentWithAI(text, context = {}) {
   const raw = String(text || '').trim();
   const t = normalize(raw);
@@ -8022,10 +8049,11 @@ async function extractCourseEnrollmentIntentWithAI(text, context = {}) {
     return { action: 'PAYMENT', course_query: '' };
   }
 
+  const informationalQuestion = isInformationalCourseQuestion(raw, context);
   let forcedAction = '';
   if (/(inscrib|inscripción|inscripcion|anot|reserv(ar|o)? lugar|quiero ese curso|quiero ese|me quiero sumar|quiero entrar|quiero reservar mi lugar|seña|sena)/i.test(t)) {
     forcedAction = 'START_SIGNUP';
-  } else if (context?.hasDraft) {
+  } else if (context?.hasDraft && !informationalQuestion && messageLooksLikeCourseSignupData(raw)) {
     forcedAction = 'CONTINUE_SIGNUP';
   }
 
@@ -8043,10 +8071,10 @@ async function extractCourseEnrollmentIntentWithAI(text, context = {}) {
 
 Reglas:
 - START_SIGNUP si la persona quiere inscribirse, anotarse, reservar lugar o señar.
-- CONTINUE_SIGNUP si ya hay flujo activo y el mensaje sigue aportando datos.
+- CONTINUE_SIGNUP si ya hay flujo activo y el mensaje sigue aportando datos concretos de inscripción.
 - PAYMENT si manda o menciona comprobante, transferencia, seña o pago.
 - PAUSE si quiere frenar o cancelar por ahora.
-- NONE si solo consulta info.
+- NONE si solo consulta info o hace una pregunta sobre el curso actual.
 - course_query debe intentar extraer el nombre o tema del curso cuando la persona lo insinúa, incluso en frases como “quiero inscribirme al de celulares”, “el segundo”, “el de reparación”, “ese curso” o “al técnico de tablets”.
 - Si no se puede inferir con claridad, devolvé cadena vacía.`
         },
@@ -8064,12 +8092,13 @@ Reglas:
       response_format: { type: 'json_object' },
     });
     const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const finalAction = String(forcedAction || obj.action || 'NONE').trim().toUpperCase();
     return {
-      action: String(forcedAction || obj.action || 'NONE').trim().toUpperCase(),
+      action: informationalQuestion && !forcedAction && ['CONTINUE_SIGNUP', 'NONE'].includes(finalAction) ? 'NONE' : finalAction,
       course_query: String(obj.course_query || '').trim(),
     };
   } catch {
-    return { action: forcedAction || 'NONE', course_query: '' };
+    return { action: informationalQuestion && !forcedAction ? 'NONE' : (forcedAction || 'NONE'), course_query: '' };
   }
 }
 
@@ -16565,10 +16594,15 @@ Cuando quiera retomarla, me escribe y seguimos desde ahí.`;
           || findCourseByContextName(courses, pendingCourseDraft?.curso_nombre || '');
         const draftFollowupGoal = detectCourseFollowupGoal(text);
         const draftLooksLikeNormalCourseQuestion = !!referencedCourse
-          && !!draftFollowupGoal
-          && !['START_SIGNUP', 'CONTINUE_SIGNUP', 'PAYMENT'].includes(courseDraftIntent.action || '');
+          && (isInformationalCourseQuestion(text, { currentCourseName: referencedCourse?.nombre || pendingCourseDraft?.curso_nombre || '' })
+            || (!!draftFollowupGoal && !['START_SIGNUP', 'CONTINUE_SIGNUP', 'PAYMENT'].includes(courseDraftIntent.action || '')));
         if (draftLooksLikeNormalCourseQuestion) {
-          const naturalCourseReply = formatNaturalCourseFollowupReply(referencedCourse, draftFollowupGoal || 'DETAIL');
+          let naturalCourseReply = await answerCourseQuestionFromContextWithAI(text, referencedCourse, {
+            historySnippet: buildConversationHistorySnippet(convForAI, 12, 1000),
+          });
+          if (!naturalCourseReply) {
+            naturalCourseReply = formatNaturalCourseFollowupReply(referencedCourse, draftFollowupGoal || 'DETAIL');
+          }
           if (naturalCourseReply) {
             const rememberedCourses = mergeCourseContextRows([referencedCourse], Array.isArray(courseCtxForDraft?.recentCourses) ? courseCtxForDraft.recentCourses : []);
             setLastCourseContext(waId, {
@@ -18300,11 +18334,14 @@ ${some}
       const courses = await getCoursesCatalog();
       const previousRecentCourses = Array.isArray(lastCourseContext?.recentCourses) ? lastCourseContext.recentCourses : [];
       const referencedCourse = resolveCourseFromConversationContext(courses, text, lastCourseContext);
-      const activeCourse = referencedCourse || findCourseByContextName(courses, lastCourseContext?.currentCourseName || lastCourseContext?.selectedName || '');
+      const pendingDraftCourse = findCourseByContextName(courses, pendingCourseDraft?.curso_nombre || '');
+      const activeCourse = referencedCourse || pendingDraftCourse || findCourseByContextName(courses, lastCourseContext?.currentCourseName || lastCourseContext?.selectedName || '');
       const followupGoal = detectCourseFollowupGoal(text);
       const cleanedDirectFollowupText = sanitizeCourseSearchQuery(text);
       const isOnlyFollowupGoal = !cleanedDirectFollowupText && !!followupGoal;
-      const shouldUseCurrentCourseContext = shouldAnswerFromCurrentCourseContext(text, activeCourse, lastCourseContext);
+      const shouldUseCurrentCourseContext = shouldAnswerFromCurrentCourseContext(text, activeCourse, lastCourseContext) || isInformationalCourseQuestion(text, {
+        currentCourseName: activeCourse?.nombre || pendingCourseDraft?.curso_nombre || lastCourseContext?.selectedName || '',
+      });
       const isDirectCurrentCourseFollowup = !!activeCourse && (isOnlyFollowupGoal || shouldUseCurrentCourseContext);
       const isExplicitReferencedCourseFollowup = !!referencedCourse && (!!followupGoal || shouldUseCurrentCourseContext);
       const courseEnrollmentIntent = await extractCourseEnrollmentIntentWithAI(text, {
@@ -18316,7 +18353,10 @@ ${some}
       const isGenericCourseCatalogAsk = isLikelyGenericCourseListQuery(text) || /(otros cursos|que otros cursos|qué otros cursos|que cursos hay|qué cursos hay|que cursos estan dictando|qué cursos están dictando|que cursos tenes|qué cursos tenés|que cursos tienen|qué cursos tienen)/i.test(text || '');
       const hasExplicitCourseSignupSignal = followupGoal === 'SIGNUP' || courseEnrollmentIntent.action === 'START_SIGNUP';
       const continuesExistingCourseSignup = !!pendingCourseDraft && ['CONTINUE_SIGNUP', 'PAYMENT'].includes(courseEnrollmentIntent.action || '');
-      const wantsCourseSignup = !isGenericCourseCatalogAsk && (hasExplicitCourseSignupSignal || continuesExistingCourseSignup);
+      const shouldAnswerQuestionBeforeSignup = !!pendingCourseDraft && !!activeCourse && isInformationalCourseQuestion(text, {
+        currentCourseName: activeCourse?.nombre || pendingCourseDraft?.curso_nombre || lastCourseContext?.selectedName || '',
+      });
+      const wantsCourseSignup = !isGenericCourseCatalogAsk && !shouldAnswerQuestionBeforeSignup && (hasExplicitCourseSignupSignal || continuesExistingCourseSignup);
 
       if (wantsCourseSignup) {
         await clearAppointmentStateForCourseFlow({
