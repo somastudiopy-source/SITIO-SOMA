@@ -12177,12 +12177,12 @@ function sanitizeCourseSearchQuery(query) {
 
   q = q
     .replace(/[!?¡¿.,;:()]/g, ' ')
-    .replace(/\b(hola|buenas|buenos dias|buen dia|buen día|buenas tardes|buenas noches)\b/g, ' ')
-    .replace(/\b(quiero info|quisiera info|quiero saber|quisiera saber|queria saber|quería saber|me pasas info|me pasás info|mandame info|mandáme info|pasame info|pasáme info|consulto por|consulta por|consulta sobre|informacion|información)\b/g, ' ')
-    .replace(/\b(curso|cursos|clase|clases|capacitacion|capacitaciones|capacitación|taller|talleres|masterclass|seminario|seminarios|workshop|formacion|formación|certificacion|certificación)\b/g, ' ')
-    .replace(/\b(algun|alguno|alguna|de ese|ese curso|de ese curso|mas info|más info|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|cuando empieza|cuándo empieza|cuando arranca|cuándo arranca|inicio|duracion|duración|horario|horarios|dias|días|cupo|cupos|inscripcion|inscripción|requisitos|modalidad|presencial|online|virtual|hay|tenes|tenés|tienen|ofrecen|dictan|dan|brindan|disponibles|abiertos|abiertas|busco|ando buscando)\b/g, ' ')
-    .replace(/\b(de|del|de la|de las|de los|para|sobre)\b/g, ' ')
-    .replace(/\b(y|e|o|u|ni)\b/g, ' ')
+    .replace(/(hola|buenas|buenos dias|buen dia|buen día|buenas tardes|buenas noches)/g, ' ')
+    .replace(/(quiero info|quisiera info|quiero saber|quisiera saber|queria saber|quería saber|me pasas info|me pasás info|mandame info|mandáme info|pasame info|pasáme info|consulto por|consulta por|consulta sobre|informacion|información)/g, ' ')
+    .replace(/(curso|cursos|clase|clases|capacitacion|capacitaciones|capacitación|taller|talleres|masterclass|seminario|seminarios|workshop|formacion|formación|certificacion|certificación)/g, ' ')
+    .replace(/(algun|alguno|alguna|de ese|de este|ese curso|este curso|de ese curso|de este curso|el curso|mas info|más info|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|cuando empieza|cuándo empieza|cuando arranca|cuándo arranca|cuando es|cuándo es|inicio|duracion|duración|cuanto dura|cuánto dura|horario|horarios|dias|días|cupo|cupos|inscripcion|inscripción|requisitos|modalidad|presencial|online|virtual|hay|tenes|tenés|tienen|ofrecen|dictan|dan|brindan|disponibles|abiertos|abiertas|busco|ando buscando|que incluye|qué incluye|que se ve|qué se ve|como es|cómo es|de que trata|de qué trata|temario|contenido|programa|para quien es|para quién es|principiantes|principiante|necesito experiencia|necesito conocimientos|hay certificado|tiene certificado|dan certificado|certificado|material|materiales|foto|fotos|imagen|imagenes|imágenes|pdf|archivo)/g, ' ')
+    .replace(/(de|del|de la|de las|de los|para|sobre)/g, ' ')
+    .replace(/(y|e|o|u|ni)/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -12366,15 +12366,26 @@ function looksLikeCourseFollowUp(text) {
 }
 
 function resolveImplicitCourseFollowupQuery(text, lastCourseContext = null) {
-  const t = normalize(text || '');
+  const raw = String(text || '').trim();
+  const t = normalize(raw);
   if (!t || !lastCourseContext) return '';
 
-  if (/^(ese|ese curso|de ese|de ese curso|de ese nomas|de ese no mas|mas info|más info|info|precio|cuanto sale|cuánto sale|cuando empieza|cuándo empieza|duracion|duración|horario|dias|días|cupos?|inscripcion|inscripción|requisitos)$/.test(t)) {
-    return lastCourseContext.selectedName || lastCourseContext.query || '';
+  const currentName = lastCourseContext.currentCourseName || lastCourseContext.selectedName || lastCourseContext.query || '';
+  const cleaned = sanitizeCourseSearchQuery(raw);
+
+  if (/^(ese|este|ese curso|este curso|de ese|de este|de ese curso|de este curso|de ese nomas|de ese no mas|mas info|más info|info|precio|cuanto sale|cuánto sale|cuando empieza|cuándo empieza|duracion|duración|horario|dias|días|cupos?|inscripcion|inscripción|requisitos|material|foto|fotos|imagen|imagenes|qué incluye|que incluye|cómo es|como es)$/.test(t)) {
+    return currentName;
   }
 
-  if (looksLikeCourseFollowUp(text)) {
-    return text;
+  if ((detectCourseFollowupGoal(raw) || isGenericCurrentCourseContextQuestion(raw)) && currentName) {
+    if (!cleaned) return currentName;
+    const cleanedNorm = normalize(cleaned);
+    if (/^(curso|taller|seminario|workshop|capacitacion|capacitación)$/.test(cleanedNorm)) return currentName;
+    if (normalize(currentName).includes(cleanedNorm) || cleanedNorm.includes(normalize(currentName))) return currentName;
+  }
+
+  if (looksLikeCourseFollowUp(raw)) {
+    return cleaned || currentName || raw;
   }
 
   return '';
@@ -12384,16 +12395,25 @@ function detectCourseFollowupGoal(text) {
   const t = normalize(text || '');
   if (!t) return '';
 
-  if (/^(ese|ese curso|de ese|de ese curso|mas info|más info|info)$/.test(t)) return 'DETAIL';
+  if (/^(ese|este|ese curso|este curso|de ese|de este|de ese curso|de este curso|mas info|más info|info)$/.test(t)) return 'DETAIL';
   if (/(precio|precios|valor|valores|costo|costos|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta)/i.test(t)) return 'PRICE';
   if (/(cuando empieza|cuándo empieza|cuando arranca|cuándo arranca|inicio|fecha de inicio|cuando es|cuándo es)/i.test(t)) return 'START';
-  if (/(requisitos|requisito)/i.test(t)) return 'REQUIREMENTS';
+  if (/(requisitos|requisito|necesito experiencia|necesito conocimientos|para principiantes|es para principiantes|es para principiante|hay certificado|tiene certificado|dan certificado|certificado)/i.test(t)) return 'REQUIREMENTS';
   if (/(modalidad|presencial|online|virtual)/i.test(t)) return 'MODALITY';
   if (/(duracion|duración|cuanto dura|cuánto dura)/i.test(t)) return 'DURATION';
   if (/(horario|horarios|dias|días)/i.test(t)) return 'SCHEDULE';
   if (/(cupo|cupos)/i.test(t)) return 'CUPS';
   if (/(seña|sena|inscripcion|inscripción|reservar lugar|reserva de lugar)/i.test(t)) return 'SIGNUP';
+  if (/(material|materiales|foto|fotos|imagen|imagenes|imágenes|pdf|archivo)/i.test(t)) return 'MATERIAL';
+  if (/(que incluye|qué incluye|que se ve|qué se ve|como es|cómo es|de que trata|de qué trata|temario|contenido|programa|para quien es|para quién es)/i.test(t)) return 'DETAIL';
   return '';
+}
+
+function isGenericCurrentCourseContextQuestion(text = '') {
+  const t = normalize(text || '');
+  if (!t) return false;
+  if (/^(y\s+)?(ese|este|el)?\s*(curso|taller|seminario|workshop|capacitacion|capacitación)?\s*$/.test(t)) return true;
+  return /(cuanto dura|cuánto dura|cuando empieza|cuándo empieza|cuando arranca|cuándo arranca|horario|horarios|dias|días|requisitos|modalidad|cupos?|inscripcion|inscripción|seña|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|que incluye|qué incluye|que se ve|qué se ve|como es|cómo es|de que trata|de qué trata|temario|contenido|programa|para quien es|para quién es|principiantes?|certificado|material(es)?|foto(s)?|imagen(es)?|pdf|archivo)/i.test(t);
 }
 
 function findCourseByContextName(rows, courseName) {
@@ -12538,6 +12558,74 @@ function stripCourseSignupNoise(text = '') {
       .replace(/\s+/g, ' ')
       .trim()
   );
+}
+
+async function answerCourseQuestionFromContextWithAI(question, course, context = {}) {
+  const raw = String(question || '').trim();
+  if (!raw || !course) return '';
+
+  const courseFacts = {
+    nombre: String(course?.nombre || '').trim(),
+    categoria: String(course?.categoria || '').trim(),
+    modalidad: String(course?.modalidad || '').trim(),
+    duracion_total: String(course?.duracionTotal || '').trim(),
+    fecha_inicio: String(course?.fechaInicio || '').trim(),
+    fecha_fin: String(course?.fechaFin || '').trim(),
+    dias_y_horarios: String(course?.diasHorarios || '').trim(),
+    requisitos: String(course?.requisitos || '').trim(),
+    descripcion: String(course?.info || '').trim(),
+    cupos: String(course?.cupos || '').trim(),
+    sena: String(course?.sena || '').trim(),
+    precio: String(course?.precio || '').trim(),
+    estado: String(course?.estado || '').trim(),
+  };
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: pickModelForText(raw),
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Respondé una consulta sobre un curso SOLO con la información factual provista.
+Reglas:
+- No inventes nada.
+- Si el dato exacto no está en la ficha, decilo claramente en una frase corta.
+- Soná natural, cercana y profesional.
+- No listes todo el curso si preguntan algo puntual.
+- Si preguntan algo amplio como "cómo es", "qué incluye", "de qué trata" o "qué se ve", armá una respuesta breve usando descripción, modalidad, duración, requisitos, horarios e inicio SOLO si esos campos existen.
+- No cambies de tema. No hables de otros cursos.
+- Respondé en español argentino.`
+        },
+        {
+          role: 'system',
+          content: `Ficha del curso en contexto:
+${JSON.stringify(courseFacts, null, 2)}`
+        },
+        ...(context?.historySnippet ? [{ role: 'system', content: `Historial reciente:
+${String(context.historySnippet).slice(0, 1200)}` }] : []),
+        { role: 'user', content: raw },
+      ],
+    });
+    return String(completion.choices?.[0]?.message?.content || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+function shouldAnswerFromCurrentCourseContext(text = '', activeCourse = null, lastCourseContext = null) {
+  if (!activeCourse) return false;
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  const goal = detectCourseFollowupGoal(raw);
+  if (goal) return true;
+  if (isGenericCurrentCourseContextQuestion(raw)) return true;
+  const cleaned = sanitizeCourseSearchQuery(raw);
+  const currentName = lastCourseContext?.currentCourseName || lastCourseContext?.selectedName || '';
+  if (!cleaned && currentName) return true;
+  if (currentName && cleaned && normalize(currentName).includes(normalize(cleaned))) return true;
+  return false;
 }
 
 async function resolveCourseEnrollmentSelectionWithAI(rows, text, context = {}) {
@@ -12686,7 +12774,7 @@ function formatNaturalCourseFollowupReply(course, goal = 'DETAIL') {
 
 const COURSE_SIGNAL_RE = /(curso|cursos|clase|clases|capacitacion|capacitaciones|capacitación|capacitaciones|taller|talleres|masterclass|seminario|seminarios|workshop|formacion|formación|certificacion|certificación)/i;
 const COURSE_GENERIC_LIST_RE = /(hay|tenes|tenés|tienen|ofrecen|ofreces|dictan|dan|brindan|hacen|disponibles|abiertos|abiertas|cupos|inscripciones|inscripcion|inscripción|empiezan|arrancan|se dicta|se dictan|se esta dictando|se está dictando|se estan dando|se están dando|busco|ando buscando|quiero info|quisiera info|me pasas info|me pasás info|mostrame|mostrar|mandame|pasame|lista|opciones|catalogo|catálogo|informacion|información)/i;
-const COURSE_FOLLOWUP_RE = /(mas info|más info|info|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|cuando empieza|cuándo empieza|cuando arranca|cuándo arranca|inicio|duracion|duración|horario|horarios|dias|días|cupo|cupos|inscripcion|inscripción|requisitos|modalidad|presencial|online|virtual|de ese|de ese curso|ese curso|de barberia|de barbería|de maquillaje|de colorimetria|de colorimetría|de peinados|de auxiliar|de estetica|de estética|para aprender)/i;
+const COURSE_FOLLOWUP_RE = /(mas info|más info|info|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|cuando empieza|cuándo empieza|cuando arranca|cuándo arranca|inicio|duracion|duración|cuanto dura|cuánto dura|horario|horarios|dias|días|cupo|cupos|inscripcion|inscripción|requisitos|modalidad|presencial|online|virtual|de ese|de este|de ese curso|de este curso|ese curso|este curso|de barberia|de barbería|de maquillaje|de colorimetria|de colorimetría|de peinados|de auxiliar|de estetica|de estética|para aprender|que incluye|qué incluye|que se ve|qué se ve|como es|cómo es|de que trata|de qué trata|temario|contenido|programa|para quien es|para quién es|certificado|material|materiales|foto|fotos|imagen|imagenes|imágenes)/i;
 const PRODUCT_SIGNAL_RE = /(producto|productos|stock|insumo|insumos|shampoo|acondicionador|mascara|mascarilla|serum|aceite|oleo|tintura|oxidante|decolorante|matizador|ampolla|protector|spray|crema|gel|cera|mueble|muebles|espejo|espejos|camilla|camillas|sillon|sillones|silla|sillas|mesa|mesas|respaldo|puff|equipamiento|maquina|máquina|maquinas|máquinas|plancha|planchas|secador|secadores|tijera|tijeras|capa|capas|rociador|rociadores|pulverizador|pulverizadores)/i;
 const PRODUCT_LIST_SIGNAL_RE = /(hay|tenes|tenés|tienen|venden|disponible|disponibles|stock|lista|opciones|catalogo|catálogo|mostrar|mostrame|mandame|pasame|busco|ando buscando|quiero ver|foto|fotos|imagen|imagenes|ver modelos|ver opciones)/i;
 const SERVICE_SIGNAL_RE = /(turno|turnos|servicio|servicios|reservar|reserva|agendar|agenda|cita|me quiero hacer|quiero hacerme|para hacerme|hacerme|me hago|realizan|trabajan con|atienden|precio del servicio|valor del servicio)/i;
@@ -12709,7 +12797,7 @@ function detectFastCatalogIntent(text, context = {}) {
 
   const hasCourseSignal = COURSE_SIGNAL_RE.test(t)
     || /(dictan clases|dan clases|estan dando clases|están dando clases|se dicta|se dictan|se esta dictando|se está dictando|se estan dando|se están dando)/i.test(t);
-  const hasCourseFollowup = !!context.hasCourseContext && (COURSE_FOLLOWUP_RE.test(t) || /^(ese|ese curso|de ese|de ese curso|barberia|barbería|maquillaje|colorimetria|colorimetría|auxiliar|peinados|cupos?|precio|info|horario|horarios|duracion|duración|modalidad|inicio|requisitos)$/.test(t));
+  const hasCourseFollowup = !!context.hasCourseContext && ((COURSE_FOLLOWUP_RE.test(t) || isGenericCurrentCourseContextQuestion(raw)) || /^(ese|este|ese curso|este curso|de ese|de este|de ese curso|de este curso|barberia|barbería|maquillaje|colorimetria|colorimetría|auxiliar|peinados|cupos?|precio|info|horario|horarios|duracion|duración|modalidad|inicio|requisitos)$/.test(t));
 
   if (hasCourseSignal || hasCourseFollowup) {
     const generic = isLikelyGenericCourseListQuery(raw);
@@ -12764,7 +12852,7 @@ function detectCourseIntentFromContext(text, { lastCourseContext = null } = {}) 
     };
   }
 
-  if (lastCourseContext && COURSE_FOLLOWUP_RE.test(t) && !/(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b)/i.test(t)) {
+  if (lastCourseContext && (COURSE_FOLLOWUP_RE.test(t) || isGenericCurrentCourseContextQuestion(raw)) && !/(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b)/i.test(t)) {
     return {
       isCourse: true,
       query: resolveImplicitCourseFollowupQuery(raw, lastCourseContext) || raw,
@@ -14616,6 +14704,19 @@ function buildCourseProofCaption(enrollment = {}) {
   return 'Comprobante enviado';
 }
 
+function buildCourseProofFallbackText(enrollment = {}) {
+  const parts = [
+    'Comprobante recibido para revisión manual.',
+    enrollment?.student_name ? `Alumno/a: ${String(enrollment.student_name).trim()}` : '',
+    enrollment?.course_name ? `Curso: ${String(enrollment.course_name).trim()}` : '',
+    normalizePhone(enrollment?.contact_phone || enrollment?.wa_phone || '')
+      ? `Teléfono: ${normalizePhone(enrollment.contact_phone || enrollment.wa_phone || '')}`
+      : '',
+    enrollment?.payment_receiver ? `Titular detectado: ${String(enrollment.payment_receiver).trim()}` : '',
+    enrollment?.payment_amount ? `Monto detectado: ${formatArsAmount(enrollment.payment_amount)}` : '',
+  ].filter(Boolean);
+  return parts.join('\n').trim();}
+
 function buildAppointmentProofCaption(appt = {}) {
   return 'Comprobante enviado';
 }
@@ -14659,14 +14760,33 @@ async function sendWhatsAppDocumentById(to, mediaId, filename, caption) {
 async function forwardCourseProofToManager(enrollment = {}) {
   const recipient = normalizeWhatsAppRecipient(COURSE_NOTIFY_PHONE_RAW);
   const savedName = String(enrollment.payment_proof_filename || '').trim();
-  if (!recipient || !savedName) return false;
+  const incomingMediaId = String(enrollment.payment_proof_media_id || '').trim();
+  if (!recipient) return false;
+
+  const caption = buildCourseProofCaption(enrollment);
+  const inferredName = savedName || `comprobante-curso-${enrollment?.id || Date.now()}.jpg`;
+  const inferredMimeType = guessMimeTypeFromFilename(inferredName);
+
+  if (incomingMediaId) {
+    try {
+      if (inferredMimeType.startsWith('image/')) {
+        await sendWhatsAppImageById(recipient, incomingMediaId, caption);
+      } else {
+        await sendWhatsAppDocumentById(recipient, incomingMediaId, path.basename(inferredName), caption);
+      }
+      return true;
+    } catch (e) {
+      console.error('❌ No se pudo reenviar el comprobante de curso usando el media id original. Se intenta con archivo local.', e?.response?.data || e?.message || e);
+    }
+  }
+
+  if (!savedName) return false;
 
   const filePath = path.join(MEDIA_DIR, savedName);
   if (!fs.existsSync(filePath)) return false;
 
   const mimeType = guessMimeTypeFromFilename(savedName);
   const mediaId = await uploadMediaToWhatsApp(filePath, mimeType);
-  const caption = buildCourseProofCaption(enrollment);
   if (mimeType.startsWith('image/')) {
     await sendWhatsAppImageById(recipient, mediaId, caption);
   } else {
@@ -14844,6 +14964,15 @@ async function notifyCourseManagerEnrollmentPaid(enrollment = {}) {
     console.error('❌ Error reenviando comprobante de curso a responsable:', e?.response?.data || e?.message || e);
     return false;
   });
+
+  if (!proofForwarded) {
+    try {
+      const fallbackText = buildCourseProofFallbackText(enrollment);
+      if (fallbackText) await sendWhatsAppText(recipient, fallbackText);
+    } catch (e) {
+      console.error('❌ Error enviando fallback textual del comprobante de curso a responsable:', e?.response?.data || e?.message || e);
+    }
+  }
 
   return { ok: true, proofForwarded };
 }
@@ -18175,8 +18304,9 @@ ${some}
       const followupGoal = detectCourseFollowupGoal(text);
       const cleanedDirectFollowupText = sanitizeCourseSearchQuery(text);
       const isOnlyFollowupGoal = !cleanedDirectFollowupText && !!followupGoal;
-      const isDirectCurrentCourseFollowup = !!activeCourse && isOnlyFollowupGoal;
-      const isExplicitReferencedCourseFollowup = !!referencedCourse && !!followupGoal;
+      const shouldUseCurrentCourseContext = shouldAnswerFromCurrentCourseContext(text, activeCourse, lastCourseContext);
+      const isDirectCurrentCourseFollowup = !!activeCourse && (isOnlyFollowupGoal || shouldUseCurrentCourseContext);
+      const isExplicitReferencedCourseFollowup = !!referencedCourse && (!!followupGoal || shouldUseCurrentCourseContext);
       const courseEnrollmentIntent = await extractCourseEnrollmentIntentWithAI(text, {
         hasDraft: !!pendingCourseDraft,
         currentCourseName: activeCourse?.nombre || referencedCourse?.nombre || lastCourseContext?.selectedName || '',
@@ -18208,7 +18338,9 @@ ${some}
         const isFreshCourseSignup = courseEnrollmentIntent.action === 'START_SIGNUP';
         const sameCourseAsPending = !!pendingCourseDraft?.curso_nombre && !!signupCourse?.nombre
           && normalize(pendingCourseDraft.curso_nombre) === normalize(signupCourse.nombre);
-        const shouldResetExistingCourseDraft = isFreshCourseSignup && (!pendingCourseDraft || !sameCourseAsPending);
+        const hasExplicitDifferentCourse = !!pendingCourseDraft?.curso_nombre && !!signupCourse?.nombre
+          && normalize(pendingCourseDraft.curso_nombre) !== normalize(signupCourse.nombre);
+        const shouldResetExistingCourseDraft = isFreshCourseSignup && (!pendingCourseDraft || hasExplicitDifferentCourse);
         let baseCourseDraft = {
           ...(pendingCourseDraft || {}),
           curso_nombre: signupCourse?.nombre || pendingCourseDraft?.curso_nombre || '',
@@ -18349,9 +18481,21 @@ ${some}
           return;
         }
 
-        const naturalCourseReply = formatNaturalCourseFollowupReply(activeCourse, followupGoal || 'DETAIL');
+        let naturalCourseReply = '';
+        const followupKind = followupGoal || 'DETAIL';
+
+        if (followupKind !== 'MATERIAL' && (followupKind === 'DETAIL' || shouldUseCurrentCourseContext)) {
+          naturalCourseReply = await answerCourseQuestionFromContextWithAI(text, activeCourse, {
+            historySnippet: buildConversationHistorySnippet(convForAI, 12, 1000),
+          });
+        }
+
+        if (!naturalCourseReply) {
+          naturalCourseReply = formatNaturalCourseFollowupReply(activeCourse, followupKind);
+        }
+
         if (naturalCourseReply) {
-          rememberAssistantCourseOffer(waId, [activeCourse], { mode: 'DETAIL', selectedName: activeCourse?.nombre || '', questionKind: followupGoal || 'DETAIL', lastAssistantText: naturalCourseReply });
+          rememberAssistantCourseOffer(waId, [activeCourse], { mode: 'DETAIL', selectedName: activeCourse?.nombre || '', questionKind: followupKind, lastAssistantText: naturalCourseReply });
           pushHistory(waId, 'assistant', naturalCourseReply);
           await sendWhatsAppText(phone, naturalCourseReply);
           scheduleInactivityFollowUp(waId, phone);
