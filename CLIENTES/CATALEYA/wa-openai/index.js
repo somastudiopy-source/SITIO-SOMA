@@ -15336,10 +15336,55 @@ async function forwardCourseProofToManager(enrollment = {}) {
 
   const caption = buildCourseProofCaption(enrollment);
   const inferredName = savedName || `comprobante-curso-${enrollment?.id || Date.now()}.jpg`;
-  const inferredMimeType = guessMimeTypeFromFilename(inferredName);
+  const localPath = savedName ? path.join(MEDIA_DIR, savedName) : '';
+
+  const sendLocalFile = async (filePath, filenameHint = '') => {
+    const effectivePath = String(filePath || '').trim();
+    if (!effectivePath || !fs.existsSync(effectivePath)) return false;
+    const finalName = String(filenameHint || path.basename(effectivePath) || inferredName).trim() || inferredName;
+    const mimeType = guessMimeTypeFromFilename(finalName);
+    const uploadedMediaId = await uploadMediaToWhatsApp(effectivePath, mimeType);
+    if (mimeType.startsWith('image/')) {
+      await sendWhatsAppImageById(recipient, uploadedMediaId, caption);
+    } else {
+      await sendWhatsAppDocumentById(recipient, uploadedMediaId, finalName, caption);
+    }
+    return true;
+  };
+
+  if (localPath && fs.existsSync(localPath)) {
+    try {
+      return await sendLocalFile(localPath, savedName);
+    } catch (e) {
+      console.error('❌ No se pudo reenviar el comprobante de curso usando el archivo local guardado. Se intentan otros caminos.', e?.response?.data || e?.message || e);
+    }
+  }
 
   if (incomingMediaId) {
     try {
+      const mediaInfo = await getWhatsAppMediaUrl(incomingMediaId);
+      const mediaMime = String(mediaInfo?.mime_type || guessMimeTypeFromFilename(inferredName) || 'application/octet-stream').trim();
+      const ext = mediaExtFromMime(mediaMime) || path.extname(inferredName) || '.bin';
+      const recoveredName = savedName || `in-${incomingMediaId}${ext}`;
+      const tmpFile = path.join(getTmpDir(), `course-proof-${incomingMediaId}${ext}`);
+      await downloadWhatsAppMediaToFile(mediaInfo.url, tmpFile);
+      try {
+        const persistentPath = path.join(MEDIA_DIR, recoveredName);
+        fs.copyFileSync(tmpFile, persistentPath);
+      } catch {}
+      try {
+        return await sendLocalFile(tmpFile, recoveredName);
+      } finally {
+        try { fs.unlinkSync(tmpFile); } catch {}
+      }
+    } catch (e) {
+      console.error('❌ No se pudo recuperar el comprobante de curso desde WhatsApp para reenviarlo. Se intenta el media id original como último recurso.', e?.response?.data || e?.message || e);
+    }
+  }
+
+  if (incomingMediaId) {
+    try {
+      const inferredMimeType = guessMimeTypeFromFilename(inferredName);
       if (inferredMimeType.startsWith('image/')) {
         await sendWhatsAppImageById(recipient, incomingMediaId, caption);
       } else {
@@ -15347,23 +15392,11 @@ async function forwardCourseProofToManager(enrollment = {}) {
       }
       return true;
     } catch (e) {
-      console.error('❌ No se pudo reenviar el comprobante de curso usando el media id original. Se intenta con archivo local.', e?.response?.data || e?.message || e);
+      console.error('❌ No se pudo reenviar el comprobante de curso usando el media id original como último recurso.', e?.response?.data || e?.message || e);
     }
   }
 
-  if (!savedName) return false;
-
-  const filePath = path.join(MEDIA_DIR, savedName);
-  if (!fs.existsSync(filePath)) return false;
-
-  const mimeType = guessMimeTypeFromFilename(savedName);
-  const mediaId = await uploadMediaToWhatsApp(filePath, mimeType);
-  if (mimeType.startsWith('image/')) {
-    await sendWhatsAppImageById(recipient, mediaId, caption);
-  } else {
-    await sendWhatsAppDocumentById(recipient, mediaId, savedName, caption);
-  }
-  return true;
+  return false;
 }
 
 async function forwardAppointmentProofToStylist(appt = {}) {
