@@ -7372,7 +7372,7 @@ function extractContactInfo(text) {
     }
 
     if (!nombre) {
-      const nameBeforePhone = raw.match(/^\s*([A-Za-zÁÉÍÓÚÑáéíóúñ' ]{5,80}?)(?:\s*,\s*|\s+y\s+)?(?:(?:y\s+)?(?:su\s+)?(?:numero|número|telefono|tel|cel|celular|whatsapp|wsp))/i);
+      const nameBeforePhone = raw.match(/^\s*([A-Za-zÁÉÍÓÚÑáéíóúñ' ]{5,80}?)(?:\s*,\s*|\s+y\s+)?(?:(?:y\s+)?(?:su\s+)?(?:numero|número|telefono|tel|cel|celular|whatsapp|wsp)\b)/i);
       if (nameBeforePhone) {
         const cand = String(nameBeforePhone[1] || '').replace(/\s+/g, ' ').trim().replace(/[,:;.-]+$/, '');
         if (!/\d/.test(cand) && cand.split(' ').length >= 2) nombre = cand;
@@ -8003,7 +8003,22 @@ function buildCourseEnrollmentReservedMessage(base = {}) {
 function looksLikeCourseEnrollmentPause(text = '') {
   const t = normalizeShortReply(text || '');
   if (!t) return false;
-  return /^(no quiero seguir|no quiero inscribirme|ya no quiero|despues sigo|después sigo|lo dejo ahi|lo dejo ahí|frenemos|frenalo|pause|pausa|cancelar|cancelalo|cancelalo por ahora|dejalo por ahora|quiero cancelar eso|quiero cancelar esto|cancelar eso|cancelar esto|quiero frenar eso|quiero frenar esto|olvidate|olvídate)$/.test(t);
+  return /^(no quiero seguir|no quiero inscribirme|ya no quiero|despues sigo|después sigo|despues retomo|después retomo|lo dejo ahi|lo dejo ahí|lo vemos despues|lo vemos después|despues te aviso|después te aviso|despues te confirmo|después te confirmo|te confirmo despues|te confirmo después|mas tarde te aviso|más tarde te aviso|luego te aviso|en otro momento|por ahora no|dejalo por ahora|dejémoslo ahi|dejemoslo ahi|dejémoslo ahí|frenemos|frenalo|pause|pausa|cancelar|cancelalo|cancelalo por ahora|quiero cancelar eso|quiero cancelar esto|cancelar eso|cancelar esto|quiero frenar eso|quiero frenar esto|olvidate|olvídate|te escribo después|te escribo mas tarde|te escribo más tarde)$/.test(t);
+}
+
+function buildCoursePauseKeepDraftMessage(courseName = '') {
+  const named = String(courseName || '').trim();
+  return named
+    ? `Perfecto 😊
+
+Dejo pausada por ahora la inscripción a *${named}*.
+
+Cuando quiera retomarla, me escribe y seguimos desde donde quedó.`
+    : `Perfecto 😊
+
+Dejo pausada por ahora la inscripción.
+
+Cuando quiera retomarla, me escribe y seguimos desde donde quedó.`;
 }
 
 function looksLikeCourseOnsitePaymentIntent(text = '') {
@@ -10892,70 +10907,153 @@ async function applyCatalogServiceDataToTurno(turno) {
   }
 }
 
+
+async function fetchPublicSheetGridByTab(sheetId, tabName) {
+  const cleanSheetId = String(sheetId || '').trim();
+  const cleanTab = String(tabName || '').trim();
+  if (!cleanSheetId || !cleanTab) return null;
+
+  try {
+    const url = `https://docs.google.com/spreadsheets/d/${cleanSheetId}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(cleanTab)}`;
+    const resp = await axios.get(url, { timeout: 15000, responseType: 'text' });
+    const raw = String(resp?.data || '').trim();
+    const m = raw.match(/setResponse\((.*)\);?\s*$/s);
+    if (!m) return null;
+    const payload = JSON.parse(m[1]);
+    const table = payload?.table || {};
+    const headers = Array.isArray(table?.cols) ? table.cols.map((c) => String(c?.label || c?.id || '').trim()) : [];
+    const rows = Array.isArray(table?.rows)
+      ? table.rows.map((row) => ({
+          values: Array.isArray(row?.c)
+            ? row.c.map((cell) => {
+                if (!cell) return '';
+                if (cell.f != null && String(cell.f).trim()) return String(cell.f).trim();
+                if (cell.v == null) return '';
+                return String(cell.v).trim();
+              })
+            : [],
+          links: [],
+        }))
+      : [];
+
+    if (!headers.length) return null;
+    return { headers, rows };
+  } catch {
+    return null;
+  }
+}
+
+function buildCourseHeaderIndex(header = []) {
+  const norm = (value) => normalize(String(value || '').trim());
+  const pick = (predicates = []) => header.findIndex((h) => {
+    const n = norm(h);
+    return predicates.some((fn) => fn(n));
+  });
+
+  return {
+    nombre: pick([(n) => n === 'nombre' || n.includes('curso')]),
+    categoria: pick([(n) => n === 'categoria' || n === 'categoría' || n.includes('categoria')]),
+    modalidad: pick([(n) => n.includes('modalidad')]),
+    duracionTotal: pick([(n) => n.includes('duracion total') || n.includes('duracion') || n.includes('duración') || n.includes('cantidad de clases')]),
+    inicio: pick([(n) => n.includes('fecha de inicio') || n == 'inicio' || n.includes('arranca')]),
+    fin: pick([(n) => n.includes('fecha de finalizacion') || n.includes('fecha de finalización') || n == 'fin']),
+    diasHorarios: pick([(n) => n.includes('dias y horarios') || n.includes('días y horarios') || n.includes('horario') || n.includes('dias') || n.includes('días')]),
+    precio: pick([(n) => n === 'precio' || n.includes('precio total')]),
+    sena: pick([(n) => n.includes('sena') || n.includes('seña') || n.includes('inscripcion') || n.includes('inscripción')]),
+    cupos: pick([(n) => n.includes('cupos') || n == 'cupo']),
+    requisitos: pick([(n) => n.includes('requisitos') || n.includes('requisito')]),
+    info: pick([(n) => n.includes('informacion detallada') || n.includes('información detallada') || n.includes('descripcion') || n.includes('descripción') || n == 'info' || n.includes('temario') || n.includes('contenido') || n.includes('programa') || n.includes('incluye')]),
+    estado: pick([(n) => n === 'estado' || n.includes('estado')]),
+    link: pick([(n) => n === 'link' || n.includes('link') || n.includes('foto') || n.includes('imagen') || n.includes('archivo') || n.includes('pdf')]),
+  };
+}
+
+function buildCourseRowFromSheetData(header, idx, row = {}) {
+  const values = Array.isArray(row?.values) ? row.values.map((v) => String(v || '').trim()) : [];
+  const links = Array.isArray(row?.links) ? row.links : [];
+  const allFields = {};
+  header.forEach((h, i) => {
+    const key = String(h || '').trim();
+    if (!key) return;
+    const value = String(values[i] || '').trim();
+    if (!value) return;
+    allFields[key] = value;
+  });
+
+  const linkValue = idx.link >= 0 ? String((links[idx.link] || values[idx.link] || '')).trim() : '';
+  const rowText = Object.entries(allFields).map(([k, v]) => `${k}: ${v}`).join(' | ');
+
+  return {
+    nombre: idx.nombre >= 0 ? String(values[idx.nombre] || '').trim() : '',
+    categoria: idx.categoria >= 0 ? String(values[idx.categoria] || '').trim() : '',
+    modalidad: idx.modalidad >= 0 ? String(values[idx.modalidad] || '').trim() : '',
+    duracionTotal: idx.duracionTotal >= 0 ? String(values[idx.duracionTotal] || '').trim() : '',
+    fechaInicio: idx.inicio >= 0 ? String(values[idx.inicio] || '').trim() : '',
+    fechaFin: idx.fin >= 0 ? String(values[idx.fin] || '').trim() : '',
+    diasHorarios: idx.diasHorarios >= 0 ? String(values[idx.diasHorarios] || '').trim() : '',
+    precio: idx.precio >= 0 ? String(values[idx.precio] || '').trim() : '',
+    sena: idx.sena >= 0 ? String(values[idx.sena] || '').trim() : '',
+    cupos: idx.cupos >= 0 ? String(values[idx.cupos] || '').trim() : '',
+    requisitos: idx.requisitos >= 0 ? String(values[idx.requisitos] || '').trim() : '',
+    info: idx.info >= 0 ? String(values[idx.info] || '').trim() : '',
+    estado: idx.estado >= 0 ? String(values[idx.estado] || '').trim() : '',
+    link: linkValue,
+    rawFields: allFields,
+    rawRowText: rowText,
+  };
+}
+
+function normalizeCourseRowFallbacks(row = {}) {
+  const next = { ...(row || {}) };
+  const raw = [next.rawRowText || '', next.info || '', next.requisitos || ''].filter(Boolean).join(' | ');
+
+  if (!next.duracionTotal) {
+    const m = raw.match(/(\b\d+\s+(?:clase|clases|jornada|jornadas|encuentro|encuentros|mes|meses|semana|semanas|hora|horas)(?:\s+intensiva(?:s)?)?\b[^|\n]*)/i);
+    if (m) next.duracionTotal = String(m[1] || '').trim();
+  }
+
+  if (!next.fechaInicio) {
+    const m = raw.match(/\b(?:lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo)(?:\s+y\s+(?:lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo))?(?:\s+de\s+\d{1,2}(?::\d{2})?\s*a\s*\d{1,2}(?::\d{2})?)?\b[^|\n]*/i);
+    if (m) next.fechaInicio = String(m[0] || '').trim();
+  }
+
+  if (!next.diasHorarios) {
+    const m = raw.match(/\b(?:lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo)(?:\s+y\s+(?:lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo))?(?:\s+de\s+\d{1,2}(?::\d{2})?\s*a\s*\d{1,2}(?::\d{2})?)?\b[^|\n]*/i);
+    if (m) next.diasHorarios = String(m[0] || '').trim();
+  }
+
+  return next;
+}
+
 async function getCoursesCatalog() {
   const now = Date.now();
   if (catalogCache.courses.rows.length && (now - catalogCache.courses.loadedAt) < CATALOG_CACHE_TTL_MS) {
     return catalogCache.courses.rows;
   }
 
-  const grid = await readSheetGridWithLinks(COURSES_SHEET_ID, COURSES_RANGE);
-  const header = Array.isArray(grid?.headers) ? grid.headers : [];
-  const data = Array.isArray(grid?.rows) ? grid.rows : [];
+  let grid = await readSheetGridWithLinks(COURSES_SHEET_ID, COURSES_RANGE);
+  let header = Array.isArray(grid?.headers) ? grid.headers : [];
+  let data = Array.isArray(grid?.rows) ? grid.rows : [];
+
+  if (!header.length || !data.length) {
+    const publicGrid = await fetchPublicSheetGridByTab(COURSES_SHEET_ID, COURSES_TAB);
+    if (publicGrid?.headers?.length) {
+      grid = publicGrid;
+      header = publicGrid.headers;
+      data = publicGrid.rows || [];
+    }
+  }
+
   if (!header.length) return [];
 
-  const idx = {
-    nombre: header.findIndex(h => normalize(h) === "nombre"),
-    categoria: header.findIndex(h => normalize(h) === "categoria"),
-    modalidad: header.findIndex(h => normalize(h).includes("modalidad")),
-    duracionTotal: header.findIndex(h => normalize(h).includes("duracion total")),
-    inicio: header.findIndex(h => normalize(h).includes("fecha de inicio")),
-    fin: header.findIndex(h => normalize(h).includes("fecha de finalizacion")),
-    diasHorarios: header.findIndex(h => normalize(h).includes("dias y horarios")),
-    precio: header.findIndex(h => normalize(h) === "precio"),
-    sena: header.findIndex(h => {
-      const v = normalize(h);
-      return v.includes("sena") || v.includes("seña") || v.includes("inscripcion") || v.includes("inscripción");
-    }),
-    cupos: header.findIndex(h => normalize(h).includes("cupos")),
-    requisitos: header.findIndex(h => normalize(h).includes("requisitos")),
-    info: header.findIndex(h => {
-      const v = normalize(h);
-      return v.includes("informacion detallada") || v.includes("descripcion") || v.includes("descripción") || v === "info";
-    }),
-    estado: header.findIndex(h => normalize(h) === "estado"),
-    link: header.findIndex(h => {
-      const v = normalize(h);
-      return v === "link" || v.includes("link") || v.includes("foto") || v.includes("imagen");
-    }),
-  };
-
-  const rows = data.map((row) => {
-    const values = Array.isArray(row?.values) ? row.values : [];
-    const links = Array.isArray(row?.links) ? row.links : [];
-    const linkValue = idx.link >= 0 ? ((links[idx.link] || values[idx.link] || "").trim()) : "";
-
-    return {
-      nombre: (values[idx.nombre] || "").trim(),
-      categoria: (values[idx.categoria] || "").trim(),
-      modalidad: (values[idx.modalidad] || "").trim(),
-      duracionTotal: (values[idx.duracionTotal] || "").trim(),
-      fechaInicio: (values[idx.inicio] || "").trim(),
-      fechaFin: (values[idx.fin] || "").trim(),
-      diasHorarios: (values[idx.diasHorarios] || "").trim(),
-      precio: (values[idx.precio] || "").trim(),
-      sena: (values[idx.sena] || "").trim(),
-      cupos: (values[idx.cupos] || "").trim(),
-      requisitos: (values[idx.requisitos] || "").trim(),
-      info: (values[idx.info] || "").trim(),
-      estado: (values[idx.estado] || "").trim(),
-      link: linkValue,
-    };
-  }).filter(x => x.nombre);
+  const idx = buildCourseHeaderIndex(header);
+  const rows = data
+    .map((row) => normalizeCourseRowFallbacks(buildCourseRowFromSheetData(header, idx, row)))
+    .filter((x) => x.nombre);
 
   catalogCache.courses = { loadedAt: now, rows };
   return rows;
 }
-
 // ===================== BUSCADORES =====================
 const PRODUCT_FAMILY_DEFS = [
   { id: 'shampoo', label: 'shampoo', aliases: ['shampoo', 'champu', 'champú'] },
@@ -11401,9 +11499,9 @@ function filterRowsForRequestedFamily(rows, { family = '', domain = '', query = 
   if (activeDomain) out = out.filter((row) => detectRowProductDomain(row) === activeDomain);
 
   const q = normalizeCatalogSearchText(query || '');
-  const wantsAmpolla = /ampolla/.test(q);
+  const wantsAmpolla = /\bampolla\b/.test(q);
   if (wantsAmpolla) {
-    const onlyAmpolla = out.filter((row) => /ampolla/i.test(buildStockHaystack(row)));
+    const onlyAmpolla = out.filter((row) => /\bampolla\b/i.test(buildStockHaystack(row)));
     if (onlyAmpolla.length) out = onlyAmpolla;
   }
 
@@ -11429,9 +11527,9 @@ function filterRowsForRequestedFamily(rows, { family = '', domain = '', query = 
 function wantsStrictNoApproximation(query = '', family = '', domain = '') {
   const q = normalizeCatalogSearchText(query || '');
   if (!q) return false;
-  if (/foto|fotos|imagen|imágenes|imagenes/.test(q)) return true;
-  if (/ampolla|ampollas|secador|secadores|plancha|planchas|camilla|camillas|sillon|sillón|sillones/.test(q)) return true;
-  if ((domain === 'furniture' || family === 'camilla' || family === 'sillon') && !/mueble|muebles|equipamiento/.test(q)) return true;
+  if (/\bfoto\b|\bfotos\b|\bimagen\b|\bimágenes\b|\bimagenes\b/.test(q)) return true;
+  if (/\bampolla\b|\bampollas\b|\bsecador\b|\bsecadores\b|\bplancha\b|\bplanchas\b|\bcamilla\b|\bcamillas\b|\bsillon\b|\bsillón\b|\bsillones\b/.test(q)) return true;
+  if ((domain === 'furniture' || family === 'camilla' || family === 'sillon') && !/\bmueble\b|\bmuebles\b|\bequipamiento\b/.test(q)) return true;
   return false;
 }
 
@@ -11446,7 +11544,7 @@ function buildNoExactCatalogMessage({ domain = '', family = '', query = '', want
   }
   if (family === 'plancha') return 'Por el momento no tenemos una plancha para el pelo cargada en catálogo. Si quiere, cuando la incorporemos le avisamos.';
   if (family === 'secador') return 'Por el momento no tenemos un secador para el pelo cargado en catálogo.';
-  if (/ampolla/.test(normalizeCatalogSearchText(query || ''))) return 'Por el momento no tenemos ampollas cargadas en catálogo. Si quiere, le recomiendo tratamientos o baños de crema según lo que necesite.';
+  if (/\bampolla\b/.test(normalizeCatalogSearchText(query || ''))) return 'Por el momento no tenemos ampollas cargadas en catálogo. Si quiere, le recomiendo tratamientos o baños de crema según lo que necesite.';
   if (family === 'sillon') return 'Por el momento no tenemos sillones de barbería cargados en catálogo.';
   if (family === 'camilla') return 'Por el momento no tenemos camillas para spa cargadas en catálogo.';
   return domain === 'furniture'
@@ -12206,12 +12304,12 @@ function sanitizeCourseSearchQuery(query) {
 
   q = q
     .replace(/[!?¡¿.,;:()]/g, ' ')
-    .replace(/(hola|buenas|buenos dias|buen dia|buen día|buenas tardes|buenas noches)/g, ' ')
-    .replace(/(quiero info|quisiera info|quiero saber|quisiera saber|queria saber|quería saber|me pasas info|me pasás info|mandame info|mandáme info|pasame info|pasáme info|consulto por|consulta por|consulta sobre|informacion|información)/g, ' ')
-    .replace(/(curso|cursos|clase|clases|capacitacion|capacitaciones|capacitación|taller|talleres|masterclass|seminario|seminarios|workshop|formacion|formación|certificacion|certificación)/g, ' ')
-    .replace(/(algun|alguno|alguna|de ese|de este|ese curso|este curso|de ese curso|de este curso|el curso|mas info|más info|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|cuando empieza|cuándo empieza|cuando arranca|cuándo arranca|cuando es|cuándo es|inicio|duracion|duración|cuanto dura|cuánto dura|horario|horarios|dias|días|cupo|cupos|inscripcion|inscripción|requisitos|modalidad|presencial|online|virtual|hay|tenes|tenés|tienen|ofrecen|dictan|dan|brindan|disponibles|abiertos|abiertas|busco|ando buscando|que incluye|qué incluye|que se ve|qué se ve|como es|cómo es|de que trata|de qué trata|temario|contenido|programa|para quien es|para quién es|principiantes|principiante|necesito experiencia|necesito conocimientos|hay certificado|tiene certificado|dan certificado|certificado|material|materiales|foto|fotos|imagen|imagenes|imágenes|pdf|archivo)/g, ' ')
-    .replace(/(de|del|de la|de las|de los|para|sobre)/g, ' ')
-    .replace(/(y|e|o|u|ni)/g, ' ')
+    .replace(/\b(hola|buenas|buenos dias|buen dia|buen día|buenas tardes|buenas noches)\b/g, ' ')
+    .replace(/\b(quiero info|quisiera info|quiero saber|quisiera saber|queria saber|quería saber|me pasas info|me pasás info|mandame info|mandáme info|pasame info|pasáme info|consulto por|consulta por|consulta sobre|informacion|información)\b/g, ' ')
+    .replace(/\b(curso|cursos|clase|clases|capacitacion|capacitaciones|capacitación|taller|talleres|masterclass|seminario|seminarios|workshop|formacion|formación|certificacion|certificación)\b/g, ' ')
+    .replace(/\b(algun|alguno|alguna|de ese|de este|ese curso|este curso|de ese curso|de este curso|el curso|mas info|más info|precio|cuanto sale|cuánto sale|cuanto cuesta|cuánto cuesta|cuando empieza|cuándo empieza|cuando arranca|cuándo arranca|cuando es|cuándo es|inicio|duracion|duración|cuanto dura|cuánto dura|horario|horarios|dias|días|cupo|cupos|inscripcion|inscripción|requisitos|modalidad|presencial|online|virtual|hay|tenes|tenés|tienen|ofrecen|dictan|dan|brindan|disponibles|abiertos|abiertas|busco|ando buscando|que incluye|qué incluye|que se ve|qué se ve|como es|cómo es|de que trata|de qué trata|temario|contenido|programa|para quien es|para quién es|principiantes|principiante|necesito experiencia|necesito conocimientos|hay certificado|tiene certificado|dan certificado|certificado|material|materiales|foto|fotos|imagen|imagenes|imágenes|pdf|archivo)\b/g, ' ')
+    .replace(/\b(de|del|de la|de las|de los|para|sobre)\b/g, ' ')
+    .replace(/\b(y|e|o|u|ni)\b/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -12573,40 +12671,128 @@ function resolveCourseByOrdinalChoice(rows, text = '') {
   const t = normalize(text || '');
   if (!t) return null;
 
-  if (/(primer|primero|1ro|uno|el primero|la primera)/.test(t)) return list[0] || null;
-  if (/(segundo|segunda|2do|dos|el segundo|la segunda)/.test(t)) return list[1] || null;
-  if (/(tercer|tercero|tercera|3ro|tres|el tercero|la tercera)/.test(t)) return list[2] || null;
-  if (/(ultimo|último|ultima|última|el ultimo|el último|la ultima|la última)/.test(t)) return list[list.length - 1] || null;
+  if (/\b(primer|primero|1ro|uno|el primero|la primera)\b/.test(t)) return list[0] || null;
+  if (/\b(segundo|segunda|2do|dos|el segundo|la segunda)\b/.test(t)) return list[1] || null;
+  if (/\b(tercer|tercero|tercera|3ro|tres|el tercero|la tercera)\b/.test(t)) return list[2] || null;
+  if (/\b(ultimo|último|ultima|última|el ultimo|el último|la ultima|la última)\b/.test(t)) return list[list.length - 1] || null;
   return null;
 }
 
 function stripCourseSignupNoise(text = '') {
   return sanitizeCourseSearchQuery(
     String(text || '')
-      .replace(/(quiero|me quiero|quisiera|para|anotarme|anotarme al|anotarme a|inscribirme|inscribirme al|inscribirme a|sumarme|reservar|reservar lugar|quiero reservar mi lugar|me quiero inscribir|para curso de|curso de)/gi, ' ')
+      .replace(/\b(quiero|me quiero|quisiera|para|anotarme|anotarme al|anotarme a|inscribirme|inscribirme al|inscribirme a|sumarme|reservar|reservar lugar|quiero reservar mi lugar|me quiero inscribir|para curso de|curso de)\b/gi, ' ')
       .replace(/\s+/g, ' ')
       .trim()
   );
 }
 
+
+function getCourseRawFields(course = {}) {
+  return (course && course.rawFields && typeof course.rawFields === 'object') ? course.rawFields : {};
+}
+
+function getCourseFieldByLabels(course = {}, labels = []) {
+  const rawFields = getCourseRawFields(course);
+  const directMap = {
+    nombre: course?.nombre || '',
+    categoria: course?.categoria || '',
+    modalidad: course?.modalidad || '',
+    'duracion total': course?.duracionTotal || '',
+    'fecha de inicio': course?.fechaInicio || '',
+    'fecha de finalizacion': course?.fechaFin || '',
+    'fecha de finalización': course?.fechaFin || '',
+    'dias y horarios': course?.diasHorarios || '',
+    'días y horarios': course?.diasHorarios || '',
+    precio: course?.precio || '',
+    'seña / inscripción': course?.sena || '',
+    sena: course?.sena || '',
+    cupos: course?.cupos || '',
+    requisitos: course?.requisitos || '',
+    'informacion detallada': course?.info || '',
+    'información detallada': course?.info || '',
+    descripcion: course?.info || '',
+    'descripción': course?.info || '',
+    info: course?.info || '',
+    estado: course?.estado || '',
+    link: course?.link || '',
+  };
+
+  for (const label of labels) {
+    const wanted = normalize(String(label || '').trim());
+    if (!wanted) continue;
+
+    for (const [key, value] of Object.entries(rawFields)) {
+      if (normalize(key) === wanted && String(value || '').trim()) return String(value).trim();
+    }
+
+    for (const [key, value] of Object.entries(rawFields)) {
+      const nk = normalize(key);
+      if ((nk.includes(wanted) || wanted.includes(nk)) && String(value || '').trim()) return String(value).trim();
+    }
+
+    for (const [key, value] of Object.entries(directMap)) {
+      const nk = normalize(key);
+      if ((nk === wanted || nk.includes(wanted) || wanted.includes(nk)) && String(value || '').trim()) return String(value).trim();
+    }
+  }
+  return '';
+}
+
+function extractCourseFactsFromCells(course = {}) {
+  const rawText = [course?.rawRowText || '', course?.info || '', course?.requisitos || ''].filter(Boolean).join(' | ');
+  const durationFromText = (() => {
+    const m = rawText.match(/(\b\d+\s+(?:clase|clases|jornada|jornadas|encuentro|encuentros|mes|meses|semana|semanas|hora|horas)(?:\s+intensiva(?:s)?)?\b[^|\n]*)/i);
+    return m ? String(m[1] || '').trim() : '';
+  })();
+  const startFromText = (() => {
+    const m = rawText.match(/\b(?:lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo)(?:\s+y\s+(?:lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo))?(?:\s+de\s+\d{1,2}(?::\d{2})?\s*a\s*\d{1,2}(?::\d{2})?)?\b[^|\n]*/i);
+    return m ? String(m[0] || '').trim() : '';
+  })();
+  const scheduleFromText = (() => {
+    const m = rawText.match(/\b(?:lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo)(?:\s+y\s+(?:lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo))?(?:\s+de\s+\d{1,2}(?::\d{2})?\s*a\s*\d{1,2}(?::\d{2})?)?\b[^|\n]*/i);
+    return m ? String(m[0] || '').trim() : '';
+  })();
+
+  return {
+    nombre: getCourseFieldByLabels(course, ['Nombre']) || String(course?.nombre || '').trim(),
+    categoria: getCourseFieldByLabels(course, ['Categoría', 'Categoria']) || String(course?.categoria || '').trim(),
+    modalidad: getCourseFieldByLabels(course, ['Modalidad']) || String(course?.modalidad || '').trim(),
+    duracion: getCourseFieldByLabels(course, ['Duración total', 'Duracion total', 'Duración', 'Duracion', 'Cantidad de clases']) || String(course?.duracionTotal || '').trim() || durationFromText,
+    inicio: getCourseFieldByLabels(course, ['Fecha de inicio', 'Inicio']) || String(course?.fechaInicio || '').trim() || startFromText,
+    fin: getCourseFieldByLabels(course, ['Fecha de finalización', 'Fecha de finalizacion', 'Fin']) || String(course?.fechaFin || '').trim(),
+    horarios: getCourseFieldByLabels(course, ['Días y horarios', 'Dias y horarios', 'Horarios', 'Horario']) || String(course?.diasHorarios || '').trim() || scheduleFromText,
+    precio: getCourseFieldByLabels(course, ['Precio']) || String(course?.precio || '').trim(),
+    sena: getCourseFieldByLabels(course, ['Seña / Inscripción', 'Seña', 'Sena / Inscripcion', 'Sena', 'Inscripción']) || String(course?.sena || '').trim(),
+    cupos: getCourseFieldByLabels(course, ['Cupos', 'Cupo']) || String(course?.cupos || '').trim(),
+    requisitos: getCourseFieldByLabels(course, ['Requisitos', 'Requisito']) || String(course?.requisitos || '').trim(),
+    info: getCourseFieldByLabels(course, ['Información detallada', 'Informacion detallada', 'Descripción', 'Descripcion', 'Info', 'Temario', 'Contenido', 'Programa', 'Incluye']) || String(course?.info || '').trim(),
+    estado: getCourseFieldByLabels(course, ['Estado']) || String(course?.estado || '').trim(),
+    link: getCourseFieldByLabels(course, ['Link', 'Foto', 'Imagen', 'PDF', 'Archivo']) || String(course?.link || '').trim(),
+    rawText,
+  };
+}
 async function answerCourseQuestionFromContextWithAI(question, course, context = {}) {
   const raw = String(question || '').trim();
   if (!raw || !course) return '';
 
+  const facts = extractCourseFactsFromCells(course);
   const courseFacts = {
-    nombre: String(course?.nombre || '').trim(),
-    categoria: String(course?.categoria || '').trim(),
-    modalidad: String(course?.modalidad || '').trim(),
-    duracion_total: String(course?.duracionTotal || '').trim(),
-    fecha_inicio: String(course?.fechaInicio || '').trim(),
-    fecha_fin: String(course?.fechaFin || '').trim(),
-    dias_y_horarios: String(course?.diasHorarios || '').trim(),
-    requisitos: String(course?.requisitos || '').trim(),
-    descripcion: String(course?.info || '').trim(),
-    cupos: String(course?.cupos || '').trim(),
-    sena: String(course?.sena || '').trim(),
-    precio: String(course?.precio || '').trim(),
-    estado: String(course?.estado || '').trim(),
+    nombre: String(facts.nombre || '').trim(),
+    categoria: String(facts.categoria || '').trim(),
+    modalidad: String(facts.modalidad || '').trim(),
+    duracion_total: String(facts.duracion || '').trim(),
+    fecha_inicio: String(facts.inicio || '').trim(),
+    fecha_fin: String(facts.fin || '').trim(),
+    dias_y_horarios: String(facts.horarios || '').trim(),
+    requisitos: String(facts.requisitos || '').trim(),
+    descripcion: String(facts.info || '').trim(),
+    cupos: String(facts.cupos || '').trim(),
+    sena: String(facts.sena || '').trim(),
+    precio: String(facts.precio || '').trim(),
+    estado: String(facts.estado || '').trim(),
+    link: String(facts.link || '').trim(),
+    fila_texto: String(facts.rawText || '').trim(),
   };
 
   try {
@@ -12725,15 +12911,17 @@ Reglas:
 function formatNaturalCourseFollowupReply(course, goal = 'DETAIL') {
   if (!course) return '';
 
-  const nombre = course.nombre || 'el curso';
-  const precio = course.precio ? moneyOrConsult(course.precio) : '';
-  const inicio = course.fechaInicio || '';
-  const modalidad = course.modalidad || '';
-  const duracion = course.duracionTotal || '';
-  const horarios = course.diasHorarios || '';
-  const requisitos = course.requisitos || '';
-  const cupos = course.cupos || '';
-  const sena = course.sena || '';
+  const facts = extractCourseFactsFromCells(course);
+  const nombre = facts.nombre || course.nombre || 'el curso';
+  const precio = facts.precio ? moneyOrConsult(facts.precio) : '';
+  const inicio = facts.inicio || '';
+  const modalidad = facts.modalidad || '';
+  const duracion = facts.duracion || '';
+  const horarios = facts.horarios || '';
+  const requisitos = facts.requisitos || '';
+  const cupos = facts.cupos || '';
+  const sena = facts.sena || '';
+  const info = facts.info || '';
 
   if (goal === 'PRICE') {
     const lines = [
@@ -12789,12 +12977,14 @@ function formatNaturalCourseFollowupReply(course, goal = 'DETAIL') {
 
   const detailLines = [
     `Le paso la info de *${nombre}* 😊`,
+    info ? `${info}` : '',
     precio ? `• Precio: *${precio}*` : '',
     inicio ? `• Inicio: ${inicio}` : '',
     modalidad ? `• Modalidad: ${modalidad}` : '',
     duracion ? `• Duración: ${duracion}` : '',
     horarios ? `• Días y horarios: ${horarios}` : '',
     requisitos ? `• Requisitos: ${requisitos}` : '',
+    cupos ? `• Cupos: ${cupos}` : '',
     sena ? `• Seña / inscripción: ${sena}` : '',
   ].filter(Boolean);
 
@@ -14296,10 +14486,10 @@ async function classifyAndExtract(text, context = {}) {
 
   const deterministicFallback = () => {
     if (bareAppointmentWithoutService) return { type: 'SERVICE', query: '', mode: 'DETAIL' };
-    if (/(curso|cursos|inscrib|capacitacion|capacitación|masterclass|taller)/i.test(normalizedRaw)) {
+    if (/(\bcurso\b|\bcursos\b|\binscrib|\bcapacitacion|\bcapacitación|\bmasterclass\b|\btaller\b)/i.test(normalizedRaw)) {
       return { type: 'COURSE', query: raw.trim(), mode: 'DETAIL' };
     }
-    if (/(ampolla|ampollas|secador|secadores|plancha|planchas|camilla|camillas|sillon|sillón|sillones|espejo|espejos|mueble|muebles|equipamiento)/i.test(normalizedRaw)) {
+    if (/(\bampolla\b|\bampollas\b|\bsecador\b|\bsecadores\b|\bplancha\b|\bplanchas\b|\bcamilla\b|\bcamillas\b|\bsillon\b|\bsillón\b|\bsillones\b|\bespejo\b|\bespejos\b|\bmueble\b|\bmuebles\b|\bequipamiento\b)/i.test(normalizedRaw)) {
       return { type: 'PRODUCT', query: raw.trim(), mode: 'DETAIL' };
     }
     if (/(cuanto dura|cuánto dura|cuanto demora|cuánto demora|duracion|duración)/i.test(normalizedRaw) && /(shock de keratina|keratina|shock de botox|botox|nutricion|nutrición|alisado)/i.test(normalizedRaw)) {
@@ -14403,11 +14593,11 @@ Respondé SOLO JSON.`
       return { type: 'SERVICE', query: '', mode: 'DETAIL' };
     }
 
-    if (/(curso|cursos|inscrib|capacitacion|capacitación|masterclass|taller)/i.test(normalizedRaw)) {
+    if (/(\bcurso\b|\bcursos\b|\binscrib|\bcapacitacion|\bcapacitación|\bmasterclass\b|\btaller\b)/i.test(normalizedRaw)) {
       return { type: 'COURSE', query: rawQuery || raw.trim(), mode: rawMode || 'DETAIL' };
     }
 
-    if (/(ampolla|ampollas|secador|secadores|plancha|planchas|camilla|camillas|sillon|sillón|sillones|espejo|espejos|mueble|muebles|equipamiento)/i.test(normalizedRaw) && rawType !== 'COURSE') {
+    if (/(\bampolla\b|\bampollas\b|\bsecador\b|\bsecadores\b|\bplancha\b|\bplanchas\b|\bcamilla\b|\bcamillas\b|\bsillon\b|\bsillón\b|\bsillones\b|\bespejo\b|\bespejos\b|\bmueble\b|\bmuebles\b|\bequipamiento\b)/i.test(normalizedRaw) && rawType !== 'COURSE') {
       return { type: 'PRODUCT', query: rawQuery || raw.trim(), mode: rawMode || 'DETAIL' };
     }
 
@@ -16566,16 +16756,23 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
       });
 
       if (courseDraftIntent.action === 'PAUSE') {
-        await deleteCourseEnrollmentDraft(waId);
-        pendingCourseDraft = null;
-        const msgPauseCourse = `Perfecto 😊
-
-Frené la inscripción al curso por ahora.
-
-Cuando quiera retomarla, me escribe y seguimos desde ahí.`;
+        const pausedDraft = {
+          ...pendingCourseDraft,
+          telefono_contacto: normalizePhone(pendingCourseDraft?.telefono_contacto || phone || ''),
+          last_intent: 'course_signup_paused',
+          flow_step: pendingCourseDraft?.flow_step || inferCourseEnrollmentFlowStep(pendingCourseDraft || {}),
+        };
+        await saveCourseEnrollmentDraft(waId, phone, pausedDraft);
+        pendingCourseDraft = pausedDraft;
+        const msgPauseCourse = buildCoursePauseKeepDraftMessage(pausedDraft?.curso_nombre || '');
+        updateLastCloseContext(waId, {
+          intentType: 'COURSE',
+          interest: buildHubSpotCourseInterestLabel(pausedDraft?.curso_nombre || lastCourseContext?.selectedName || ''),
+          lastUserText: text,
+          suppressInactivityPrompt: true,
+        });
         pushHistory(waId, 'assistant', msgPauseCourse);
         await sendWhatsAppText(phone, msgPauseCourse);
-        scheduleInactivityFollowUp(waId, phone);
         return;
       }
 
@@ -16597,11 +16794,18 @@ Cuando quiera retomarla, me escribe y seguimos desde ahí.`;
           && (isInformationalCourseQuestion(text, { currentCourseName: referencedCourse?.nombre || pendingCourseDraft?.curso_nombre || '' })
             || (!!draftFollowupGoal && !['START_SIGNUP', 'CONTINUE_SIGNUP', 'PAYMENT'].includes(courseDraftIntent.action || '')));
         if (draftLooksLikeNormalCourseQuestion) {
-          let naturalCourseReply = await answerCourseQuestionFromContextWithAI(text, referencedCourse, {
-            historySnippet: buildConversationHistorySnippet(convForAI, 12, 1000),
-          });
+          let naturalCourseReply = '';
+          const draftQuestionKind = draftFollowupGoal || 'DETAIL';
+          if (draftQuestionKind && !['DETAIL', 'MATERIAL'].includes(draftQuestionKind)) {
+            naturalCourseReply = formatNaturalCourseFollowupReply(referencedCourse, draftQuestionKind);
+          }
           if (!naturalCourseReply) {
-            naturalCourseReply = formatNaturalCourseFollowupReply(referencedCourse, draftFollowupGoal || 'DETAIL');
+            naturalCourseReply = await answerCourseQuestionFromContextWithAI(text, referencedCourse, {
+              historySnippet: buildConversationHistorySnippet(convForAI, 12, 1000),
+            });
+          }
+          if (!naturalCourseReply) {
+            naturalCourseReply = formatNaturalCourseFollowupReply(referencedCourse, draftQuestionKind);
           }
           if (naturalCourseReply) {
             const rememberedCourses = mergeCourseContextRows([referencedCourse], Array.isArray(courseCtxForDraft?.recentCourses) ? courseCtxForDraft.recentCourses : []);
@@ -18524,7 +18728,11 @@ ${some}
         let naturalCourseReply = '';
         const followupKind = followupGoal || 'DETAIL';
 
-        if (followupKind !== 'MATERIAL' && (followupKind === 'DETAIL' || shouldUseCurrentCourseContext)) {
+        if (followupKind && !['DETAIL', 'MATERIAL'].includes(followupKind)) {
+          naturalCourseReply = formatNaturalCourseFollowupReply(activeCourse, followupKind);
+        }
+
+        if (!naturalCourseReply && followupKind !== 'MATERIAL' && (followupKind === 'DETAIL' || shouldUseCurrentCourseContext)) {
           naturalCourseReply = await answerCourseQuestionFromContextWithAI(text, activeCourse, {
             historySnippet: buildConversationHistorySnippet(convForAI, 12, 1000),
           });
