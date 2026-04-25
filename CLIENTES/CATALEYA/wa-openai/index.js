@@ -7720,6 +7720,359 @@ function mergeStudentIntoCourseEnrollment({ draft, text, waPhone }) {
   return out;
 }
 
+function detectStudentDniIssue(text = '') {
+  const raw = String(text || '').trim();
+  if (!raw) return { invalid: false, reason: '', candidate: '', value: '' };
+
+  const numericTokens = (raw.match(/\d[\d.]{0,15}/g) || [])
+    .map((token) => String(token || '').replace(/\D/g, ''))
+    .filter(Boolean);
+
+  const valid = numericTokens.map((token) => normalizeStudentDni(token)).find(Boolean) || '';
+  if (valid) return { invalid: false, reason: '', candidate: '', value: valid };
+
+  const short = numericTokens.find((token) => token.length > 0 && token.length < 7);
+  if (short) return { invalid: true, reason: 'short', candidate: short, value: '' };
+
+  const long = numericTokens.find((token) => token.length > 8);
+  if (long) return { invalid: true, reason: 'long', candidate: long, value: '' };
+
+  return { invalid: false, reason: '', candidate: '', value: '' };
+}
+
+function detectStudentNameIssue(text = '') {
+  const raw = stripStudentDni(String(text || '').trim());
+  if (!raw) return { invalid: false, reason: '', candidate: '', value: '' };
+
+  const valid = extractStudentFullName(raw);
+  if (valid) return { invalid: false, reason: '', candidate: '', value: valid };
+
+  const cleaned = cleanNameCandidate(raw);
+  if (!cleaned) return { invalid: false, reason: '', candidate: '', value: '' };
+
+  const parts = cleaned.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) {
+    return { invalid: true, reason: 'single_word', candidate: cleaned, value: '' };
+  }
+
+  const split = splitNameParts(cleaned);
+  if (!split.lastName) {
+    return { invalid: true, reason: 'missing_last_name', candidate: cleaned, value: '' };
+  }
+
+  return { invalid: false, reason: '', candidate: '', value: '' };
+}
+
+function looksLikeStudentIdentityDocumentSignal(text = '', mediaMeta = null) {
+  const raw = normalize(text || '');
+  return !!mediaMeta && (!raw || /(dni|documento|doc\b|identidad|frente|dorso|cedula|cédula)/i.test(raw));
+}
+
+async function extractStudentIdentityFromText(raw = '') {
+  const clean = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return { ok: false, es_documento: false, nombre: '', dni: '', texto_visible: '' };
+
+  const heuristicName = extractStudentFullName(clean);
+  const heuristicDni = extractStudentDni(clean);
+
+  try {
+    const resp = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Analizá este texto como posible documento de identidad o foto/ocr de documento.
+Devolvé SOLO JSON válido con estas claves:
+- es_documento: boolean
+- nombre: string
+- dni: string
+- texto_visible: string
+
+Reglas:
+- Solo importan dos datos: nombre y apellido completos, y DNI del alumno o alumna.
+- El DNI debe devolverse solo en números, sin puntos.
+- Si no ves un dato con claridad, devolvé cadena vacía.
+- No inventes nada.`
+        },
+        { role: 'user', content: clean.slice(0, 8000) },
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const obj = safeJsonParseFromText(resp.choices?.[0]?.message?.content || '') || {};
+    const nombre = extractStudentFullName(String(obj.nombre || '').trim()) || heuristicName || '';
+    const dni = normalizeStudentDni(String(obj.dni || '').trim()) || heuristicDni || '';
+    return {
+      ok: !!(nombre || dni || obj.texto_visible),
+      es_documento: !!obj.es_documento || !!nombre || !!dni,
+      nombre,
+      dni,
+      texto_visible: String(obj.texto_visible || clean || '').trim().slice(0, 2000),
+    };
+  } catch {
+    return {
+      ok: !!(heuristicName || heuristicDni),
+      es_documento: !!(heuristicName || heuristicDni),
+      nombre: heuristicName || '',
+      dni: heuristicDni || '',
+      texto_visible: clean.slice(0, 2000),
+    };
+  }
+}
+
+function mergeStudentIdentityResults(...items) {
+  const valid = items.filter(Boolean);
+  const merged = { ok: false, es_documento: false, nombre: '', dni: '', texto_visible: '' };
+
+  for (const item of valid) {
+    if (!merged.nombre && item.nombre) merged.nombre = String(item.nombre || '').trim();
+    if (!merged.dni && item.dni) merged.dni = normalizeStudentDni(item.dni || '');
+    if (!merged.texto_visible && item.texto_visible) merged.texto_visible = String(item.texto_visible || '').trim();
+    merged.ok = merged.ok || !!item.ok;
+    merged.es_documento = merged.es_documento || !!item.es_documento;
+  }
+
+  if (!merged.nombre) {
+    const joined = valid.map((item) => `${item?.texto_visible || ''} ${item?.nombre || ''}`).join(' ');
+    merged.nombre = extractStudentFullName(joined);
+  }
+  if (!merged.dni) {
+    const joined = valid.map((item) => `${item?.texto_visible || ''} ${item?.dni || ''}`).join(' ');
+    merged.dni = extractStudentDni(joined);
+  }
+  if (!merged.texto_visible) {
+    merged.texto_visible = valid.map((item) => item?.texto_visible || '').filter(Boolean).join('\n').slice(0, 2000);
+  }
+  merged.ok = merged.ok || !!(merged.nombre || merged.dni || merged.texto_visible);
+  merged.es_documento = merged.es_documento || !!(merged.nombre || merged.dni);
+  return merged;
+}
+
+async function extractStudentIdentityFromMedia(mediaMeta = null) {
+  const safeName = String(mediaMeta?.filename || mediaMeta?.file_name || '').trim();
+  if (!safeName) return { ok: false, es_documento: false, nombre: '', dni: '', texto_visible: '' };
+
+  const fullPath = path.join(MEDIA_DIR, safeName);
+  if (!fs.existsSync(fullPath)) return { ok: false, es_documento: false, nombre: '', dni: '', texto_visible: '' };
+
+  const mime = getFileMimeFromPath(fullPath);
+
+  try {
+    if (mime === 'application/pdf') {
+      let textResult = { ok: false, es_documento: false, nombre: '', dni: '', texto_visible: '' };
+      let renderedResult = { ok: false, es_documento: false, nombre: '', dni: '', texto_visible: '' };
+
+      try {
+        const buf = fs.readFileSync(fullPath);
+        const parsedText = await tryParsePdfBuffer(buf);
+        if (parsedText) textResult = await extractStudentIdentityFromText(parsedText);
+      } catch {}
+
+      let renderedPng = '';
+      try {
+        renderedPng = await renderPdfFirstPageToPng(fullPath);
+        if (renderedPng) {
+          const dataUrl = fileToDataUrl(renderedPng, 'image/png');
+          const resp = await openai.chat.completions.create({
+            model: COMPLEX_MODEL,
+            messages: [
+              {
+                role: 'system',
+                content:
+`Mirá esta imagen obtenida de un documento de identidad.
+Devolvé SOLO JSON válido con estas claves:
+- es_documento: boolean
+- nombre: string
+- dni: string
+- texto_visible: string
+
+Reglas:
+- Solo importan nombre y apellido completos, y DNI visible.
+- El DNI debe devolverse solo en números, sin puntos.
+- Si no ves un dato con claridad, devolvé cadena vacía.
+- No inventes nada.`
+              },
+              {
+                role: 'user',
+                content: [
+                  { type: 'text', text: 'Extraé solamente el nombre completo y el DNI visibles del documento.' },
+                  { type: 'image_url', image_url: { url: dataUrl } },
+                ],
+              },
+            ],
+            response_format: { type: 'json_object' },
+          });
+          const obj = safeJsonParseFromText(resp.choices?.[0]?.message?.content || '') || {};
+          renderedResult = {
+            ok: true,
+            es_documento: !!obj.es_documento || !!obj.nombre || !!obj.dni,
+            nombre: extractStudentFullName(String(obj.nombre || '').trim()) || '',
+            dni: normalizeStudentDni(String(obj.dni || '').trim()) || '',
+            texto_visible: String(obj.texto_visible || '').trim().slice(0, 2000),
+          };
+        }
+      } catch {}
+      finally {
+        if (renderedPng) {
+          try { fs.unlinkSync(renderedPng); } catch {}
+        }
+      }
+
+      return mergeStudentIdentityResults(textResult, renderedResult);
+    }
+
+    const dataUrl = fileToDataUrl(fullPath, mime);
+    const resp = await openai.chat.completions.create({
+      model: COMPLEX_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+`Mirá esta imagen como posible documento de identidad.
+Devolvé SOLO JSON válido con estas claves:
+- es_documento: boolean
+- nombre: string
+- dni: string
+- texto_visible: string
+
+Reglas:
+- Solo importan nombre y apellido completos, y DNI visible.
+- El DNI debe devolverse solo en números, sin puntos.
+- Si no ves un dato con claridad, devolvé cadena vacía.
+- No inventes nada.`
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Extraé solamente el nombre completo y el DNI visibles del documento.' },
+            { type: 'image_url', image_url: { url: dataUrl } },
+          ],
+        },
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const obj = safeJsonParseFromText(resp.choices?.[0]?.message?.content || '') || {};
+    return {
+      ok: true,
+      es_documento: !!obj.es_documento || !!obj.nombre || !!obj.dni,
+      nombre: extractStudentFullName(String(obj.nombre || '').trim()) || '',
+      dni: normalizeStudentDni(String(obj.dni || '').trim()) || '',
+      texto_visible: String(obj.texto_visible || '').trim().slice(0, 2000),
+    };
+  } catch {
+    return { ok: false, es_documento: false, nombre: '', dni: '', texto_visible: '' };
+  }
+}
+
+async function enrichCourseEnrollmentStudentData({ draft, text, waPhone, mediaMeta } = {}) {
+  const out = mergeStudentIntoCourseEnrollment({ draft, text, waPhone });
+  const raw = String(text || '').trim();
+  const nameIssue = detectStudentNameIssue(raw);
+  const dniIssue = detectStudentDniIssue(raw);
+
+  const info = {
+    invalidName: false,
+    invalidDni: false,
+    invalidDniReason: '',
+    fromDocument: false,
+    documentDetected: false,
+    unreadableDocument: false,
+    extractedName: '',
+    extractedDni: '',
+  };
+
+  const shouldReadDocument = !!mediaMeta && (!out.alumno_nombre || !out.alumno_dni || looksLikeStudentIdentityDocumentSignal(raw, mediaMeta));
+  if (shouldReadDocument) {
+    const doc = await extractStudentIdentityFromMedia(mediaMeta);
+    info.documentDetected = !!doc.es_documento;
+    if (!out.alumno_nombre && doc.nombre) {
+      out.alumno_nombre = doc.nombre;
+      info.extractedName = doc.nombre;
+    }
+    if (!out.alumno_dni && doc.dni) {
+      out.alumno_dni = doc.dni;
+      info.extractedDni = doc.dni;
+    }
+    info.fromDocument = !!(info.extractedName || info.extractedDni);
+    info.unreadableDocument = !!mediaMeta && (info.documentDetected || looksLikeStudentIdentityDocumentSignal(raw, mediaMeta)) && !info.fromDocument;
+  }
+
+  info.invalidName = !out.alumno_nombre && !!nameIssue.invalid;
+  info.invalidDni = !out.alumno_dni && !!dniIssue.invalid;
+  info.invalidDniReason = info.invalidDni ? String(dniIssue.reason || '') : '';
+  out.telefono_contacto = normalizePhone(out.telefono_contacto || waPhone || '');
+  return { draft: out, studentInput: info };
+}
+
+function buildCourseEnrollmentNeedNameCorrectionMessage(courseName = '', studentInput = {}) {
+  const courseTxt = courseName ? ` para *${courseName}*` : '';
+  if (studentInput?.unreadableDocument) {
+    return `No pude leer bien el *nombre y apellido* desde la foto o documento${courseTxt}.
+
+Por favor envíemelo de una de estas dos formas:
+• escrito en un solo mensaje
+• o con una foto más clara del documento donde se vea bien el nombre completo.`;
+  }
+  return `Me falta el *nombre y apellido completos* del alumno o alumna${courseTxt}.
+
+Puede enviármelo escrito en un solo mensaje o mandar una foto clara del documento.`;
+}
+
+function buildCourseEnrollmentNeedDniCorrectionMessage(courseName = '', studentInput = {}) {
+  const courseTxt = courseName ? ` para *${courseName}*` : '';
+  if (studentInput?.unreadableDocument) {
+    return `No pude leer bien el *DNI* desde la foto o documento${courseTxt}.
+
+Por favor envíemelo:
+• escrito solo en números
+• o con una foto más clara donde se vea bien el DNI.`;
+  }
+  if (studentInput?.invalidDniReason === 'short') {
+    return `El *DNI* parece incompleto${courseTxt}.
+
+Necesito que me lo envíe *solo en números* y completo (7 u 8 dígitos).`;
+  }
+  if (studentInput?.invalidDniReason === 'long') {
+    return `El *DNI* parece estar mal escrito${courseTxt}.
+
+Necesito que me lo envíe *solo en números* y completo (7 u 8 dígitos).`;
+  }
+  if (studentInput?.extractedName && !studentInput?.extractedDni) {
+    return `Perfecto 😊 Ya pude leer el *nombre* del documento${courseTxt}.
+
+Ahora necesito el *DNI* del alumno o alumna, escrito solo en números, o una foto más clara donde se vea bien.`;
+  }
+  return `Todavía me falta el *DNI del alumno o alumna*${courseTxt}.
+
+Puede enviármelo escrito solo en números o mandar una foto clara del documento.`;
+}
+
+function getLastAssistantMessage(waId = '') {
+  const conv = ensureConv(waId);
+  const messages = Array.isArray(conv?.messages) ? conv.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === 'assistant' && String(messages[i]?.content || '').trim()) {
+      return String(messages[i].content || '').trim();
+    }
+  }
+  return '';
+}
+
+async function sendCourseEnrollmentPrompt(waId, phone, msg, fallback = '') {
+  const primary = String(msg || '').trim();
+  if (!primary) return false;
+  const last = getLastAssistantMessage(waId);
+  const finalMsg = last && last === primary && String(fallback || '').trim()
+    ? String(fallback || '').trim()
+    : primary;
+  pushHistory(waId, 'assistant', finalMsg);
+  await sendWhatsAppText(phone, finalMsg);
+  return true;
+}
+
 function buildCourseEnrollmentMissingCourseMessage(courses = []) {
   const rows = Array.isArray(courses) ? courses.filter((x) => x?.nombre).slice(0, 8) : [];
   if (!rows.length) {
@@ -8117,7 +8470,7 @@ Reglas:
   }
 }
 
-async function askForMissingCourseEnrollmentData({ waId, phone, base, courseOptions = [] } = {}) {
+async function askForMissingCourseEnrollmentData({ waId, phone, base, courseOptions = [], studentInput = {} } = {}) {
   const draft = { ...(base || {}) };
   draft.flow_step = inferCourseEnrollmentFlowStep(draft);
   draft.last_intent = draft.last_intent || 'course_signup';
@@ -8125,35 +8478,34 @@ async function askForMissingCourseEnrollmentData({ waId, phone, base, courseOpti
 
   if (!draft.curso_nombre) {
     const msg = buildCourseEnrollmentMissingCourseMessage(courseOptions);
-    pushHistory(waId, 'assistant', msg);
-    await sendWhatsAppText(phone, msg);
+    await sendCourseEnrollmentPrompt(waId, phone, msg, 'Todavía me falta que me indique cuál es el curso para seguir con la inscripción 😊');
     return { asked: 'course', draft };
   }
 
   if (!draft.alumno_nombre) {
-    const msg = buildCourseEnrollmentNeedNameMessage(draft.curso_nombre || '');
-    pushHistory(waId, 'assistant', msg);
-    await sendWhatsAppText(phone, msg);
+    const msg = studentInput?.invalidName || studentInput?.unreadableDocument || studentInput?.extractedDni
+      ? buildCourseEnrollmentNeedNameCorrectionMessage(draft.curso_nombre || '', studentInput)
+      : buildCourseEnrollmentNeedNameMessage(draft.curso_nombre || '');
+    await sendCourseEnrollmentPrompt(waId, phone, msg, 'Todavía me falta el *nombre y apellido completos* del alumno o alumna para seguir 😊');
     return { asked: 'name', draft };
   }
 
   if (!draft.alumno_dni) {
-    const msg = buildCourseEnrollmentNeedDniMessage(draft.curso_nombre || '');
-    pushHistory(waId, 'assistant', msg);
-    await sendWhatsAppText(phone, msg);
+    const msg = studentInput?.invalidDni || studentInput?.unreadableDocument || studentInput?.extractedName
+      ? buildCourseEnrollmentNeedDniCorrectionMessage(draft.curso_nombre || '', studentInput)
+      : buildCourseEnrollmentNeedDniMessage(draft.curso_nombre || '');
+    await sendCourseEnrollmentPrompt(waId, phone, msg, 'Todavía me falta el *DNI del alumno o alumna* para seguir 😊');
     return { asked: 'dni', draft };
   }
 
   if (draft.payment_status === 'payment_review') {
     const msg = buildCourseEnrollmentReviewMessage(draft);
-    pushHistory(waId, 'assistant', msg);
-    await sendWhatsAppText(phone, msg);
+    await sendCourseEnrollmentPrompt(waId, phone, msg, 'Ya recibí el comprobante 😊 Quedó pendiente de revisión manual.');
     return { asked: 'payment_review', draft };
   }
 
   const msg = buildCourseEnrollmentPaymentMessage(draft);
-  pushHistory(waId, 'assistant', msg);
-  await sendWhatsAppText(phone, msg);
+  await sendCourseEnrollmentPrompt(waId, phone, msg, 'Perfecto 😊 Ya están los datos del alumno. Cuando quiera, me envía la seña o me avisa si prefiere pagar en el salón.');
   return { asked: 'payment', draft };
 }
 
@@ -16839,12 +17191,18 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
           last_intent: 'course_signup',
         };
 
-        mergedCourseDraft = mergeStudentIntoCourseEnrollment({
+        const studentMergeDraft = await enrichCourseEnrollmentStudentData({
           draft: mergedCourseDraft,
           text,
           waPhone: phone,
+          mediaMeta,
         });
-        mergedCourseDraft = await tryApplyPaymentToCourseEnrollmentDraft(mergedCourseDraft, { text, mediaMeta });
+        mergedCourseDraft = studentMergeDraft.draft;
+        const studentInputDraft = studentMergeDraft.studentInput || {};
+        const shouldTryCoursePaymentDraft = !studentInputDraft.documentDetected || detectSenaPaid({ text }) || looksLikePaymentProofText(text) || looksLikeProofAlreadySent(text);
+        if (shouldTryCoursePaymentDraft) {
+          mergedCourseDraft = await tryApplyPaymentToCourseEnrollmentDraft(mergedCourseDraft, { text, mediaMeta });
+        }
         mergedCourseDraft.flow_step = inferCourseEnrollmentFlowStep(mergedCourseDraft);
 
         if (looksLikeCourseOnsitePaymentIntent(text) && mergedCourseDraft.alumno_nombre && mergedCourseDraft.alumno_dni) {
@@ -16893,6 +17251,7 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
           phone,
           base: mergedCourseDraft,
           courseOptions: courses,
+          studentInput: studentInputDraft,
         });
         updateLastCloseContext(waId, {
           intentType: 'COURSE',
@@ -18601,12 +18960,18 @@ ${some}
           payment_proof_filename: shouldResetExistingCourseDraft ? '' : (pendingCourseDraft?.payment_proof_filename || ''),
           last_intent: 'course_signup',
         };
-        baseCourseDraft = mergeStudentIntoCourseEnrollment({
+        const studentMergeBase = await enrichCourseEnrollmentStudentData({
           draft: baseCourseDraft,
           text,
           waPhone: phone,
+          mediaMeta,
         });
-        baseCourseDraft = await tryApplyPaymentToCourseEnrollmentDraft(baseCourseDraft, { text, mediaMeta });
+        baseCourseDraft = studentMergeBase.draft;
+        const studentInputBase = studentMergeBase.studentInput || {};
+        const shouldTryCoursePaymentBase = !studentInputBase.documentDetected || detectSenaPaid({ text }) || looksLikePaymentProofText(text) || looksLikeProofAlreadySent(text);
+        if (shouldTryCoursePaymentBase) {
+          baseCourseDraft = await tryApplyPaymentToCourseEnrollmentDraft(baseCourseDraft, { text, mediaMeta });
+        }
         baseCourseDraft.flow_step = inferCourseEnrollmentFlowStep(baseCourseDraft);
 
         if (!baseCourseDraft.curso_nombre) {
@@ -18616,6 +18981,7 @@ ${some}
             phone,
             base: baseCourseDraft,
             courseOptions: suggestedCourses,
+            studentInput: studentInputBase,
           });
           updateLastCloseContext(waId, {
             intentType: 'COURSE',
@@ -18672,6 +19038,7 @@ ${some}
           phone,
           base: baseCourseDraft,
           courseOptions: signupCourse ? [signupCourse] : signupMatches,
+          studentInput: studentInputBase,
         });
         setLastCourseContext(waId, {
           query: signupCourse?.nombre || lastCourseContext?.query || 'cursos',
