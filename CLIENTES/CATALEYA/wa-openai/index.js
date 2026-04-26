@@ -18928,10 +18928,22 @@ ${some}
 // COURSE
     if (intent.type === "COURSE") {
       const courses = await getCoursesCatalog();
+      const isGenericCourseCatalogAsk = isLikelyGenericCourseListQuery(text) || /(otros cursos|que otros cursos|qué otros cursos|que cursos hay|qué cursos hay|que cursos estan dictando|qué cursos están dictando|que cursos tenes|qué cursos tenés|que cursos tienen|qué cursos tienen)/i.test(text || '');
+      const explicitUserCourseQuery = sanitizeCourseSearchQuery(stripCourseSignupNoise(text) || text);
+      const explicitMentionMatches = (!isGenericCourseCatalogAsk && explicitUserCourseQuery)
+        ? findCourses(courses, explicitUserCourseQuery, 'DETAIL')
+        : [];
+      const explicitMentionCourse = (!isGenericCourseCatalogAsk && explicitUserCourseQuery)
+        ? (explicitMentionMatches[0] || findCourseByContextName(courses, explicitUserCourseQuery))
+        : null;
       const previousRecentCourses = Array.isArray(lastCourseContext?.recentCourses) ? lastCourseContext.recentCourses : [];
-      const referencedCourse = resolveCourseFromConversationContext(courses, text, lastCourseContext);
+      const referencedCourse = (!isGenericCourseCatalogAsk && !explicitMentionCourse)
+        ? resolveCourseFromConversationContext(courses, text, lastCourseContext)
+        : null;
       const pendingDraftCourse = findCourseByContextName(courses, pendingCourseDraft?.curso_nombre || '');
-      const activeCourse = referencedCourse || pendingDraftCourse || findCourseByContextName(courses, lastCourseContext?.currentCourseName || lastCourseContext?.selectedName || '');
+      const activeCourse = isGenericCourseCatalogAsk
+        ? null
+        : (explicitMentionCourse || referencedCourse || pendingDraftCourse || findCourseByContextName(courses, lastCourseContext?.currentCourseName || lastCourseContext?.selectedName || ''));
       const followupGoal = detectCourseFollowupGoal(text);
       const cleanedDirectFollowupText = sanitizeCourseSearchQuery(text);
       const isOnlyFollowupGoal = !cleanedDirectFollowupText && !!followupGoal;
@@ -18946,7 +18958,6 @@ ${some}
         recentCourseNames: Array.isArray(lastCourseContext?.recentCourses) ? lastCourseContext.recentCourses.map((x) => x?.nombre).filter(Boolean).slice(0, 12) : [],
         historySnippet: buildConversationHistorySnippet(convForAI, 14, 1200),
       });
-      const isGenericCourseCatalogAsk = isLikelyGenericCourseListQuery(text) || /(otros cursos|que otros cursos|qué otros cursos|que cursos hay|qué cursos hay|que cursos estan dictando|qué cursos están dictando|que cursos tenes|qué cursos tenés|que cursos tienen|qué cursos tienen)/i.test(text || '');
       const hasExplicitCourseSignupSignal = followupGoal === 'SIGNUP' || courseEnrollmentIntent.action === 'START_SIGNUP';
       const continuesExistingCourseSignup = !!pendingCourseDraft && ['CONTINUE_SIGNUP', 'PAYMENT'].includes(courseEnrollmentIntent.action || '');
       const shouldAnswerQuestionBeforeSignup = !!pendingCourseDraft && !!activeCourse && isInformationalCourseQuestion(text, {
@@ -18968,9 +18979,33 @@ ${some}
           recentCourses: Array.isArray(lastCourseContext?.recentCourses) ? lastCourseContext.recentCourses : [],
           historySnippet: buildConversationHistorySnippet(convForAI, 14, 1200),
         });
-        const signupQuery = aiSignupSelection.course_query || courseEnrollmentIntent.course_query || activeCourse?.nombre || referencedCourse?.nombre || lastCourseContext?.selectedName || stripCourseSignupNoise(text) || text;
+        const explicitSignupQuery = sanitizeCourseSearchQuery(stripCourseSignupNoise(text) || text);
+        const explicitSignupMatches = (!isGenericCourseCatalogAsk && explicitSignupQuery)
+          ? findCourses(courses, explicitSignupQuery, 'DETAIL')
+          : [];
+        const explicitSignupCourse = (!isGenericCourseCatalogAsk && explicitSignupQuery)
+          ? (explicitSignupMatches[0] || findCourseByContextName(courses, explicitSignupQuery))
+          : null;
+        const hasExplicitDifferentCourseFromContext = !!explicitSignupCourse && !!activeCourse
+          && normalize(explicitSignupCourse.nombre) !== normalize(activeCourse.nombre);
+        const signupQuery = (hasExplicitDifferentCourseFromContext ? explicitSignupCourse?.nombre : '')
+          || aiSignupSelection.course_query
+          || courseEnrollmentIntent.course_query
+          || explicitSignupCourse?.nombre
+          || activeCourse?.nombre
+          || referencedCourse?.nombre
+          || pendingCourseDraft?.curso_nombre
+          || stripCourseSignupNoise(text)
+          || text;
         const signupMatches = signupQuery ? findCourses(courses, signupQuery, 'DETAIL') : [];
-        const signupCourse = aiSignupSelection.course || activeCourse || referencedCourse || signupMatches[0] || findCourseByContextName(courses, courseEnrollmentIntent.course_query || '') || null;
+        const signupCourse = (hasExplicitDifferentCourseFromContext ? explicitSignupCourse : null)
+          || aiSignupSelection.course
+          || explicitSignupCourse
+          || referencedCourse
+          || activeCourse
+          || signupMatches[0]
+          || findCourseByContextName(courses, courseEnrollmentIntent.course_query || '')
+          || null;
         const isFreshCourseSignup = courseEnrollmentIntent.action === 'START_SIGNUP';
         const sameCourseAsPending = !!pendingCourseDraft?.curso_nombre && !!signupCourse?.nombre
           && normalize(pendingCourseDraft.curso_nombre) === normalize(signupCourse.nombre);
@@ -19151,7 +19186,9 @@ ${some}
         }
       }
 
-      const courseQuery = resolveImplicitCourseFollowupQuery(text, lastCourseContext) || intent.query || '';
+      const courseQuery = isGenericCourseCatalogAsk
+        ? ''
+        : (resolveImplicitCourseFollowupQuery(text, lastCourseContext) || intent.query || explicitUserCourseQuery || '');
       const cleanedCourseQuery = sanitizeCourseSearchQuery(courseQuery);
       const normalizedCourseQuery = normalize(cleanedCourseQuery || courseQuery || '');
       const isGenericCourseQuery = !normalizedCourseQuery || isLikelyGenericCourseListQuery(courseQuery || '') || /^(curso|cursos|clase|clases|taller|talleres|capacitacion|capacitaciones|capacitación|masterclass|seminario|seminarios|workshop)$/.test(normalizedCourseQuery);
