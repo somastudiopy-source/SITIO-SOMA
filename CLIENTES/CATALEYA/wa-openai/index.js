@@ -7094,13 +7094,14 @@ function markProcessedMsgId(msgId = '', now = Date.now()) {
   if (processedMsgIds.size > PROCESSED_MSG_MAX) pruneProcessedMsgIds(now);
 }
 
-setInterval(() => {
+const dedupePruneInterval = setInterval(() => {
   try {
     pruneProcessedMsgIds(Date.now());
   } catch (e) {
     console.error('⚠️ Error podando dedupe de mensajes:', e?.message || e);
   }
 }, 10 * 60 * 1000);
+if (typeof dedupePruneInterval?.unref === 'function') dedupePruneInterval.unref();
 
 // ===================== ENTRADA AGRUPADA (mensajes seguidos) =====================
 const INBOUND_MERGE_MS = Number(process.env.INBOUND_MERGE_MS || 2200);
