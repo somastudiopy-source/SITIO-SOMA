@@ -5521,6 +5521,32 @@ function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+
+function parseJsonObjectSafe(rawText, fallback = {}) {
+  const txt = String(rawText || '').trim();
+  if (!txt) return fallback;
+
+  const candidates = [txt];
+  const fencedMatch = txt.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fencedMatch?.[1]) candidates.push(String(fencedMatch[1]).trim());
+
+  const firstBrace = txt.indexOf('{');
+  const lastBrace = txt.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(txt.slice(firstBrace, lastBrace + 1).trim());
+  }
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    } catch {}
+  }
+
+  return fallback;
+}
+
 function getAssistantTextFromCompletion(completion) {
   const raw = completion?.choices?.[0]?.message?.content;
   if (typeof raw === 'string') return raw.trim();
@@ -6475,7 +6501,7 @@ Reglas:
     });
 
     const completionText = getAssistantTextFromCompletion(completion);
-    const obj = JSON.parse(completionText || '{}');
+    const obj = parseJsonObjectSafe(completionText, {});
     return {
       action: String(obj.action || fallback.action || 'NONE').trim().toUpperCase(),
       target_type: String(obj.target_type || activeOffer?.type || '').trim().toUpperCase(),
@@ -6668,7 +6694,7 @@ Reglas:
     });
 
     const completionText = getAssistantTextFromCompletion(completion);
-    const obj = JSON.parse(completionText || '{}');
+    const obj = parseJsonObjectSafe(completionText, {});
     const type = String(obj.type || fallback.type || 'OTHER').trim().toUpperCase();
     const mode = String(obj.mode || fallback.mode || 'DETAIL').trim().toUpperCase() === 'LIST' ? 'LIST' : 'DETAIL';
     const productDomainRaw = String(obj.product_domain || fallback.product_domain || '').trim().toLowerCase();
@@ -8604,7 +8630,7 @@ Reglas:
       response_format: { type: 'json_object' },
     });
     const completionText = getAssistantTextFromCompletion(completion);
-    const obj = JSON.parse(completionText || '{}');
+    const obj = parseJsonObjectSafe(completionText, {});
     const finalAction = String(forcedAction || obj.action || 'NONE').trim().toUpperCase();
     return {
       action: informationalQuestion && !forcedAction && ['CONTINUE_SIGNUP', 'NONE'].includes(finalAction) ? 'NONE' : finalAction,
@@ -12324,7 +12350,7 @@ Reglas:
     });
 
     const completionText = getAssistantTextFromCompletion(completion);
-    const obj = JSON.parse(completionText || '{}');
+    const obj = parseJsonObjectSafe(completionText, {});
     return {
       is_product_query: !!obj.is_product_query,
       domain: String(obj.domain || '').trim(),
@@ -12611,7 +12637,7 @@ Respondé SOLO JSON con:
     });
 
     const completionText = getAssistantTextFromCompletion(completion);
-    const obj = JSON.parse(completionText || '{}');
+    const obj = parseJsonObjectSafe(completionText, {});
     return {
       intro: String(obj.intro || '').trim(),
       recommended_names: Array.isArray(obj.recommended_names) ? obj.recommended_names.map((x) => String(x || '').trim()).filter(Boolean) : [],
@@ -13397,7 +13423,7 @@ Reglas:
     });
 
     const completionText = getAssistantTextFromCompletion(completion);
-    const obj = JSON.parse(completionText || '{}');
+    const obj = parseJsonObjectSafe(completionText, {});
     const selectedName = String(obj.selected_name || '').trim();
     const courseQuery = String(obj.course_query || '').trim();
     const selected = findCourseByContextName(activeRows, selectedName) || findCourseByContextName(catalogRows, selectedName);
@@ -14253,7 +14279,7 @@ Respondé SOLO JSON.`
     });
 
     const completionText = getAssistantTextFromCompletion(completion);
-    const obj = JSON.parse(completionText || '{}');
+    const obj = parseJsonObjectSafe(completionText, {});
     const action = String(obj?.action || 'UNCLEAR').trim().toUpperCase();
     if (!['CONTINUE_APPOINTMENT', 'PAUSE_APPOINTMENT', 'SWITCH_TOPIC', 'UNCLEAR'].includes(action)) {
       return { action: 'UNCLEAR', reason: '', source: 'ai_invalid' };
@@ -14704,7 +14730,7 @@ Reglas:
     });
 
     const completionText = getAssistantTextFromCompletion(completion);
-    const obj = JSON.parse(completionText || '{}');
+    const obj = parseJsonObjectSafe(completionText, {});
     let route = String(obj.route || fallback.route || 'FLOW').trim().toUpperCase() === 'CHAT' ? 'CHAT' : 'FLOW';
     let flowType = String(obj.flow_type || fallback.flow_type || 'OTHER').trim().toUpperCase();
 
@@ -14942,7 +14968,7 @@ Reglas:
     }, { tag: 'normalizeInboundForRoutingWithAI' });
 
     const completionText = getAssistantTextFromCompletion(completion);
-    const obj = JSON.parse(completionText || '{}');
+    const obj = parseJsonObjectSafe(completionText, {});
     let routedText = cleanAiRoutedText(obj?.routed_text || '') || fallbackText;
     const flowHint = String(obj?.flow_hint || 'OTHER').trim().toUpperCase();
     const goal = cleanAiRoutedText(obj?.goal || '');
