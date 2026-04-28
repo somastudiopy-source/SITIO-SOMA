@@ -8,20 +8,27 @@ const { google } = require("googleapis");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const crypto = require("crypto");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
 const { Pool } = require("pg");
 let XLSX = null;
-try { XLSX = require("xlsx"); } catch {}
+try { XLSX = require("xlsx"); } catch (e) {
+  console.warn("⚠️ Módulo opcional no disponible: xlsx. Instalá con 'npm i xlsx' para habilitar importación Excel.");
+}
 let multer = null;
-try { multer = require("multer"); } catch {}
+try { multer = require("multer"); } catch (e) {
+  console.warn("⚠️ Módulo opcional no disponible: multer. Instalá con 'npm i multer' para habilitar subida de archivos.");
+}
 const CLIENT_ID = "CATALEYA";
 // ===================== ✅ PDF (documentos) =====================
 // Intentamos extraer texto de PDFs si está instalado 'pdf-parse'.
 // Si no está, el bot pedirá una captura/imagen del PDF para poder leerlo.
 let pdfParse = null;
-try { pdfParse = require("pdf-parse"); } catch {}
+try { pdfParse = require("pdf-parse"); } catch (e) {
+  console.warn("⚠️ Módulo opcional no disponible: pdf-parse. Instalá con 'npm i pdf-parse' para lectura de PDFs.");
+}
 
 // ----------------------------------------------------------------------
 // Ensure an `exceptional` global exists to avoid ReferenceError
@@ -2551,8 +2558,46 @@ async function clearBroadcastQueueForUpload(campaignName = BROADCAST_CAMPAIGN_NA
 }
 
 const app = express();
-app.use(express.json({ limit: '25mb' }));
+app.use(express.json({
+  limit: '25mb',
+  verify: (req, _res, buf) => {
+    req.rawBody = Buffer.from(buf || '');
+  },
+}));
 app.use(express.urlencoded({ limit: '5mb', extended: true }));
+
+const WHATSAPP_APP_SECRET = String(
+  process.env.WHATSAPP_APP_SECRET
+  || process.env.APP_SECRET
+  || ''
+).trim();
+const ENFORCE_WEBHOOK_SIGNATURE = String(
+  process.env.ENFORCE_WEBHOOK_SIGNATURE
+  || (WHATSAPP_APP_SECRET ? 'true' : 'false')
+).toLowerCase() === 'true';
+
+function hasValidWebhookSignature(req) {
+  if (!ENFORCE_WEBHOOK_SIGNATURE) return true;
+  if (!WHATSAPP_APP_SECRET) return false;
+
+  const received = String(req.get('x-hub-signature-256') || '').trim();
+  if (!received.startsWith('sha256=')) return false;
+
+  const expected = `sha256=${crypto
+    .createHmac('sha256', WHATSAPP_APP_SECRET)
+    .update(req.rawBody || Buffer.from(''))
+    .digest('hex')}`;
+
+  const a = Buffer.from(received);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+
+  try {
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
 
 const broadcastUpload = multer ? multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }) : null;
 
@@ -5468,6 +5513,56 @@ if (!fs.existsSync(process.env.GOOGLE_SA_FILE)) {
 
 // ===================== OpenAI =====================
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const OPENAI_TIMEOUT_MS = Math.max(8000, Number(process.env.OPENAI_TIMEOUT_MS || 25000) || 25000);
+const OPENAI_RETRY_COUNT = Math.max(0, Number(process.env.OPENAI_RETRY_COUNT || 1) || 1);
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getAssistantTextFromCompletion(completion) {
+  const raw = completion?.choices?.[0]?.message?.content;
+  if (typeof raw === 'string') return raw.trim();
+  if (Array.isArray(raw)) {
+    return raw
+      .map((part) => String(part?.text || part?.content || '').trim())
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+  }
+  return '';
+}
+
+async function createChatCompletionSafe(payload = {}, options = {}) {
+  const timeoutMs = Math.max(5000, Number(options.timeoutMs || OPENAI_TIMEOUT_MS) || OPENAI_TIMEOUT_MS);
+  const retries = Math.max(0, Number(options.retries ?? OPENAI_RETRY_COUNT) || 0);
+  const tag = String(options.tag || 'openai.chat.completions.create');
+
+  let lastError = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    let timeoutHandle = null;
+    try {
+      const requestPromise = openai.chat.completions.create(payload);
+      const response = await Promise.race([
+        requestPromise,
+        new Promise((_, reject) => {
+          timeoutHandle = setTimeout(() => reject(new Error(`timeout_${timeoutMs}ms`)), timeoutMs);
+        }),
+      ]);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      return response;
+    } catch (err) {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      lastError = err;
+      const isLast = attempt >= retries;
+      const brief = String(err?.message || err || '').slice(0, 180);
+      console.error(`❌ ${tag} intento ${attempt + 1}/${retries + 1}: ${brief}`);
+      if (!isLast) await sleepMs(350 * (attempt + 1));
+    }
+  }
+
+  throw lastError || new Error(`${tag} failed`);
+}
 // ===================== ✅ IA: detectar comprobante / datos de pago =====================
 async function extractPagoInfoWithAI(text) {
   const t = String(text || "").trim();
@@ -6930,7 +7025,48 @@ const LAST_SERVICE_TTL_MS = 6 * 60 * 60 * 1000; // 6 horas
 
 
 // ===================== DEDUPE =====================
-const processedMsgIds = new Set();
+const processedMsgIds = new Map(); // msgId -> ts
+const PROCESSED_MSG_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.PROCESSED_MSG_TTL_MS || 2 * 60 * 60 * 1000) || 2 * 60 * 60 * 1000);
+const PROCESSED_MSG_MAX = Math.max(1000, Number(process.env.PROCESSED_MSG_MAX || 15000) || 15000);
+
+function pruneProcessedMsgIds(now = Date.now()) {
+  for (const [msgId, ts] of processedMsgIds.entries()) {
+    if ((now - Number(ts || 0)) > PROCESSED_MSG_TTL_MS) {
+      processedMsgIds.delete(msgId);
+    }
+  }
+
+  if (processedMsgIds.size > PROCESSED_MSG_MAX) {
+    const entries = [...processedMsgIds.entries()].sort((a, b) => Number(a[1] || 0) - Number(b[1] || 0));
+    const toDrop = processedMsgIds.size - PROCESSED_MSG_MAX;
+    for (let i = 0; i < toDrop; i++) {
+      processedMsgIds.delete(entries[i][0]);
+    }
+  }
+}
+
+function isProcessedMsgId(msgId = '', now = Date.now()) {
+  const key = String(msgId || '').trim();
+  if (!key) return false;
+  const ts = processedMsgIds.get(key);
+  if (!ts) return false;
+  if ((now - Number(ts || 0)) > PROCESSED_MSG_TTL_MS) {
+    processedMsgIds.delete(key);
+    return false;
+  }
+  return true;
+}
+
+function markProcessedMsgId(msgId = '', now = Date.now()) {
+  const key = String(msgId || '').trim();
+  if (!key) return;
+  processedMsgIds.set(key, now);
+  if (processedMsgIds.size > PROCESSED_MSG_MAX) pruneProcessedMsgIds(now);
+}
+
+setInterval(() => {
+  try { pruneProcessedMsgIds(Date.now()); } catch {}
+}, 10 * 60 * 1000);
 
 // ===================== ENTRADA AGRUPADA (mensajes seguidos) =====================
 const INBOUND_MERGE_MS = Number(process.env.INBOUND_MERGE_MS || 2200);
@@ -14717,9 +14853,13 @@ Reglas extra:
   messages.push({ role: 'user', content: raw });
 
   try {
-    const reply = await openai.chat.completions.create({ model, messages });
-    return String(reply.choices?.[0]?.message?.content || '').trim();
-  } catch {
+    const reply = await createChatCompletionSafe(
+      { model, messages },
+      { tag: 'answerNaturallyFromCurrentContext' }
+    );
+    return getAssistantTextFromCompletion(reply);
+  } catch (e) {
+    console.error('❌ No pude generar respuesta natural:', e?.message || e);
     return '';
   }
 }
@@ -14738,7 +14878,7 @@ async function normalizeInboundForRoutingWithAI(rawText, context = {}) {
   const fallbackText = buildFallbackInboundRoutingText(raw, context) || raw;
 
   try {
-    const completion = await openai.chat.completions.create({
+    const completion = await createChatCompletionSafe({
       model: PRIMARY_MODEL,
       temperature: 0,
       messages: [
@@ -14785,7 +14925,7 @@ Reglas:
         },
       ],
       response_format: { type: 'json_object' },
-    });
+    }, { tag: 'normalizeInboundForRoutingWithAI' });
 
     const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
     let routedText = cleanAiRoutedText(obj?.routed_text || '') || fallbackText;
@@ -16351,7 +16491,15 @@ app.get("/health", (req, res) => {
 
 // ===================== WEBHOOK =====================
 app.post("/webhook", async (req, res) => {
+  if (!hasValidWebhookSignature(req)) {
+    console.error("❌ Webhook rechazado: firma inválida o faltante.");
+    return res.sendStatus(403);
+  }
+
   res.sendStatus(200);
+
+  let phoneForError = "";
+  let waIdForError = "";
 
   try {
     const value = req.body.entry?.[0]?.changes?.[0]?.value;
@@ -16371,15 +16519,15 @@ app.post("/webhook", async (req, res) => {
     if (!msg) return;
 
     // dedupe
-    if (msg.id && processedMsgIds.has(msg.id)) return;
-    if (msg.id) {
-      processedMsgIds.add(msg.id);
-      if (processedMsgIds.size > 5000) processedMsgIds.clear();
-    }
+    const nowTs = Date.now();
+    if (msg.id && isProcessedMsgId(msg.id, nowTs)) return;
+    if (msg.id) markProcessedMsgId(msg.id, nowTs);
 
     const phoneRaw = msg.from;
     const phone = String(contact?.wa_id || phoneRaw || '').replace(/[^\d]/g, '');
     const waId = contact?.wa_id || phoneRaw;
+    phoneForError = phone;
+    waIdForError = waId;
     const name = contact?.profile?.name || "";
 
     
@@ -19328,8 +19476,11 @@ Si quiere, le paso información de cualquiera de esos 😊`;
     for (const m of convForAI) messages.push(m);
     messages.push({ role: "user", content: text });
 
-    const reply = await openai.chat.completions.create({ model, messages });
-    let out = reply.choices?.[0]?.message?.content || "No pude responder.";
+    const reply = await createChatCompletionSafe(
+      { model, messages },
+      { tag: "webhook_fallback_reply" }
+    );
+    let out = getAssistantTextFromCompletion(reply) || "No pude responder.";
 
     if (pendingDraft && fallbackLooksLikeBookingConfirmation(out)) {
       const safeDraftState = {
@@ -19345,6 +19496,15 @@ Si quiere, le paso información de cualquiera de esos 😊`;
     scheduleInactivityFollowUp(waId, phone);
   } catch (e) {
     console.error("❌ ERROR webhook:", e?.response?.data || e?.message || e);
+    if (phoneForError) {
+      try {
+        const fallbackErrorMsg = "Perdón, tuve un problema técnico momentáneo. ¿Me reenviás tu último mensaje y te respondo enseguida?";
+        if (waIdForError) pushHistory(waIdForError, "assistant", fallbackErrorMsg);
+        await sendWhatsAppText(phoneForError, fallbackErrorMsg);
+      } catch (notifyErr) {
+        console.error("❌ No pude enviar mensaje de recuperación tras error:", notifyErr?.message || notifyErr);
+      }
+    }
   }
 });
 
@@ -19462,6 +19622,9 @@ app.listen(PORT, () => {
     console.log(hasGoogleContactsSyncEnabled()
       ? `ℹ️ Google Contacts sincronizado en ${GOOGLE_CONTACTS_TARGETS.map((x) => x.email).join(' y ')}`
       : "ℹ️ Google Contacts no configurado para sincronización automática");
+    console.log(ENFORCE_WEBHOOK_SIGNATURE
+      ? "🔐 Validación de firma webhook activada (X-Hub-Signature-256)"
+      : "⚠️ Validación de firma webhook desactivada");
 
     if (ENABLE_APPOINTMENT_TEMPLATES) {
       await processAppointmentTemplateNotifications().catch((e) => {
