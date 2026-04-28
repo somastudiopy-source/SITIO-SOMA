@@ -8,20 +8,27 @@ const { google } = require("googleapis");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const crypto = require("crypto");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
 const { Pool } = require("pg");
 let XLSX = null;
-try { XLSX = require("xlsx"); } catch {}
+try { XLSX = require("xlsx"); } catch (e) {
+  console.warn("⚠️ Módulo opcional no disponible: xlsx. Instalá con 'npm i xlsx' para habilitar importación Excel.");
+}
 let multer = null;
-try { multer = require("multer"); } catch {}
+try { multer = require("multer"); } catch (e) {
+  console.warn("⚠️ Módulo opcional no disponible: multer. Instalá con 'npm i multer' para habilitar subida de archivos.");
+}
 const CLIENT_ID = "CATALEYA";
 // ===================== ✅ PDF (documentos) =====================
 // Intentamos extraer texto de PDFs si está instalado 'pdf-parse'.
 // Si no está, el bot pedirá una captura/imagen del PDF para poder leerlo.
 let pdfParse = null;
-try { pdfParse = require("pdf-parse"); } catch {}
+try { pdfParse = require("pdf-parse"); } catch (e) {
+  console.warn("⚠️ Módulo opcional no disponible: pdf-parse. Instalá con 'npm i pdf-parse' para lectura de PDFs.");
+}
 
 // ----------------------------------------------------------------------
 // Ensure an `exceptional` global exists to avoid ReferenceError
@@ -2551,8 +2558,46 @@ async function clearBroadcastQueueForUpload(campaignName = BROADCAST_CAMPAIGN_NA
 }
 
 const app = express();
-app.use(express.json({ limit: '25mb' }));
+app.use(express.json({
+  limit: '25mb',
+  verify: (req, _res, buf) => {
+    req.rawBody = Buffer.from(buf || '');
+  },
+}));
 app.use(express.urlencoded({ limit: '5mb', extended: true }));
+
+const WHATSAPP_APP_SECRET = String(
+  process.env.WHATSAPP_APP_SECRET
+  || process.env.APP_SECRET
+  || ''
+).trim();
+const ENFORCE_WEBHOOK_SIGNATURE = String(
+  process.env.ENFORCE_WEBHOOK_SIGNATURE
+  || (WHATSAPP_APP_SECRET ? 'true' : 'false')
+).toLowerCase() === 'true';
+
+function hasValidWebhookSignature(req) {
+  if (!ENFORCE_WEBHOOK_SIGNATURE) return true;
+  if (!WHATSAPP_APP_SECRET) return false;
+
+  const received = String(req.get('x-hub-signature-256') || '').trim();
+  if (!received.startsWith('sha256=')) return false;
+
+  const expected = `sha256=${crypto
+    .createHmac('sha256', WHATSAPP_APP_SECRET)
+    .update(req.rawBody || Buffer.from(''))
+    .digest('hex')}`;
+
+  const a = Buffer.from(received);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+
+  try {
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
 
 const broadcastUpload = multer ? multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }) : null;
 
@@ -5468,6 +5513,84 @@ if (!fs.existsSync(process.env.GOOGLE_SA_FILE)) {
 
 // ===================== OpenAI =====================
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const OPENAI_TIMEOUT_MS = Math.max(8000, Number(process.env.OPENAI_TIMEOUT_MS || 25000) || 25000);
+const OPENAI_RETRY_COUNT = Math.max(0, Number(process.env.OPENAI_RETRY_COUNT || 1) || 1);
+const OPENAI_RETRY_DELAY_MS = Math.max(100, Number(process.env.OPENAI_RETRY_DELAY_MS || 350) || 350);
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+
+function parseJsonObjectSafe(rawText, fallback = {}) {
+  const txt = String(rawText || '').trim();
+  if (!txt) return fallback;
+
+  const candidates = [txt];
+  const fencedMatch = txt.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fencedMatch?.[1]) candidates.push(String(fencedMatch[1]).trim());
+
+  const firstBrace = txt.indexOf('{');
+  const lastBrace = txt.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(txt.slice(firstBrace, lastBrace + 1).trim());
+  }
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    } catch {}
+  }
+
+  return fallback;
+}
+
+function getAssistantTextFromCompletion(completion) {
+  const raw = completion?.choices?.[0]?.message?.content;
+  if (typeof raw === 'string') return raw.trim();
+  if (Array.isArray(raw)) {
+    return raw
+      .map((part) => String(part?.text || part?.content || '').trim())
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+  }
+  return '';
+}
+
+async function createChatCompletionSafe(payload = {}, options = {}) {
+  const timeoutMs = Math.max(5000, Number(options.timeoutMs || OPENAI_TIMEOUT_MS) || OPENAI_TIMEOUT_MS);
+  const retries = Math.max(0, Number(options.retries ?? OPENAI_RETRY_COUNT) || 0);
+  const tag = String(options.tag || 'openai.chat.completions.create');
+
+  let lastError = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    let timeoutHandle = null;
+    try {
+      const requestPromise = openai.chat.completions.create(payload);
+      const response = await Promise.race([
+        requestPromise,
+        new Promise((_, reject) => {
+          timeoutHandle = setTimeout(() => reject(new Error(`timeout_${timeoutMs}ms`)), timeoutMs);
+          if (typeof timeoutHandle?.unref === 'function') timeoutHandle.unref();
+        }),
+      ]);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      return response;
+    } catch (err) {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      lastError = err;
+      const isLast = attempt >= retries;
+      const brief = String(err?.message || err || '').slice(0, 180);
+      console.error(`❌ ${tag} intento ${attempt + 1}/${retries + 1}: ${brief}`);
+      if (!isLast) await sleepMs(OPENAI_RETRY_DELAY_MS * (attempt + 1));
+    }
+  }
+
+  throw lastError || new Error(`${tag} failed`);
+}
 // ===================== ✅ IA: detectar comprobante / datos de pago =====================
 async function extractPagoInfoWithAI(text) {
   const t = String(text || "").trim();
@@ -5478,7 +5601,7 @@ async function extractPagoInfoWithAI(text) {
   if (!quick && t.length < 50) return { ok: false, es_comprobante: false, pagador: "", monto: "", receptor: "" };
 
   try {
-    const completion = await openai.chat.completions.create({
+    const completion = await createChatCompletionSafe({
       model: PRIMARY_MODEL,
       messages: [
         {
@@ -5495,8 +5618,8 @@ Campos:
         { role: "user", content: t.slice(0, 6000) },
       ],
       response_format: { type: "json_object" },
-    });
-    const obj = JSON.parse(completion.choices[0].message.content || "{}");
+    }, { tag: 'extractPagoInfoWithAI' });
+    const obj = parseJsonObjectSafe(getAssistantTextFromCompletion(completion), {});
     return {
       ok: !!obj.ok,
       es_comprobante: !!obj.es_comprobante,
@@ -5504,7 +5627,8 @@ Campos:
       receptor: String(obj.receptor || "").trim(),
       monto: String(obj.monto || "").trim(),
     };
-  } catch {
+  } catch (err) {
+    console.error('⚠️ extractPagoInfoWithAI falló:', err?.message || err);
     return { ok: false, es_comprobante: false, pagador: "", monto: "", receptor: "" };
   }
 }
@@ -5555,7 +5679,7 @@ async function extractStrictCoursePaymentProofFromText(text) {
   const heuristicAmount = detectMonto10000(raw) ? COURSE_SENA_TXT : '';
 
   try {
-    const resp = await openai.chat.completions.create({
+    const resp = await createChatCompletionSafe({
       model: PRIMARY_MODEL,
       temperature: 0,
       messages: [
@@ -5582,9 +5706,9 @@ Reglas:
         },
       ],
       response_format: { type: 'json_object' },
-    });
+    }, { tag: 'extractStrictCoursePaymentProofFromText' });
 
-    const obj = safeJsonParseFromText(resp.choices?.[0]?.message?.content || '') || {};
+    const obj = parseJsonObjectSafe(getAssistantTextFromCompletion(resp), {});
     const titular = normalizeProofHolderName(obj.titular || heuristicTitular || '');
     const montoDetected = String(obj.monto || '').trim();
     const monto = extractMoneyAmountFromText(montoDetected) === COURSE_SENA_AMOUNT
@@ -6377,7 +6501,8 @@ Reglas:
       response_format: { type: 'json_object' },
     });
 
-    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const completionText = getAssistantTextFromCompletion(completion);
+    const obj = parseJsonObjectSafe(completionText, {});
     return {
       action: String(obj.action || fallback.action || 'NONE').trim().toUpperCase(),
       target_type: String(obj.target_type || activeOffer?.type || '').trim().toUpperCase(),
@@ -6569,7 +6694,8 @@ Reglas:
       response_format: { type: 'json_object' },
     });
 
-    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const completionText = getAssistantTextFromCompletion(completion);
+    const obj = parseJsonObjectSafe(completionText, {});
     const type = String(obj.type || fallback.type || 'OTHER').trim().toUpperCase();
     const mode = String(obj.mode || fallback.mode || 'DETAIL').trim().toUpperCase() === 'LIST' ? 'LIST' : 'DETAIL';
     const productDomainRaw = String(obj.product_domain || fallback.product_domain || '').trim().toLowerCase();
@@ -6930,7 +7056,53 @@ const LAST_SERVICE_TTL_MS = 6 * 60 * 60 * 1000; // 6 horas
 
 
 // ===================== DEDUPE =====================
-const processedMsgIds = new Set();
+const processedMsgIds = new Map(); // msgId -> ts
+const PROCESSED_MSG_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.PROCESSED_MSG_TTL_MS || 2 * 60 * 60 * 1000) || 2 * 60 * 60 * 1000);
+const PROCESSED_MSG_MAX = Math.max(1000, Number(process.env.PROCESSED_MSG_MAX || 15000) || 15000);
+
+function pruneProcessedMsgIds(now = Date.now()) {
+  for (const [msgId, ts] of processedMsgIds.entries()) {
+    if ((now - Number(ts || 0)) > PROCESSED_MSG_TTL_MS) {
+      processedMsgIds.delete(msgId);
+    }
+  }
+
+  if (processedMsgIds.size > PROCESSED_MSG_MAX) {
+    const entries = [...processedMsgIds.entries()].sort((a, b) => Number(a[1] || 0) - Number(b[1] || 0));
+    const toDrop = processedMsgIds.size - PROCESSED_MSG_MAX;
+    for (let i = 0; i < toDrop; i++) {
+      processedMsgIds.delete(entries[i][0]);
+    }
+  }
+}
+
+function isProcessedMsgId(msgId = '', now = Date.now()) {
+  const key = String(msgId || '').trim();
+  if (!key) return false;
+  const ts = processedMsgIds.get(key);
+  if (!ts) return false;
+  if ((now - Number(ts || 0)) > PROCESSED_MSG_TTL_MS) {
+    processedMsgIds.delete(key);
+    return false;
+  }
+  return true;
+}
+
+function markProcessedMsgId(msgId = '', now = Date.now()) {
+  const key = String(msgId || '').trim();
+  if (!key) return;
+  processedMsgIds.set(key, now);
+  if (processedMsgIds.size > PROCESSED_MSG_MAX) pruneProcessedMsgIds(now);
+}
+
+const dedupePruneInterval = setInterval(() => {
+  try {
+    pruneProcessedMsgIds(Date.now());
+  } catch (e) {
+    console.error('⚠️ Error podando dedupe de mensajes:', e?.message || e);
+  }
+}, 10 * 60 * 1000);
+if (typeof dedupePruneInterval?.unref === 'function') dedupePruneInterval.unref();
 
 // ===================== ENTRADA AGRUPADA (mensajes seguidos) =====================
 const INBOUND_MERGE_MS = Number(process.env.INBOUND_MERGE_MS || 2200);
@@ -8459,7 +8631,8 @@ Reglas:
       ],
       response_format: { type: 'json_object' },
     });
-    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const completionText = getAssistantTextFromCompletion(completion);
+    const obj = parseJsonObjectSafe(completionText, {});
     const finalAction = String(forcedAction || obj.action || 'NONE').trim().toUpperCase();
     return {
       action: informationalQuestion && !forcedAction && ['CONTINUE_SIGNUP', 'NONE'].includes(finalAction) ? 'NONE' : finalAction,
@@ -12178,7 +12351,8 @@ Reglas:
       response_format: { type: 'json_object' },
     });
 
-    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const completionText = getAssistantTextFromCompletion(completion);
+    const obj = parseJsonObjectSafe(completionText, {});
     return {
       is_product_query: !!obj.is_product_query,
       domain: String(obj.domain || '').trim(),
@@ -12464,7 +12638,8 @@ Respondé SOLO JSON con:
       response_format: { type: 'json_object' },
     });
 
-    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const completionText = getAssistantTextFromCompletion(completion);
+    const obj = parseJsonObjectSafe(completionText, {});
     return {
       intro: String(obj.intro || '').trim(),
       recommended_names: Array.isArray(obj.recommended_names) ? obj.recommended_names.map((x) => String(x || '').trim()).filter(Boolean) : [],
@@ -13249,7 +13424,8 @@ Reglas:
       response_format: { type: 'json_object' },
     });
 
-    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const completionText = getAssistantTextFromCompletion(completion);
+    const obj = parseJsonObjectSafe(completionText, {});
     const selectedName = String(obj.selected_name || '').trim();
     const courseQuery = String(obj.course_query || '').trim();
     const selected = findCourseByContextName(activeRows, selectedName) || findCourseByContextName(catalogRows, selectedName);
@@ -14104,7 +14280,8 @@ Respondé SOLO JSON.`
       response_format: { type: 'json_object' },
     });
 
-    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const completionText = getAssistantTextFromCompletion(completion);
+    const obj = parseJsonObjectSafe(completionText, {});
     const action = String(obj?.action || 'UNCLEAR').trim().toUpperCase();
     if (!['CONTINUE_APPOINTMENT', 'PAUSE_APPOINTMENT', 'SWITCH_TOPIC', 'UNCLEAR'].includes(action)) {
       return { action: 'UNCLEAR', reason: '', source: 'ai_invalid' };
@@ -14554,7 +14731,8 @@ Reglas:
       response_format: { type: 'json_object' },
     });
 
-    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const completionText = getAssistantTextFromCompletion(completion);
+    const obj = parseJsonObjectSafe(completionText, {});
     let route = String(obj.route || fallback.route || 'FLOW').trim().toUpperCase() === 'CHAT' ? 'CHAT' : 'FLOW';
     let flowType = String(obj.flow_type || fallback.flow_type || 'OTHER').trim().toUpperCase();
 
@@ -14717,9 +14895,13 @@ Reglas extra:
   messages.push({ role: 'user', content: raw });
 
   try {
-    const reply = await openai.chat.completions.create({ model, messages });
-    return String(reply.choices?.[0]?.message?.content || '').trim();
-  } catch {
+    const reply = await createChatCompletionSafe(
+      { model, messages },
+      { tag: 'answerNaturallyFromCurrentContext' }
+    );
+    return getAssistantTextFromCompletion(reply);
+  } catch (e) {
+    console.error('❌ No pude generar respuesta natural:', e?.message || e);
     return '';
   }
 }
@@ -14738,7 +14920,7 @@ async function normalizeInboundForRoutingWithAI(rawText, context = {}) {
   const fallbackText = buildFallbackInboundRoutingText(raw, context) || raw;
 
   try {
-    const completion = await openai.chat.completions.create({
+    const completion = await createChatCompletionSafe({
       model: PRIMARY_MODEL,
       temperature: 0,
       messages: [
@@ -14785,9 +14967,10 @@ Reglas:
         },
       ],
       response_format: { type: 'json_object' },
-    });
+    }, { tag: 'normalizeInboundForRoutingWithAI' });
 
-    const obj = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    const completionText = getAssistantTextFromCompletion(completion);
+    const obj = parseJsonObjectSafe(completionText, {});
     let routedText = cleanAiRoutedText(obj?.routed_text || '') || fallbackText;
     const flowHint = String(obj?.flow_hint || 'OTHER').trim().toUpperCase();
     const goal = cleanAiRoutedText(obj?.goal || '');
@@ -16351,7 +16534,15 @@ app.get("/health", (req, res) => {
 
 // ===================== WEBHOOK =====================
 app.post("/webhook", async (req, res) => {
+  if (!hasValidWebhookSignature(req)) {
+    console.error("❌ Webhook rechazado: firma inválida o faltante.");
+    return res.sendStatus(403);
+  }
+
   res.sendStatus(200);
+
+  let phoneForError = "";
+  let waIdForError = "";
 
   try {
     const value = req.body.entry?.[0]?.changes?.[0]?.value;
@@ -16371,15 +16562,15 @@ app.post("/webhook", async (req, res) => {
     if (!msg) return;
 
     // dedupe
-    if (msg.id && processedMsgIds.has(msg.id)) return;
-    if (msg.id) {
-      processedMsgIds.add(msg.id);
-      if (processedMsgIds.size > 5000) processedMsgIds.clear();
-    }
+    const nowTs = Date.now();
+    if (msg.id && isProcessedMsgId(msg.id, nowTs)) return;
+    if (msg.id) markProcessedMsgId(msg.id, nowTs);
 
     const phoneRaw = msg.from;
     const phone = String(contact?.wa_id || phoneRaw || '').replace(/[^\d]/g, '');
     const waId = contact?.wa_id || phoneRaw;
+    phoneForError = phone;
+    waIdForError = waId;
     const name = contact?.profile?.name || "";
 
     
@@ -19328,8 +19519,11 @@ Si quiere, le paso información de cualquiera de esos 😊`;
     for (const m of convForAI) messages.push(m);
     messages.push({ role: "user", content: text });
 
-    const reply = await openai.chat.completions.create({ model, messages });
-    let out = reply.choices?.[0]?.message?.content || "No pude responder.";
+    const reply = await createChatCompletionSafe(
+      { model, messages },
+      { tag: "webhook_fallback_reply" }
+    );
+    let out = getAssistantTextFromCompletion(reply) || "No pude responder.";
 
     if (pendingDraft && fallbackLooksLikeBookingConfirmation(out)) {
       const safeDraftState = {
@@ -19345,6 +19539,15 @@ Si quiere, le paso información de cualquiera de esos 😊`;
     scheduleInactivityFollowUp(waId, phone);
   } catch (e) {
     console.error("❌ ERROR webhook:", e?.response?.data || e?.message || e);
+    if (phoneForError) {
+      try {
+        const fallbackErrorMsg = "Perdón, tuve un problema técnico momentáneo. ¿Me reenviás tu último mensaje y te respondo enseguida?";
+        if (waIdForError) pushHistory(waIdForError, "assistant", fallbackErrorMsg);
+        await sendWhatsAppText(phoneForError, fallbackErrorMsg);
+      } catch (notifyErr) {
+        console.error("❌ No pude enviar mensaje de recuperación tras error:", notifyErr?.message || notifyErr);
+      }
+    }
   }
 });
 
@@ -19462,6 +19665,9 @@ app.listen(PORT, () => {
     console.log(hasGoogleContactsSyncEnabled()
       ? `ℹ️ Google Contacts sincronizado en ${GOOGLE_CONTACTS_TARGETS.map((x) => x.email).join(' y ')}`
       : "ℹ️ Google Contacts no configurado para sincronización automática");
+    console.log(ENFORCE_WEBHOOK_SIGNATURE
+      ? "🔐 Validación de firma webhook activada (X-Hub-Signature-256)"
+      : "⚠️ Validación de firma webhook desactivada");
 
     if (ENABLE_APPOINTMENT_TEMPLATES) {
       await processAppointmentTemplateNotifications().catch((e) => {
