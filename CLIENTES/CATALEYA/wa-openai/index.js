@@ -5516,6 +5516,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const OPENAI_TIMEOUT_MS = Math.max(8000, Number(process.env.OPENAI_TIMEOUT_MS || 25000) || 25000);
 const OPENAI_RETRY_COUNT = Math.max(0, Number(process.env.OPENAI_RETRY_COUNT || 1) || 1);
 const OPENAI_RETRY_DELAY_MS = Math.max(100, Number(process.env.OPENAI_RETRY_DELAY_MS || 350) || 350);
+const DEBUG_AI_PARSE = String(process.env.DEBUG_AI_PARSE || '').trim() === '1';
 
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -5541,7 +5542,9 @@ function parseJsonObjectSafe(rawText, fallback = {}) {
     try {
       const parsed = JSON.parse(candidate);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
-    } catch {}
+    } catch (err) {
+      if (DEBUG_AI_PARSE) console.warn('⚠️ parseJsonObjectSafe: candidato inválido:', String(err?.message || err || '').slice(0, 140));
+    }
   }
 
   return fallback;
