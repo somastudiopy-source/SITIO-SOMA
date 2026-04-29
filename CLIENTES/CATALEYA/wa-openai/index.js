@@ -16354,33 +16354,76 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   try {
-    const value = req.body.entry?.[0]?.changes?.[0]?.value;
-    const statuses = Array.isArray(value?.statuses) ? value.statuses : [];
-    if (statuses.length) {
-      for (const statusObj of statuses) {
-        try {
-          await updateBroadcastDeliveryFromWebhook(statusObj);
-        } catch (statusErr) {
-          console.error('❌ Error actualizando estado de difusión por webhook:', statusErr?.response?.data || statusErr?.message || statusErr);
+    const entries = Array.isArray(req.body?.entry) ? req.body.entry : [];
+    const entryCount = entries.length;
+    const changesCount = entries.reduce((acc, entry) => acc + (Array.isArray(entry?.changes) ? entry.changes.length : 0), 0);
+    const messagesCount = entries.reduce((acc, entry) => {
+      const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+      return acc + changes.reduce((inner, change) => inner + (Array.isArray(change?.value?.messages) ? change.value.messages.length : 0), 0);
+    }, 0);
+
+    console.log('📩 WEBHOOK_INBOUND_COUNTS', JSON.stringify({ entry_count: entryCount, changes_count: changesCount, messages_count: messagesCount }));
+
+    for (const entry of entries) {
+      const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+      for (const change of changes) {
+        const value = change?.value || {};
+        const statuses = Array.isArray(value?.statuses) ? value.statuses : [];
+        if (statuses.length) {
+          for (const statusObj of statuses) {
+            try {
+              await updateBroadcastDeliveryFromWebhook(statusObj);
+            } catch (statusErr) {
+              console.error('❌ Error actualizando estado de difusión por webhook:', statusErr?.response?.data || statusErr?.message || statusErr);
+            }
+          }
         }
-      }
-    }
+        const inboundMessages = Array.isArray(value?.messages) ? value.messages : [];
+        const contacts = Array.isArray(value?.contacts) ? value.contacts : [];
+        if (!inboundMessages.length) continue;
 
-    const msg = value?.messages?.[0];
-    const contact = value?.contacts?.[0];
-    if (!msg) return;
+        for (let msgIndex = 0; msgIndex < inboundMessages.length; msgIndex += 1) {
+          const msg = inboundMessages[msgIndex];
+          const contact = contacts[msgIndex] || contacts[0] || {};
+          if (!msg) continue;
 
-    // dedupe
-    if (msg.id && processedMsgIds.has(msg.id)) return;
-    if (msg.id) {
-      processedMsgIds.add(msg.id);
-      if (processedMsgIds.size > 5000) processedMsgIds.clear();
-    }
+          // dedupe
+          if (msg.id && processedMsgIds.has(msg.id)) {
+            console.log('⚠️ WEBHOOK_DEDUPE_SKIPPED', JSON.stringify({ msg_id: msg.id, msg_type: msg?.type || '', msg_timestamp: msg?.timestamp || '' }));
+            continue;
+          }
+          if (msg.id) {
+            processedMsgIds.add(msg.id);
+            if (processedMsgIds.size > 5000) processedMsgIds.clear();
+          }
 
-    const phoneRaw = msg.from;
-    const phone = String(contact?.wa_id || phoneRaw || '').replace(/[^\d]/g, '');
-    const waId = contact?.wa_id || phoneRaw;
-    const name = contact?.profile?.name || "";
+          const phoneRaw = msg.from;
+          const phone = String(contact?.wa_id || phoneRaw || '').replace(/[^\d]/g, '');
+          const waId = contact?.wa_id || phoneRaw;
+          const name = contact?.profile?.name || "";
+          const msgContextId = String(msg?.context?.id || '').trim();
+          const hasCaption = !!(
+            (msg.type === "image" && String(msg.image?.caption || '').trim())
+            || (msg.type === "document" && String(msg.document?.caption || '').trim())
+          );
+          const isStoryReply = !!(
+            msg?.context?.from
+            || msg?.context?.id
+            || msg?.context?.referred_product
+            || msg?.context?.forwarded
+          );
+
+          console.log('📨 WEBHOOK_INBOUND_MSG', JSON.stringify({
+            msg_id: msg?.id || '',
+            msg_type: msg?.type || '',
+            msg_timestamp: msg?.timestamp || '',
+            contact_wa_id: contact?.wa_id || '',
+            msg_from: phoneRaw || '',
+            profile_name: name || '',
+            has_caption: hasCaption,
+            context_id: msgContextId || '',
+            looks_like_story_reply: isStoryReply,
+          }));
 
     
 // ✅ INACTIVIDAD: si el cliente habló, cancelamos timers anteriores (si existían)
@@ -16394,23 +16437,31 @@ if (closeTimers.has(waId)) {
 }
 
     // texto / audio / imagen
-    const extracted = await extractTextFromIncomingMessage(msg);
-    let text = (extracted.text || "").trim();
-    let mediaMeta = extracted.media || null;
-    let userIntentText = (
-      msg.type === "image" ? (msg.image?.caption || "") :
-      msg.type === "document" ? (msg.document?.caption || "") :
-      text
-    ).trim();
+          const extracted = await extractTextFromIncomingMessage(msg);
+          let text = (extracted.text || "").trim();
+          let mediaMeta = extracted.media || null;
+          let userIntentText = (
+            msg.type === "image" ? (msg.image?.caption || "") :
+            msg.type === "document" ? (msg.document?.caption || "") :
+            text
+          ).trim();
+          if (!userIntentText && text) userIntentText = text;
 
-    if (isSecretResetCommand(text) || isSecretResetCommand(userIntentText)) {
-      await secretResetContactSession({ waId, phone, phoneRaw });
-      await sendWhatsAppText(
-        phone,
-        "Listo. Reinicié esta conversación y borré la memoria operativa de este contacto. A partir de ahora lo tomo como nuevo 😊"
-      );
-      return;
-    }
+          console.log('🧾 WEBHOOK_EXTRACTED_TEXT', JSON.stringify({
+            msg_id: msg?.id || '',
+            kind: extracted?.kind || '',
+            extracted_text_len: text.length,
+            user_intent_len: userIntentText.length,
+          }));
+
+          if (isSecretResetCommand(text) || isSecretResetCommand(userIntentText)) {
+            await secretResetContactSession({ waId, phone, phoneRaw });
+            await sendWhatsAppText(
+              phone,
+              "Listo. Reinicié esta conversación y borré la memoria operativa de este contacto. A partir de ahora lo tomo como nuevo 😊"
+            );
+            continue;
+          }
 
 
 // ✅ Contexto para seguimiento al cierre (se actualiza durante la conversación)
@@ -16429,46 +16480,60 @@ lastCloseContext.set(waId, {
 });
 
     // ✅ Guardar mensaje ENTRANTE (IN) para que el panel lo vea
-    await dbInsertMessage({
-      direction: "in",
-      wa_peer: phone, // ✅ SIEMPRE el normalizado (no phoneRaw)
-      name,
-      text,
-      msg_type: msg.type,
-      wa_msg_id: msg.id,
-      raw: {
-        webhook: req.body,
-        media: mediaMeta,
-      },
-    });
+          await dbInsertMessage({
+            direction: "in",
+            wa_peer: phone, // ✅ SIEMPRE el normalizado (no phoneRaw)
+            name,
+            text,
+            msg_type: msg.type,
+            wa_msg_id: msg.id,
+            raw: {
+              webhook: req.body,
+              media: mediaMeta,
+              inbound_meta: {
+                context_id: msgContextId || '',
+                has_caption: hasCaption,
+                looks_like_story_reply: isStoryReply,
+              },
+            },
+          });
 
-    if (!text) {
-      await sendWhatsAppText(phone, "¿Me lo puede enviar en texto, audio o imagen? Así lo reviso 😊");
-      // ✅ INACTIVIDAD: programar follow-up luego de la respuesta del bot
-      scheduleInactivityFollowUp(waId, phone);
-      return;
-    }
+          if (!text) {
+            await sendWhatsAppText(phone, "¿Me lo puede enviar en texto, audio o imagen? Así lo reviso 😊");
+            // ✅ INACTIVIDAD: programar follow-up luego de la respuesta del bot
+            scheduleInactivityFollowUp(waId, phone);
+            continue;
+          }
 
-    const inboundVersion = appendInboundMergeChunk(waId, {
-      phone,
-      phoneRaw,
-      name,
-      text,
-      userIntentText,
-      mediaMeta,
-      msgType: msg.type,
-      msgId: msg.id,
-    });
+          const inboundVersion = appendInboundMergeChunk(waId, {
+            phone,
+            phoneRaw,
+            name,
+            text,
+            userIntentText,
+            mediaMeta,
+            msgType: msg.type,
+            msgId: msg.id,
+          });
 
-    const mergedInbound = await waitForInboundMergeSilence(waId, inboundVersion);
-    if (!mergedInbound) return;
+          const mergedInbound = await waitForInboundMergeSilence(waId, inboundVersion);
+          if (!mergedInbound) continue;
 
-    const mergedTextRaw = String(mergedInbound.text || '').trim();
-    const mergedIntentRaw = String(mergedInbound.userIntentText || userIntentText || mergedTextRaw).trim();
-    text = stripSoftConversationPrefix(compactMergedInboundText(mergedTextRaw)) || compactMergedInboundText(mergedTextRaw) || mergedTextRaw;
-    userIntentText = stripSoftConversationPrefix(compactMergedInboundText(mergedIntentRaw)) || compactMergedInboundText(mergedIntentRaw) || mergedIntentRaw || text;
-    mediaMeta = mergedInbound.mediaMeta || mediaMeta || null;
-    contactInfoFromText = extractContactInfo(text);
+          const mergedTextRaw = String(mergedInbound.text || '').trim();
+          const mergedIntentRaw = String(mergedInbound.userIntentText || userIntentText || mergedTextRaw).trim();
+          text = stripSoftConversationPrefix(compactMergedInboundText(mergedTextRaw)) || compactMergedInboundText(mergedTextRaw) || mergedTextRaw;
+          userIntentText = stripSoftConversationPrefix(compactMergedInboundText(mergedIntentRaw)) || compactMergedInboundText(mergedIntentRaw) || mergedIntentRaw || text;
+          mediaMeta = mergedInbound.mediaMeta || mediaMeta || null;
+          contactInfoFromText = extractContactInfo(text);
+
+          console.log('🧩 WEBHOOK_INBOUND_MERGE', JSON.stringify({
+            wa_id: waId || '',
+            msg_id: msg?.id || '',
+            merged_item_count: Number(mergedInbound?.itemCount || 1),
+            merged_text_len: text.length,
+            merged_intent_len: userIntentText.length,
+            merged_text: String(text || '').slice(0, 500),
+          }));
 
     updateLastCloseContext(waId, {
       explicitName: contactInfoFromText?.nombre || lastCloseContext.get(waId)?.explicitName || '',
@@ -19343,6 +19408,9 @@ Si quiere, le paso información de cualquiera de esos 😊`;
     await sendWhatsAppText(phone, out);
     // ✅ INACTIVIDAD
     scheduleInactivityFollowUp(waId, phone);
+        }
+      }
+    }
   } catch (e) {
     console.error("❌ ERROR webhook:", e?.response?.data || e?.message || e);
   }
