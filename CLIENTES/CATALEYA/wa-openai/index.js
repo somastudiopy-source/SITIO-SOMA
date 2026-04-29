@@ -5936,6 +5936,35 @@ function pushHistory(waId, role, content) {
 const inactivityTimers = new Map();
 const closeTimers = new Map();
 const lastCloseContext = new Map(); // waId -> { phone, name, lastUserText, intentType, interest }
+const topicLockByConversation = new Map(); // waId -> { topic: PRODUCT|COURSE|SERVICE, turnsLeft: number }
+
+function buildDisambiguationQuestion() {
+  return "¿Querés que te ayude con *productos*, *cursos* o *turnos*?";
+}
+
+function setTopicLock(waId, topic, turns = 2) {
+  const cleanTopic = String(topic || '').trim().toUpperCase();
+  if (!waId || !['PRODUCT', 'COURSE', 'SERVICE'].includes(cleanTopic)) return;
+  topicLockByConversation.set(waId, { topic: cleanTopic, turnsLeft: Math.max(1, Number(turns) || 2) });
+}
+
+function getTopicLock(waId) {
+  if (!waId) return null;
+  const row = topicLockByConversation.get(waId);
+  if (!row || !row.topic || !row.turnsLeft) return null;
+  return row;
+}
+
+function consumeTopicLockTurn(waId) {
+  const row = getTopicLock(waId);
+  if (!row) return;
+  const nextTurns = Number(row.turnsLeft || 0) - 1;
+  if (nextTurns <= 0) {
+    topicLockByConversation.delete(waId);
+    return;
+  }
+  topicLockByConversation.set(waId, { ...row, turnsLeft: nextTurns });
+}
 
 function updateLastCloseContext(waId, patch = {}) {
   if (!waId) return null;
@@ -13418,18 +13447,22 @@ function classifyIntentV2({ text, context = {} } = {}) {
   const [topIntent, topScore] = entries[0] || ['UNKNOWN', 0];
   const secondScore = entries[1]?.[1] || 0;
   const strongChange = topScore >= 3 && topScore >= (secondScore + 2);
+  const isTie = topScore > 0 && topScore === secondScore;
+  const isLowScore = topScore > 0 && topScore < INTENT_V2_THRESHOLD;
 
   let finalIntent = topIntent;
   if (context?.hasDraft && topIntent !== 'SERVICE' && !strongChange) finalIntent = 'SERVICE';
   if (context?.courseSignupActive && topIntent !== 'COURSE' && !strongChange) finalIntent = 'COURSE';
-  if ((scores[finalIntent] || 0) < INTENT_V2_THRESHOLD) finalIntent = 'UNKNOWN';
+  if ((scores[finalIntent] || 0) < INTENT_V2_THRESHOLD || isTie) finalIntent = 'UNKNOWN';
 
   return {
     intent: finalIntent,
     scores,
     maxScore: topScore || 0,
+    isTie,
+    isLowScore,
     needsClarification: finalIntent === 'UNKNOWN',
-    clarification: finalIntent === 'UNKNOWN' ? '¿Querés producto, servicio o curso?' : '',
+    clarification: finalIntent === 'UNKNOWN' ? buildDisambiguationQuestion() : '',
   };
 }
 
@@ -18334,6 +18367,25 @@ Si después necesita algo, estoy acá ✨`;
       }
     }
 
+    const topicLock = getTopicLock(waId);
+    const normalizedText = normalize(text || '');
+    const quickIntentV2 = classifyIntentV2({
+      text,
+      context: {
+        hasDraft: !!pendingDraft,
+        lastService: lastKnownService || null,
+        hasCourseContext: !!lastCourseContext,
+        hasProductContext: !!getLastProductContext(waId),
+        courseSignupActive: !!pendingCourseDraft,
+      },
+    });
+    const askedDisambiguation = quickIntentV2.needsClarification && (quickIntentV2.isLowScore || quickIntentV2.isTie || quickIntentV2.intent === 'UNKNOWN');
+    if (askedDisambiguation && !topicLock && normalizedText !== 'otro') {
+      await sendWhatsAppText(phone, buildDisambiguationQuestion());
+      scheduleInactivityFollowUp(waId, phone);
+      return;
+    }
+
     let intent = await classifyAndExtract(text, {
       lastServiceName: lastKnownService?.nombre || '',
       lastProductName: lastProductByUser.get(waId)?.nombre || '',
@@ -18349,6 +18401,15 @@ Si después necesita algo, estoy acá ✨`;
       hasDraft: !!pendingDraft,
       historySnippet: buildConversationHistorySnippet(convForAI, 18, 1600),
     });
+
+    if (topicLock && normalizedText === 'otro') {
+      intent = {
+        ...intent,
+        type: topicLock.topic,
+        query: intent.query || text || '',
+        mode: intent.mode || 'DETAIL',
+      };
+    }
 
 
     if (beautyIntentOverride) {
@@ -18402,6 +18463,12 @@ Si después necesita algo, estoy acá ✨`;
           mode: fastIntent.mode || intent.mode || 'DETAIL',
         };
       }
+    }
+
+    if (['PRODUCT', 'COURSE', 'SERVICE'].includes(intent?.type || '')) {
+      setTopicLock(waId, intent.type, 2);
+    } else if (topicLock && normalizedText === 'otro') {
+      consumeTopicLockTurn(waId);
     }
 
     if (forcedCourseFlowIntent.isCourse) {
