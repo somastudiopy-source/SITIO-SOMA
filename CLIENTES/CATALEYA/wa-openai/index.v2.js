@@ -32,6 +32,11 @@ let pdfParse = null;
 try { pdfParse = require("pdf-parse"); } catch {}
 const processedMsgIds = new Set();
 const inboundMergeState = new Map();
+const convByWaId = new Map();
+const activeOfferByWaId = new Map();
+const lastCourseContextByWaId = new Map();
+const lastProductContextByWaId = new Map();
+const lastServiceByWaId = new Map();
 
 function getMetaGraphVersion() {
   return process.env.META_GRAPH_VERSION || "v19.0";
@@ -229,6 +234,129 @@ async function dbInsertMessage({ direction, wa_peer, name, text, msg_type, wa_ms
       raw ? JSON.stringify(raw) : null,
     ]
   );
+}
+
+function ensureConv(waId) {
+  const now = Date.now();
+  let c = convByWaId.get(waId);
+  if (!c) {
+    c = { messages: [], updatedAt: now };
+    convByWaId.set(waId, c);
+  }
+  if (!Array.isArray(c.messages)) c.messages = [];
+  c.updatedAt = now;
+  return c;
+}
+
+function pushHistory(waId, role, content) {
+  const conv = ensureConv(waId);
+  const text = String(content || "").trim();
+  if (!text) return;
+  conv.messages.push({ role, content: text });
+  conv.messages = conv.messages.slice(-30);
+  conv.updatedAt = Date.now();
+  console.log("🧠 HISTORY_PUSHED", JSON.stringify({ wa_id: waId, role, content_len: text.length, total_messages: conv.messages.length }));
+}
+
+async function getRecentDbMessages(waPeer, limit = 12) {
+  const peerNorm = String(waPeer || "").replace(/[^\d]/g, "");
+  const r = await db.query(
+    `SELECT direction, text
+       FROM messages
+      WHERE client_id = $1 AND wa_peer = $2 AND COALESCE(text, '') <> ''
+      ORDER BY ts_utc DESC
+      LIMIT $3`,
+    [CLIENT_ID, peerNorm, limit]
+  );
+  return r.rows.reverse().map((row) => ({
+    role: row.direction === "out" ? "assistant" : "user",
+    content: String(row.text || "").trim(),
+  })).filter((x) => x.content);
+}
+
+function mergeConversationForAI(dbMessages, localMessages) {
+  const merged = [];
+  const seen = new Set();
+  for (const m of [...(dbMessages || []), ...(localMessages || [])]) {
+    const key = `${m.role}::${String(m.content || "").trim()}`;
+    if (!m?.content || seen.has(key)) continue;
+    seen.add(key);
+    merged.push({ role: m.role, content: String(m.content || "").trim() });
+  }
+  return merged.slice(-32);
+}
+
+function clearLocalConversationState({ waId = "", phone = "", phoneRaw = "" } = {}) {
+  if (waId) convByWaId.delete(waId);
+  if (waId) activeOfferByWaId.delete(waId);
+  if (waId) lastCourseContextByWaId.delete(waId);
+  if (waId) lastProductContextByWaId.delete(waId);
+  if (waId) lastServiceByWaId.delete(waId);
+  console.log("🧹 CONTEXT_CLEAR", JSON.stringify({ scope: "local", wa_id: waId || "", phone: phone || "", phone_raw: phoneRaw || "" }));
+}
+
+async function clearPersistedConversationState({ waId = "", phone = "", phoneRaw = "" } = {}) {
+  const peer = String(phone || phoneRaw || "").replace(/[^\d]/g, "");
+  if (!peer) return;
+  await db.query(
+    `DELETE FROM messages
+      WHERE client_id = $1
+        AND wa_peer = $2`,
+    [CLIENT_ID, peer]
+  );
+  console.log("🧹 CONTEXT_CLEAR", JSON.stringify({ scope: "persisted", wa_id: waId || "", phone: peer }));
+}
+
+function getActiveAssistantOffer(waId) {
+  return activeOfferByWaId.get(waId) || null;
+}
+function setActiveAssistantOffer(waId, patch = {}) {
+  const prev = activeOfferByWaId.get(waId) || {};
+  const next = { ...prev, ...patch, updatedAt: Date.now() };
+  activeOfferByWaId.set(waId, next);
+  return next;
+}
+function clearActiveAssistantOffer(waId) {
+  activeOfferByWaId.delete(waId);
+}
+
+function getLastCourseContext(waId) {
+  return lastCourseContextByWaId.get(waId) || null;
+}
+function setLastCourseContext(waId, patch = {}) {
+  const prev = lastCourseContextByWaId.get(waId) || {};
+  const next = { ...prev, ...patch, updatedAt: Date.now() };
+  lastCourseContextByWaId.set(waId, next);
+  return next;
+}
+function clearLastCourseContext(waId) {
+  lastCourseContextByWaId.delete(waId);
+}
+
+function getLastProductContext(waId) {
+  return lastProductContextByWaId.get(waId) || null;
+}
+function setLastProductContext(waId, patch = {}) {
+  const prev = lastProductContextByWaId.get(waId) || {};
+  const next = { ...prev, ...patch, updatedAt: Date.now() };
+  lastProductContextByWaId.set(waId, next);
+  return next;
+}
+function clearLastProductContext(waId) {
+  lastProductContextByWaId.delete(waId);
+}
+
+function getLastServiceContext(waId) {
+  return lastServiceByWaId.get(waId) || null;
+}
+function setLastServiceContext(waId, patch = {}) {
+  const prev = lastServiceByWaId.get(waId) || {};
+  const next = { ...prev, ...patch, updatedAt: Date.now() };
+  lastServiceByWaId.set(waId, next);
+  return next;
+}
+function clearLastServiceContext(waId) {
+  lastServiceByWaId.delete(waId);
 }
 
 async function extractTextFromIncomingMessage(msg = {}) {
@@ -783,6 +911,16 @@ app.post("/webhook", async (req, res) => {
             looks_like_story_reply: isStoryReply,
           }));
 
+          const convBefore = ensureConv(waId);
+          console.log("🧠 CONTEXT_BEFORE", JSON.stringify({
+            wa_id: waId,
+            history_count: Array.isArray(convBefore?.messages) ? convBefore.messages.length : 0,
+            has_active_offer: !!getActiveAssistantOffer(waId),
+            has_last_course_context: !!getLastCourseContext(waId),
+            has_last_product_context: !!getLastProductContext(waId),
+            has_last_service_context: !!getLastServiceContext(waId),
+          }));
+
           const extracted = await extractTextFromIncomingMessage(msg);
           let text = String(extracted?.text || "").trim();
           let mediaMeta = extracted?.media || null;
@@ -792,6 +930,12 @@ app.post("/webhook", async (req, res) => {
             text
           ).trim();
           if (!userIntentText && text) userIntentText = text;
+
+          if (/^\/reset-context$/i.test(text) || /^\/reset-context$/i.test(userIntentText)) {
+            clearLocalConversationState({ waId, phone, phoneRaw });
+            await clearPersistedConversationState({ waId, phone, phoneRaw });
+            continue;
+          }
 
           console.log("🧾 WEBHOOK_EXTRACTED_TEXT", JSON.stringify({
             msg_id: msg?.id || "",
@@ -845,6 +989,20 @@ app.post("/webhook", async (req, res) => {
             merged_intent_len: userIntentText.length,
             merged_text: String(text || "").slice(0, 500),
             has_media: !!mediaMeta,
+          }));
+
+          pushHistory(waId, "user", userIntentText || text || "");
+          const recentDbMessages = await getRecentDbMessages(phone, 12);
+          const convAfter = ensureConv(waId);
+          const convForAI = mergeConversationForAI(recentDbMessages, convAfter.messages || []);
+          console.log("🧠 CONTEXT_AFTER", JSON.stringify({
+            wa_id: waId,
+            history_count: Array.isArray(convAfter?.messages) ? convAfter.messages.length : 0,
+            merged_for_ai_count: Array.isArray(convForAI) ? convForAI.length : 0,
+            has_active_offer: !!getActiveAssistantOffer(waId),
+            has_last_course_context: !!getLastCourseContext(waId),
+            has_last_product_context: !!getLastProductContext(waId),
+            has_last_service_context: !!getLastServiceContext(waId),
           }));
         }
       }
