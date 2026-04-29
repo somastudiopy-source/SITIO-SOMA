@@ -3,6 +3,7 @@ const dotenv = require("dotenv");
 const { Pool } = require("pg");
 const axios = require("axios");
 const fs = require("fs");
+const path = require("path");
 
 dotenv.config();
 
@@ -10,6 +11,10 @@ const CLIENT_ID = "CATALEYA";
 const PORT = Number(process.env.PORT || 3000);
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "";
 const DB_URL = process.env.DB_URL || process.env.DATABASE_URL || "";
+const INBOUND_MERGE_MS = Number(process.env.INBOUND_MERGE_MS || 1200);
+const INBOUND_MERGE_EXTENDED_MS = Number(process.env.INBOUND_MERGE_EXTENDED_MS || 2200);
+const INBOUND_MERGE_MAX_WAIT_MS = Number(process.env.INBOUND_MERGE_MAX_WAIT_MS || 5000);
+const MEDIA_DIR = process.env.MEDIA_DIR || path.join(__dirname, "media");
 
 if (!DB_URL) {
   throw new Error("Falta variable DB_URL o DATABASE_URL para conectar a PostgreSQL");
@@ -21,6 +26,12 @@ const db = new Pool({
     ? { rejectUnauthorized: false }
     : false,
 });
+try { fs.mkdirSync(MEDIA_DIR, { recursive: true }); } catch {}
+
+let pdfParse = null;
+try { pdfParse = require("pdf-parse"); } catch {}
+const processedMsgIds = new Set();
+const inboundMergeState = new Map();
 
 function getMetaGraphVersion() {
   return process.env.META_GRAPH_VERSION || "v19.0";
@@ -106,6 +117,161 @@ async function downloadWhatsAppMediaToFile(mediaUrl, outputPath) {
     console.error("❌ META downloadWhatsAppMediaToFile error:", e?.response?.data || e?.message || e);
     throw e;
   }
+}
+
+async function tryParsePdfBuffer(buf) {
+  if (!pdfParse) return "";
+  try {
+    const data = await pdfParse(buf);
+    return String(data?.text || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function inboundTextLooksLikeContinuation(text = "") {
+  const raw = String(text || "").trim();
+  const t = raw.toLowerCase();
+  const wordCount = t ? t.split(/\s+/).filter(Boolean).length : 0;
+
+  if (raw.length <= 18) return true;
+  if (wordCount <= 3) return true;
+  if (/^(si|sí|no|ok|dale|perfecto|bueno|bien|otra cosa|para mi|para ella|quiero|necesito)$/i.test(t)) return true;
+  return false;
+}
+
+function compactMergedInboundText(text = "") {
+  const lines = String(text || "")
+    .split(/\r?\n+/)
+    .map((x) => String(x || "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  if (!lines.length) return "";
+  if (lines.length === 1) return lines[0];
+
+  let out = lines[0];
+  for (const line of lines.slice(1)) {
+    const compact = String(line || "").trim();
+    if (!compact) continue;
+    const words = compact.split(/\s+/).filter(Boolean).length;
+    const joinInline = compact.length <= 36 || words <= 6 || inboundTextLooksLikeContinuation(compact);
+    out += joinInline ? ` ${compact}` : `\n${compact}`;
+  }
+  return out.replace(/\s+\n/g, "\n").replace(/\n\s+/g, "\n").trim();
+}
+
+function getInboundMergeTargetMs(state = {}) {
+  const items = Array.isArray(state?.items) ? state.items : [];
+  const latest = items[items.length - 1] || {};
+  const latestText = String(latest?.userIntentText || latest?.text || "").trim();
+  const mergedText = compactMergedInboundText(items.map((it) => String(it?.userIntentText || it?.text || "").trim()).filter(Boolean).join("\n"));
+  if (items.length >= 2) return INBOUND_MERGE_EXTENDED_MS;
+  if (inboundTextLooksLikeContinuation(latestText) || inboundTextLooksLikeContinuation(mergedText)) return INBOUND_MERGE_EXTENDED_MS;
+  return INBOUND_MERGE_MS;
+}
+
+function appendInboundMergeChunk(waId, chunk) {
+  const now = Date.now();
+  const prev = inboundMergeState.get(waId) || { version: 0, items: [], firstTs: now, lastTs: now };
+  const next = {
+    version: Number(prev.version || 0) + 1,
+    firstTs: Number(prev.firstTs || now),
+    lastTs: now,
+    items: [...(Array.isArray(prev.items) ? prev.items : []), { ...chunk, ts: now }].slice(-12),
+  };
+  inboundMergeState.set(waId, next);
+  return next.version;
+}
+
+function consumeInboundMergeChunk(waId, version) {
+  const state = inboundMergeState.get(waId);
+  if (!state || state.version !== version) return null;
+  inboundMergeState.delete(waId);
+  const items = Array.isArray(state.items) ? state.items : [];
+  const latest = items[items.length - 1] || {};
+  const mergedText = compactMergedInboundText(items.map((it) => String(it?.text || "").trim()).filter(Boolean).join("\n"));
+  const mergedUserIntentText = compactMergedInboundText(items.map((it) => String(it?.userIntentText || it?.text || "").trim()).filter(Boolean).join("\n"));
+  const latestMedia = [...items].reverse().find((it) => !!it?.mediaMeta)?.mediaMeta || null;
+  return { ...latest, itemCount: items.length, items, text: mergedText, userIntentText: mergedUserIntentText || mergedText, mediaMeta: latestMedia };
+}
+
+async function waitForInboundMergeSilence(waId, version) {
+  const startedAt = Date.now();
+  while (true) {
+    const state = inboundMergeState.get(waId);
+    if (!state || state.version !== version) return null;
+    const targetMs = getInboundMergeTargetMs(state);
+    const lastTs = Number(state.lastTs || startedAt);
+    const elapsedSinceLastChunk = Date.now() - lastTs;
+    const totalElapsed = Date.now() - startedAt;
+    if (elapsedSinceLastChunk >= targetMs || totalElapsed >= INBOUND_MERGE_MAX_WAIT_MS) return consumeInboundMergeChunk(waId, version);
+    const missing = Math.max(120, Math.min(450, targetMs - elapsedSinceLastChunk));
+    await sleep(missing);
+  }
+}
+
+async function dbInsertMessage({ direction, wa_peer, name, text, msg_type, wa_msg_id, raw }) {
+  await db.query(
+    `INSERT INTO messages(client_id, direction, wa_peer, name, text, msg_type, wa_msg_id, raw_json)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [
+      CLIENT_ID,
+      String(direction || ""),
+      String(wa_peer || ""),
+      name ? String(name) : null,
+      text ? String(text) : null,
+      msg_type ? String(msg_type) : null,
+      wa_msg_id ? String(wa_msg_id) : null,
+      raw ? JSON.stringify(raw) : null,
+    ]
+  );
+}
+
+async function extractTextFromIncomingMessage(msg = {}) {
+  if (msg.type === "text") return { text: msg.text?.body || "", kind: "text" };
+  if (msg.type === "button") return { text: msg.button?.text || msg.button?.payload || "", kind: "button" };
+  if (msg.type === "interactive") {
+    return {
+      text: msg.interactive?.button_reply?.title || msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.title || msg.interactive?.list_reply?.id || "",
+      kind: "interactive",
+    };
+  }
+  if (msg.type === "image") {
+    const caption = msg.image?.caption || "";
+    return { text: caption, kind: "image_caption", media: { id: msg.image?.id || "", mime_type: "image/*", filename: "" } };
+  }
+  if (msg.type === "document") {
+    const mediaId = msg.document?.id;
+    const caption = msg.document?.caption || "";
+    const filename = msg.document?.filename || "";
+    if (!mediaId) return { text: caption, kind: "document_no_id" };
+    const mediaInfo = await getWhatsAppMediaUrl(mediaId);
+    const mime = mediaInfo.mime_type || "";
+    const ext = mime.includes("pdf") ? ".pdf" : ".bin";
+    const tmpFile = path.join(MEDIA_DIR, `wa-doc-${mediaId}${ext}`);
+    await downloadWhatsAppMediaToFile(mediaInfo.url, tmpFile);
+    let extractedTxt = "";
+    if (mime.includes("pdf")) {
+      const buf = fs.readFileSync(tmpFile);
+      extractedTxt = await tryParsePdfBuffer(buf);
+    }
+    const combined = [
+      caption ? `Texto adjunto del cliente: "${caption}"` : "",
+      filename ? `Documento: ${filename}` : "",
+      extractedTxt ? `Texto del documento: ${String(extractedTxt).slice(0, 6000)}` : "",
+      (!extractedTxt && mime.includes("pdf")) ? "No pude extraer texto del PDF. Si querés, enviame una captura o el texto importante." : "",
+    ].filter(Boolean).join("\n");
+    return {
+      text: combined,
+      kind: extractedTxt ? "document" : "document_pdf_no_text",
+      media: { id: mediaId, mime_type: mime, filename: filename || path.basename(tmpFile) },
+    };
+  }
+  return { text: "", kind: `ignored_${msg.type || "unknown"}` };
 }
 
 async function ensureDb() {
@@ -556,6 +722,136 @@ app.get("/webhook", (req, res) => {
     return res.status(200).send(challenge);
   }
   return res.sendStatus(403);
+});
+
+app.post("/webhook", async (req, res) => {
+  res.sendStatus(200);
+  try {
+    const entries = Array.isArray(req.body?.entry) ? req.body.entry : [];
+    const entryCount = entries.length;
+    const changesCount = entries.reduce((acc, entry) => acc + (Array.isArray(entry?.changes) ? entry.changes.length : 0), 0);
+    const messagesCount = entries.reduce((acc, entry) => acc + (Array.isArray(entry?.changes) ? entry.changes.reduce((inAcc, c) => inAcc + (Array.isArray(c?.value?.messages) ? c.value.messages.length : 0), 0) : 0), 0);
+    console.log("📩 WEBHOOK_INBOUND_COUNTS", JSON.stringify({ entry_count: entryCount, changes_count: changesCount, messages_count: messagesCount }));
+
+    for (const entry of entries) {
+      const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+      for (const change of changes) {
+        const value = change?.value || {};
+        const statuses = Array.isArray(value?.statuses) ? value.statuses : [];
+        for (const statusObj of statuses) {
+          console.log("ℹ️ WEBHOOK_STATUS", JSON.stringify({
+            id: statusObj?.id || "",
+            status: statusObj?.status || "",
+            recipient_id: statusObj?.recipient_id || "",
+            timestamp: statusObj?.timestamp || "",
+          }));
+        }
+
+        const inboundMessages = Array.isArray(value?.messages) ? value.messages : [];
+        const contacts = Array.isArray(value?.contacts) ? value.contacts : [];
+        for (let msgIndex = 0; msgIndex < inboundMessages.length; msgIndex += 1) {
+          const msg = inboundMessages[msgIndex];
+          const contact = contacts[msgIndex] || contacts[0] || {};
+          if (!msg) continue;
+
+          if (msg.id && processedMsgIds.has(msg.id)) {
+            console.log("⚠️ WEBHOOK_DEDUPE_SKIPPED", JSON.stringify({ msg_id: msg.id, msg_type: msg?.type || "", msg_timestamp: msg?.timestamp || "" }));
+            continue;
+          }
+          if (msg.id) {
+            processedMsgIds.add(msg.id);
+            if (processedMsgIds.size > 5000) processedMsgIds.clear();
+          }
+
+          const phoneRaw = msg.from;
+          const phone = String(contact?.wa_id || phoneRaw || "").replace(/[^\d]/g, "");
+          const waId = contact?.wa_id || phoneRaw || "";
+          const name = contact?.profile?.name || "";
+          const msgContextId = String(msg?.context?.id || "").trim();
+          const hasCaption = !!((msg.type === "image" && String(msg.image?.caption || "").trim()) || (msg.type === "document" && String(msg.document?.caption || "").trim()));
+          const isStoryReply = !!(msg?.context?.from || msg?.context?.id || msg?.context?.referred_product || msg?.context?.forwarded);
+
+          console.log("📨 WEBHOOK_INBOUND_MSG", JSON.stringify({
+            msg_id: msg?.id || "",
+            msg_type: msg?.type || "",
+            msg_timestamp: msg?.timestamp || "",
+            contact_wa_id: contact?.wa_id || "",
+            msg_from: phoneRaw || "",
+            profile_name: name || "",
+            has_caption: hasCaption,
+            context_id: msgContextId || "",
+            looks_like_story_reply: isStoryReply,
+          }));
+
+          const extracted = await extractTextFromIncomingMessage(msg);
+          let text = String(extracted?.text || "").trim();
+          let mediaMeta = extracted?.media || null;
+          let userIntentText = (
+            msg.type === "image" ? (msg.image?.caption || "") :
+            msg.type === "document" ? (msg.document?.caption || "") :
+            text
+          ).trim();
+          if (!userIntentText && text) userIntentText = text;
+
+          console.log("🧾 WEBHOOK_EXTRACTED_TEXT", JSON.stringify({
+            msg_id: msg?.id || "",
+            kind: extracted?.kind || "",
+            extracted_text_len: text.length,
+            user_intent_len: userIntentText.length,
+          }));
+
+          await dbInsertMessage({
+            direction: "in",
+            wa_peer: phone,
+            name,
+            text,
+            msg_type: msg.type,
+            wa_msg_id: msg.id,
+            raw: {
+              webhook: req.body,
+              media: mediaMeta,
+              inbound_meta: {
+                context_id: msgContextId || "",
+                has_caption: hasCaption,
+                looks_like_story_reply: isStoryReply,
+                wa_id: waId || "",
+              },
+            },
+          });
+
+          const inboundVersion = appendInboundMergeChunk(waId || phone || msg.id || `unknown-${Date.now()}`, {
+            phone,
+            phoneRaw,
+            name,
+            text,
+            userIntentText,
+            mediaMeta,
+            msgType: msg.type,
+            msgId: msg.id,
+          });
+          const mergedInbound = await waitForInboundMergeSilence(waId || phone || msg.id || "unknown", inboundVersion);
+          if (!mergedInbound) continue;
+          const mergedTextRaw = String(mergedInbound.text || "").trim();
+          const mergedIntentRaw = String(mergedInbound.userIntentText || userIntentText || mergedTextRaw).trim();
+          text = compactMergedInboundText(mergedTextRaw) || mergedTextRaw;
+          userIntentText = compactMergedInboundText(mergedIntentRaw) || mergedIntentRaw || text;
+          mediaMeta = mergedInbound.mediaMeta || mediaMeta || null;
+
+          console.log("🧩 WEBHOOK_INBOUND_MERGE", JSON.stringify({
+            wa_id: waId || "",
+            msg_id: msg?.id || "",
+            merged_item_count: Number(mergedInbound?.itemCount || 1),
+            merged_text_len: text.length,
+            merged_intent_len: userIntentText.length,
+            merged_text: String(text || "").slice(0, 500),
+            has_media: !!mediaMeta,
+          }));
+        }
+      }
+    }
+  } catch (e) {
+    console.error("❌ ERROR webhook v2.0-d:", e?.response?.data || e?.message || e);
+  }
 });
 
 initDb()
