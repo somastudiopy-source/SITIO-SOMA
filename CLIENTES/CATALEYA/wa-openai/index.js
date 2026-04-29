@@ -16378,12 +16378,17 @@ app.post("/webhook", async (req, res) => {
             }
           }
         }
-        const messages = Array.isArray(value?.messages) ? value.messages : [];
-        const contacts = Array.isArray(value?.contacts) ? value.contacts : [];
-        if (!messages.length) continue;
+const inboundMessages = Array.isArray(value?.messages) ? value.messages : [];
+const contacts = Array.isArray(value?.contacts) ? value.contacts : [];
 
-        for (let msgIndex = 0; msgIndex < messages.length; msgIndex += 1) {
-          const msg = messages[msgIndex];
+if (!inboundMessages.length) continue;
+
+for (let msgIndex = 0; msgIndex < inboundMessages.length; msgIndex += 1) {
+  const msg = inboundMessages[msgIndex];
+  const contact = contacts[msgIndex] || contacts[0] || {};
+  if (!msg) continue;
+
+  // dedupe
           const contact = contacts[msgIndex] || contacts[0] || {};
           if (!msg) continue;
 
