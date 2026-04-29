@@ -19467,7 +19467,51 @@ Si quiere, le paso información de cualquiera de esos 😊`;
       userIntentText = weightedText;
     }
 
-    // fallback
+    const lockedIntentV2 = classifyIntentV2({
+      text,
+      context: {
+        hasProductContext: !!getLastProductContext(waId),
+        courseSignupActive: !!pendingCourseDraft,
+      },
+    });
+    const lockedDomain = String(lockedIntentV2?.intent || 'UNKNOWN').toUpperCase();
+
+    if (lockedDomain === 'PRODUCT') {
+      const stock = filterSellableCatalogRows(await getStockCatalog(), { includeOutOfStock: false });
+      const related = findStockRelated(stock, text, { limit: 200 });
+      const replyCatalog = formatStockReply(related, related.length === 1 ? 'DETAIL' : 'LIST', { domain: detectProductDomain(text), familyLabel: detectFurnitureFamily(text) || detectProductFamily(text) });
+      if (replyCatalog) {
+        pushHistory(waId, 'assistant', replyCatalog);
+        await sendWhatsAppText(phone, replyCatalog);
+        scheduleInactivityFollowUp(waId, phone);
+        return;
+      }
+    }
+
+    if (lockedDomain === 'COURSE') {
+      const courses = await getCoursesCatalog();
+      const courseQuery = resolveImplicitCourseFollowupQuery(text, getLastCourseContext(waId)) || text;
+      const matches = findCourses(courses, courseQuery, 'DETAIL');
+      const replyCourse = formatCoursesReply(matches, 'DETAIL');
+      const outCourse = replyCourse || 'Por ahora solo puedo responder sobre cursos disponibles en la hoja CURSOS y el flujo de inscripción.';
+      pushHistory(waId, 'assistant', outCourse);
+      await sendWhatsAppText(phone, outCourse);
+      scheduleInactivityFollowUp(waId, phone);
+      return;
+    }
+
+    if (lockedDomain === 'SERVICE') {
+      const services = await getServicesCatalog();
+      const serviceQuery = normalizeServiceQuery({ raw: text, aiService: text }) || text;
+      const matches = findServices(services, serviceQuery, 'DETAIL');
+      const replyService = formatServicesReply(matches, 'DETAIL') || 'Seguimos con servicios/turnos. Si querés cambiar de tema, decime explícitamente curso o producto.';
+      pushHistory(waId, 'assistant', replyService);
+      await sendWhatsAppText(phone, replyService);
+      scheduleInactivityFollowUp(waId, phone);
+      return;
+    }
+
+    // fallback IA (solo SMALLTALK / UNKNOWN con poco contexto / reformulación)
     const model = pickModelForText(text);
 
     const activeCampaignMessages = await buildAssistantMessagesForBroadcastCampaign(waId, getActiveAssistantOffer(waId));
@@ -19475,6 +19519,7 @@ Si quiere, le paso información de cualquiera de esos 😊`;
     const messages = [
       { role: "system", content: SYSTEM_PROMPT },
       ...activeCampaignMessages,
+      { role: "system", content: `locked_domain: ${lockedDomain}. Respetá este dominio y no mezcles temas.` },
       { role: "system", content: `Fecha y hora actual: ${nowARString()} (${TIMEZONE}).` },
       { role: "system", content: `Contexto del turno actual: ${JSON.stringify({
         servicio_actual: pendingDraft?.servicio || lastKnownService?.nombre || '',
