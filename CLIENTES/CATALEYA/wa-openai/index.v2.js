@@ -1,6 +1,8 @@
 const express = require("express");
 const dotenv = require("dotenv");
 const { Pool } = require("pg");
+const axios = require("axios");
+const fs = require("fs");
 
 dotenv.config();
 
@@ -19,6 +21,92 @@ const db = new Pool({
     ? { rejectUnauthorized: false }
     : false,
 });
+
+function getMetaGraphVersion() {
+  return process.env.META_GRAPH_VERSION || "v19.0";
+}
+
+function getWhatsAppGraphBaseUrl() {
+  return `https://graph.facebook.com/${getMetaGraphVersion()}`;
+}
+
+function getWhatsAppAuthHeaders() {
+  const token = process.env.WHATSAPP_TOKEN || "";
+  if (!token) {
+    throw new Error("Falta variable WHATSAPP_TOKEN para usar cliente WhatsApp/Meta");
+  }
+  return { Authorization: `Bearer ${token}` };
+}
+
+function getRequiredPhoneNumberId() {
+  const phoneNumberId = process.env.PHONE_NUMBER_ID || "";
+  if (!phoneNumberId) {
+    throw new Error("Falta variable PHONE_NUMBER_ID para usar cliente WhatsApp/Meta");
+  }
+  return phoneNumberId;
+}
+
+async function sendWhatsAppText(phone, text) {
+  const phoneNumberId = getRequiredPhoneNumberId();
+  const url = `${getWhatsAppGraphBaseUrl()}/${phoneNumberId}/messages`;
+  try {
+    const resp = await axios.post(
+      url,
+      {
+        messaging_product: "whatsapp",
+        to: String(phone || ""),
+        text: { body: String(text || "") },
+      },
+      { headers: { ...getWhatsAppAuthHeaders() } }
+    );
+    const wa_msg_id = resp?.data?.messages?.[0]?.id || null;
+    return { ok: true, wa_msg_id, raw: resp.data };
+  } catch (e) {
+    console.error("❌ META sendWhatsAppText error:", e?.response?.data || e?.message || e);
+    throw e;
+  }
+}
+
+async function getWhatsAppMediaUrl(mediaId) {
+  if (!mediaId) throw new Error("Falta mediaId para obtener URL de media");
+  const url = `${getWhatsAppGraphBaseUrl()}/${mediaId}`;
+  try {
+    const resp = await axios.get(url, {
+      headers: { ...getWhatsAppAuthHeaders() },
+    });
+    return {
+      id: mediaId,
+      url: resp?.data?.url || "",
+      mime_type: resp?.data?.mime_type || "",
+      sha256: resp?.data?.sha256 || "",
+      file_size: resp?.data?.file_size || null,
+    };
+  } catch (e) {
+    console.error("❌ META getWhatsAppMediaUrl error:", e?.response?.data || e?.message || e);
+    throw e;
+  }
+}
+
+async function downloadWhatsAppMediaToFile(mediaUrl, outputPath) {
+  if (!mediaUrl) throw new Error("Falta mediaUrl para descargar media");
+  if (!outputPath) throw new Error("Falta outputPath para guardar media");
+  try {
+    const response = await axios.get(mediaUrl, {
+      responseType: "stream",
+      headers: { ...getWhatsAppAuthHeaders() },
+    });
+    await new Promise((resolve, reject) => {
+      const writer = fs.createWriteStream(outputPath);
+      response.data.pipe(writer);
+      writer.on("finish", resolve);
+      writer.on("error", reject);
+    });
+    return outputPath;
+  } catch (e) {
+    console.error("❌ META downloadWhatsAppMediaToFile error:", e?.response?.data || e?.message || e);
+    throw e;
+  }
+}
 
 async function ensureDb() {
   await db.query(`
