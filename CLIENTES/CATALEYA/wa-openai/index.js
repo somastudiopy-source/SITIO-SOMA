@@ -9734,7 +9734,11 @@ Reglas:
     );
 
     if (okFinal) {
-      if (!servicioExtraido && !(ctx?.servicio || '')) faltantesSet.add('servicio');
+      if (servicioExtraido && ctx?.servicio && areEquivalentServices(servicioExtraido, ctx.servicio)) {
+        // usuario reafirmó el mismo servicio (ej: "reflejos con gorro").
+      } else if (!servicioExtraido && !(ctx?.servicio || '')) {
+        faltantesSet.add('servicio');
+      }
       if (!fechaFinal && !(ctx?.fecha || '')) faltantesSet.add('fecha');
       if (!horaFinal && !(ctx?.hora || '')) faltantesSet.add('hora');
     }
@@ -9744,7 +9748,7 @@ Reglas:
       fecha: fechaFinal,
       hora: horaFinal,
       duracion_min: Number(obj.duracion_min || 60) || 60,
-      servicio: servicioExtraido,
+      servicio: (servicioExtraido && ctx?.servicio && areEquivalentServices(servicioExtraido, ctx.servicio)) ? ctx.servicio : servicioExtraido,
       notas: (obj.notas || "").trim(),
       faltantes: Array.from(faltantesSet),
     };
@@ -14355,6 +14359,38 @@ function formatWarmAssistant(text) {
   return String(text || '').replace(/^Perfecto 😊/m, 'Perfecto 😊').trim();
 }
 
+
+function normalizeServiceForComparison(value = '') {
+  return normalize(String(value || ''))
+    .replace(/\bcon\b/g, ' ')
+    .replace(/\bgorro\b/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+function areEquivalentServices(a = '', b = '') {
+  const left = normalizeServiceForComparison(a);
+  const right = normalizeServiceForComparison(b);
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const sameReflejosFamily = /\breflejos\b/.test(left) && /\breflejos\b/.test(right);
+  return sameReflejosFamily;
+}
+
+function hasBookingIntentText(text = '') {
+  const t = normalize(text || '');
+  return /(\bturno\b|\breserv\w*\b|\bagend\w*\b)/i.test(t);
+}
+
+function logTurnoFlowTransition({ waId = '', fromStep = '', toStep = '', reason = '' } = {}) {
+  console.log('[turno_flow_transition]', JSON.stringify({
+    wa_id: waId || '',
+    from_step: fromStep || '',
+    to_step: toStep || '',
+    reason: reason || '',
+  }));
+}
+
 function inferDraftFlowStep(base) {
   if (!base?.servicio) return 'awaiting_service';
   if (!base?.fecha) return 'awaiting_date';
@@ -16854,7 +16890,8 @@ lastCloseContext.set(waId, {
         historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 10, 1200),
       });
 
-      if (draftControlEarly.action === 'PAUSE_APPOINTMENT' || draftControlEarly.action === 'SWITCH_TOPIC') {
+      const bookingIntentGuardEarly = hasBookingIntentText(text) && !!pendingDraft;
+      if ((draftControlEarly.action === 'PAUSE_APPOINTMENT' || draftControlEarly.action === 'SWITCH_TOPIC') && !bookingIntentGuardEarly) {
         await deleteAppointmentDraft(waId);
 
         const pauseIntentEarly = extractTurnoPauseIntent(text);
@@ -17385,7 +17422,8 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
         historySnippet: buildConversationHistorySnippet(convForAI, 14, 1200),
       });
 
-      if (draftControl.action === 'PAUSE_APPOINTMENT' || draftControl.action === 'SWITCH_TOPIC') {
+      const bookingIntentGuard = hasBookingIntentText(text) && !!pendingDraft;
+      if ((draftControl.action === 'PAUSE_APPOINTMENT' || draftControl.action === 'SWITCH_TOPIC') && !bookingIntentGuard) {
         await deleteAppointmentDraft(waId);
         pendingDraft = null;
 
@@ -17548,6 +17586,12 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
     }
 
     async function askForMissingTurnoData(base) {
+      if (!base?.servicio && base?.last_service_name && base?.flow_step === 'awaiting_service') {
+        const fromStep = base.flow_step;
+        base.flow_step = 'awaiting_date';
+        logTurnoFlowTransition({ waId, fromStep, toStep: base.flow_step, reason: 'service_already_confirmed' });
+      }
+
       const servicioTxt = base?.servicio || base?.last_service_name || "";
       const availabilityMode = normalizeAvailabilityMode(base?.availability_mode || 'commercial');
 
@@ -17624,6 +17668,7 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
     async function askForContactData(base) {
       const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_contact', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
+      logTurnoFlowTransition({ waId, fromStep: base?.flow_step || '', toStep: toSave.flow_step, reason: 'request_missing_contact_data' });
       updateLastCloseContext(waId, { suppressInactivityPrompt: true });
       const msgContacto = `Perfecto 😊
 
@@ -17639,6 +17684,7 @@ Para dejar el turno listo necesito estos datos 😊
     async function askForName(base) {
       const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_name', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
+      logTurnoFlowTransition({ waId, fromStep: base?.flow_step || '', toStep: toSave.flow_step, reason: 'request_missing_name' });
       updateLastCloseContext(waId, { suppressInactivityPrompt: true });
       const msgSoloNombre = `Perfecto 
 
@@ -17653,6 +17699,7 @@ Ahora necesito este dato 😊
     async function askForPhone(base) {
       const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_phone', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
+      logTurnoFlowTransition({ waId, fromStep: base?.flow_step || '', toStep: toSave.flow_step, reason: 'request_missing_phone' });
       updateLastCloseContext(waId, { suppressInactivityPrompt: true });
       const msgTelefono = `Perfecto 
 
