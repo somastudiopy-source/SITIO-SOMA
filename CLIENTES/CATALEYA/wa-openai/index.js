@@ -5936,55 +5936,6 @@ function pushHistory(waId, role, content) {
 const inactivityTimers = new Map();
 const closeTimers = new Map();
 const lastCloseContext = new Map(); // waId -> { phone, name, lastUserText, intentType, interest }
-const topicLockByConversation = new Map(); // waId -> { topic: PRODUCT|COURSE|SERVICE, turnsLeft: number }
-const disambiguationStateByConversation = new Map(); // waId -> { awaiting_disambiguation: boolean, pending_user_query: string }
-
-function buildDisambiguationQuestion() {
-  return "¿Querés que te ayude con *productos*, *cursos* o *turnos*?";
-}
-
-function parseDisambiguationChoice(t='') {
-  const s = normalize(t);
-  if (/(^|\b)(producto|productos|stock|catalogo|catálogo)(\b|$)/.test(s)) return 'PRODUCT';
-  if (/(^|\b)(curso|cursos|taller|talleres|capacitacion|capacitación)(\b|$)/.test(s)) return 'COURSE';
-  if (/(^|\b)(turno|turnos|servicio|servicios|agendar|reservar)(\b|$)/.test(s)) return 'SERVICE';
-  return '';
-}
-
-function setDisambiguationState(waId, patch = {}) {
-  if (!waId) return;
-  const prev = disambiguationStateByConversation.get(waId) || { awaiting_disambiguation: false, pending_user_query: '' };
-  disambiguationStateByConversation.set(waId, { ...prev, ...patch });
-}
-
-function getDisambiguationState(waId) {
-  if (!waId) return { awaiting_disambiguation: false, pending_user_query: '' };
-  return disambiguationStateByConversation.get(waId) || { awaiting_disambiguation: false, pending_user_query: '' };
-}
-
-function setTopicLock(waId, topic, turns = 2) {
-  const cleanTopic = String(topic || '').trim().toUpperCase();
-  if (!waId || !['PRODUCT', 'COURSE', 'SERVICE'].includes(cleanTopic)) return;
-  topicLockByConversation.set(waId, { topic: cleanTopic, turnsLeft: Math.max(1, Number(turns) || 2) });
-}
-
-function getTopicLock(waId) {
-  if (!waId) return null;
-  const row = topicLockByConversation.get(waId);
-  if (!row || !row.topic || !row.turnsLeft) return null;
-  return row;
-}
-
-function consumeTopicLockTurn(waId) {
-  const row = getTopicLock(waId);
-  if (!row) return;
-  const nextTurns = Number(row.turnsLeft || 0) - 1;
-  if (nextTurns <= 0) {
-    topicLockByConversation.delete(waId);
-    return;
-  }
-  topicLockByConversation.set(waId, { ...row, turnsLeft: nextTurns });
-}
 
 function updateLastCloseContext(waId, patch = {}) {
   if (!waId) return null;
@@ -6519,19 +6470,9 @@ async function reviewInboundMessageFirstWithAI(text, context = {}) {
       && !hasConcreteServiceSignal(raw)
     );
 
-    const intentV2 = classifyIntentV2({
-      text: raw,
-      context: {
-        hasDraft: !!context.hasDraft,
-        lastService: context.lastService || null,
-        hasCourseContext: !!context.lastCourseContext,
-        hasProductContext: !!context.lastProductContext,
-        courseSignupActive: !!context.pendingCourseDraft,
-      },
-    });
     const inferredType = explicitCourse.isCourse
       ? 'COURSE'
-      : (bareAppointmentWithoutService ? 'SERVICE' : (intentV2.intent === 'UNKNOWN' ? (fastIntent?.type || 'OTHER') : intentV2.intent));
+      : (bareAppointmentWithoutService ? 'SERVICE' : (fastIntent?.type || (isExplicitProductIntent(raw) ? 'PRODUCT' : (isExplicitServiceIntent(raw) ? 'SERVICE' : 'OTHER'))));
 
     const followsActiveOffer = !!activeType
       && looksLikeActiveOfferFollowup(raw)
@@ -7726,8 +7667,8 @@ async function deleteCourseEnrollmentDraft(waId) {
 
 function inferCourseEnrollmentFlowStep(base = {}) {
   if (!String(base?.curso_nombre || '').trim()) return 'awaiting_course';
-  if (!String(base?.alumno_nombre || '').trim()) return 'awaiting_student_name';
-  if (!String(base?.alumno_dni || '').trim()) return 'awaiting_student_dni';
+  if (!String(base?.alumno_nombre || '').trim()) return 'awaiting_name';
+  if (!String(base?.alumno_dni || '').trim()) return 'awaiting_dni';
   if (base?.payment_status === 'payment_review') return 'payment_review';
   if (base?.payment_status === 'awaiting_salon_payment') return 'awaiting_salon_payment';
   if (base?.payment_status !== 'paid_verified') return 'awaiting_payment';
@@ -7757,11 +7698,9 @@ function stripStudentDni(text = '') {
 }
 
 function extractStudentFullName(text = '') {
-  const cleaned = cleanNameCandidate(stripStudentDni(text)).replace(/\s+/g, ' ').trim();
-  if (!cleaned) return '';
-  const alphaTokens = cleaned.match(/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:['-][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+)*/g) || [];
-  if (alphaTokens.length < 2) return '';
-  return alphaTokens.join(' ');
+  const cleaned = cleanNameCandidate(stripStudentDni(text));
+  const parts = splitNameParts(cleaned);
+  return parts.fullName && parts.lastName ? parts.fullName : '';
 }
 
 function mergeStudentIntoCourseEnrollment({ draft, text, waPhone }) {
@@ -8028,17 +7967,9 @@ Reglas:
   }
 }
 
-async function enrichCourseEnrollmentStudentData({ draft, text, waId, waPhone, mediaMeta } = {}) {
+async function enrichCourseEnrollmentStudentData({ draft, text, waPhone, mediaMeta } = {}) {
   const out = mergeStudentIntoCourseEnrollment({ draft, text, waPhone });
   const raw = String(text || '').trim();
-  const detectedName = extractStudentFullName(raw);
-  if (out?.flow_step === 'awaiting_student_name' && detectedName && !out.alumno_nombre) {
-    out.alumno_nombre = detectedName;
-    const fromStep = out.flow_step;
-    out.flow_step = 'awaiting_student_dni';
-    console.info('course_flow from awaiting_student_name -> awaiting_student_dni');
-    if (waId) await saveCourseEnrollmentDraft(waId, waPhone, out);
-  }
   const nameIssue = detectStudentNameIssue(raw);
   const dniIssue = detectStudentDniIssue(raw);
 
@@ -8162,12 +8093,8 @@ function buildCourseEnrollmentNeedNameMessage(courseName = '') {
 • *DNI*`;
 }
 
-function buildCourseEnrollmentNeedDniMessage(courseName = '', studentName = '') {
+function buildCourseEnrollmentNeedDniMessage(courseName = '') {
   const courseTxt = courseName ? ` para *${courseName}*` : '';
-  const cleanStudentName = cleanNameCandidate(studentName || '').replace(/\s+/g, ' ').trim();
-  if (cleanStudentName) {
-    return `Genial, ya anoté el nombre: *${cleanStudentName}*. Ahora pasame el DNI.`;
-  }
   return `Perfecto 😊 Ya me quedó el nombre${courseTxt}.
 
 Ahora necesito el *DNI del alumno o alumna* para completar los datos.`;
@@ -8566,7 +8493,7 @@ async function askForMissingCourseEnrollmentData({ waId, phone, base, courseOpti
   if (!draft.alumno_dni) {
     const msg = studentInput?.invalidDni || studentInput?.unreadableDocument || studentInput?.extractedName
       ? buildCourseEnrollmentNeedDniCorrectionMessage(draft.curso_nombre || '', studentInput)
-      : buildCourseEnrollmentNeedDniMessage(draft.curso_nombre || '', draft.alumno_nombre || '');
+      : buildCourseEnrollmentNeedDniMessage(draft.curso_nombre || '');
     await sendCourseEnrollmentPrompt(waId, phone, msg, 'Todavía me falta el *DNI del alumno o alumna* para seguir 😊');
     return { asked: 'dni', draft };
   }
@@ -9797,11 +9724,7 @@ Reglas:
     );
 
     if (okFinal) {
-      if (servicioExtraido && ctx?.servicio && areEquivalentServices(servicioExtraido, ctx.servicio)) {
-        // usuario reafirmó el mismo servicio (ej: "reflejos con gorro").
-      } else if (!servicioExtraido && !(ctx?.servicio || '')) {
-        faltantesSet.add('servicio');
-      }
+      if (!servicioExtraido && !(ctx?.servicio || '')) faltantesSet.add('servicio');
       if (!fechaFinal && !(ctx?.fecha || '')) faltantesSet.add('fecha');
       if (!horaFinal && !(ctx?.hora || '')) faltantesSet.add('hora');
     }
@@ -9811,7 +9734,7 @@ Reglas:
       fecha: fechaFinal,
       hora: horaFinal,
       duracion_min: Number(obj.duracion_min || 60) || 60,
-      servicio: (servicioExtraido && ctx?.servicio && areEquivalentServices(servicioExtraido, ctx.servicio)) ? ctx.servicio : servicioExtraido,
+      servicio: servicioExtraido,
       notas: (obj.notas || "").trim(),
       faltantes: Array.from(faltantesSet),
     };
@@ -10590,18 +10513,17 @@ function detectProductKeywords(text) {
 function pickCategorias({ intentType, text }) {
   const t = canonicalizeQuery(text);
   const found = [];
-  const intentV2 = classifyIntentV2({ text, context: {} });
-  const resolvedIntent = intentType === "OTHER" ? intentV2.intent : intentType;
 
   const hasServiceSignal =
-    resolvedIntent === "SERVICE" ||
+    intentType === "SERVICE" ||
     /\bturno\b|\bservicio\b|\bagenda\b|\bcita\b|\bhacerme\b|\bpara hacerme\b|\bme quiero hacer\b|\bme gustaria hacerme\b/.test(t);
 
   const hasProductSignal =
-    resolvedIntent === "PRODUCT" ||
+    intentType === "PRODUCT" ||
     /\bproducto\b|\binsumo\b|\binsumos\b|\btenes\b|\btenés\b|\bvenden\b|\bcomprar\b|\bstock\b|\bprecio\b/.test(t);
 
-  const hasCourseSignal = resolvedIntent === "COURSE" || /\bcurso\b|\bcursos\b|\btaller\b|\btalleres\b/.test(t);
+  const hasCourseSignal =
+    intentType === "COURSE" || /\bcurso\b|\bcursos\b|\btaller\b|\btalleres\b/.test(t);
 
   const productHits = detectProductKeywords(t);
 
@@ -13428,77 +13350,6 @@ const PRODUCT_SIGNAL_RE = /(producto|productos|stock|insumo|insumos|shampoo|acon
 const PRODUCT_LIST_SIGNAL_RE = /(hay|tenes|tenés|tienen|venden|disponible|disponibles|stock|lista|opciones|catalogo|catálogo|mostrar|mostrame|mandame|pasame|busco|ando buscando|quiero ver|foto|fotos|imagen|imagenes|ver modelos|ver opciones)/i;
 const SERVICE_SIGNAL_RE = /(turno|turnos|servicio|servicios|reservar|reserva|agendar|agenda|cita|me quiero hacer|quiero hacerme|para hacerme|hacerme|me hago|realizan|trabajan con|atienden|precio del servicio|valor del servicio)/i;
 const SERVICE_LIST_SIGNAL_RE = /(que servicios|qué servicios|servicios tienen|lista de servicios|todos los servicios|mostrar servicios|mostrame servicios|mandame servicios|pasame servicios)/i;
-const INTENT_V2_THRESHOLD = Number(process.env.INTENT_V2_THRESHOLD || 2);
-
-
-function detectUserCorrection(text = '') {
-  const raw = String(text || '').trim();
-  if (!raw) return { detected: false, matchedPattern: '', weightedText: '' };
-  const normalized = normalize(raw);
-  const patterns = [
-    'te dije',
-    'no, era',
-    'me referia',
-    'no eso',
-    'eso no',
-    'hablo de',
-  ];
-  const matchedPattern = patterns.find((p) => normalized.includes(p)) || '';
-  if (!matchedPattern) return { detected: false, matchedPattern: '', weightedText: raw };
-
-  const weightedText = raw.replace(/^(?:\s*(?:no\s*,?\s*)?(?:te dije|no\s*,?\s*era|me refer[ií]a|no eso|eso no|hablo de)\s*)+/i, '').trim();
-  return {
-    detected: true,
-    matchedPattern,
-    weightedText: weightedText || raw,
-  };
-}
-
-function classifyIntentV2({ text, context = {} } = {}) {
-  const raw = String(text || '').trim();
-  const t = normalize(raw);
-  if (!t) return { intent: 'UNKNOWN', scores: {}, maxScore: 0, needsClarification: true, clarification: '¿Buscás producto, servicio o curso?' };
-
-  const scores = { PRODUCT: 0, SERVICE: 0, COURSE: 0, SMALLTALK: 0 };
-  const add = (intent, points) => { scores[intent] = (scores[intent] || 0) + points; };
-  const has = (rx) => rx.test(t);
-
-  if (has(/\bcurso\b|\bcursos\b|\btaller\b|\bcapacitacion\b|\bcapacitación\b|\binscribirme\b|\binscripcion\b|\binscripción\b/)) add('COURSE', 3);
-  if (has(/\bstock\b|\btenes\b|\btenés\b|\bproducto\b|\binsumo\b|\bcomprar\b/)) add('PRODUCT', 3);
-  if (has(/\bturno\b|\breserv(ar|o|a)?\b|\bagend(ar|o|a)?\b|\bcita\b|\bservicio\b/)) add('SERVICE', 3);
-
-  if (context?.hasCourseContext && has(/\bprecio\b|\bduracion\b|\bduración\b|\bhorario\b|\bhorarios\b/)) add('COURSE', 2);
-  if ((context?.hasDraft || context?.lastService) && has(/\bprecio\b|\bduracion\b|\bduración\b|\bhorario\b|\bhorarios\b/)) add('SERVICE', 2);
-  if (context?.hasProductContext && has(/\bprecio\b|\bstock\b/)) add('PRODUCT', 2);
-
-  if (has(/\bhola\b|\bbuenas\b|\bgracias\b|\bok\b/)) add('SMALLTALK', 1);
-
-  if (context?.hasDraft && scores.SERVICE > 0) scores.SERVICE += 2;
-  if (context?.courseSignupActive && scores.COURSE > 0) scores.COURSE += 2;
-
-  const entries = Object.entries(scores).filter(([k]) => k !== 'SMALLTALK');
-  entries.sort((a, b) => b[1] - a[1]);
-  const [topIntent, topScore] = entries[0] || ['UNKNOWN', 0];
-  const secondScore = entries[1]?.[1] || 0;
-  const strongChange = topScore >= 3 && topScore >= (secondScore + 2);
-  const isTie = topScore > 0 && topScore === secondScore;
-  const isLowScore = topScore > 0 && topScore < INTENT_V2_THRESHOLD;
-
-  let finalIntent = topIntent;
-  if (context?.hasDraft && topIntent !== 'SERVICE' && !strongChange) finalIntent = 'SERVICE';
-  if (context?.courseSignupActive && topIntent !== 'COURSE' && !strongChange) finalIntent = 'COURSE';
-  if ((scores[finalIntent] || 0) < INTENT_V2_THRESHOLD || isTie) finalIntent = 'UNKNOWN';
-
-  return {
-    intent: finalIntent,
-    scores,
-    maxScore: topScore || 0,
-    isTie,
-    isLowScore,
-    needsClarification: finalIntent === 'UNKNOWN',
-    clarification: finalIntent === 'UNKNOWN' ? buildDisambiguationQuestion() : '',
-  };
-}
 
 function isLikelyGenericCourseListQuery(text) {
   const t = normalize(text || '');
@@ -13515,12 +13366,11 @@ function detectFastCatalogIntent(text, context = {}) {
   const t = normalize(raw);
   if (!t) return null;
 
-  const intentV2 = classifyIntentV2({ text: raw, context: { ...context, hasProductContext: !!context.lastProductContext, courseSignupActive: !!context.pendingCourseDraft } });
   const hasCourseSignal = COURSE_SIGNAL_RE.test(t)
     || /(dictan clases|dan clases|estan dando clases|están dando clases|se dicta|se dictan|se esta dictando|se está dictando|se estan dando|se están dando)/i.test(t);
   const hasCourseFollowup = !!context.hasCourseContext && ((COURSE_FOLLOWUP_RE.test(t) || isGenericCurrentCourseContextQuestion(raw)) || /^(ese|este|ese curso|este curso|de ese|de este|de ese curso|de este curso|barberia|barbería|maquillaje|colorimetria|colorimetría|auxiliar|peinados|cupos?|precio|info|horario|horarios|duracion|duración|modalidad|inicio|requisitos)$/.test(t));
 
-  if (intentV2.intent === 'COURSE' || hasCourseSignal || hasCourseFollowup) {
+  if (hasCourseSignal || hasCourseFollowup) {
     const generic = isLikelyGenericCourseListQuery(raw);
     return {
       type: 'COURSE',
@@ -13533,7 +13383,7 @@ function detectFastCatalogIntent(text, context = {}) {
   const hasProductSignal = PRODUCT_SIGNAL_RE.test(t);
   const hasServiceSignal = SERVICE_SIGNAL_RE.test(t);
 
-  if (intentV2.intent === 'PRODUCT' || (hasProductSignal && !hasServiceSignal)) {
+  if (hasProductSignal && !hasServiceSignal) {
     return {
       type: 'PRODUCT',
       query: raw,
@@ -13542,7 +13392,7 @@ function detectFastCatalogIntent(text, context = {}) {
     };
   }
 
-  if (intentV2.intent === 'SERVICE' || (hasServiceSignal && !hasProductSignal)) {
+  if (hasServiceSignal && !hasProductSignal) {
     return {
       type: 'SERVICE',
       query: raw,
@@ -14424,38 +14274,6 @@ function shouldUseAmbiguousBridgeMessage({ waId, text }) {
 
 function formatWarmAssistant(text) {
   return String(text || '').replace(/^Perfecto 😊/m, 'Perfecto 😊').trim();
-}
-
-
-function normalizeServiceForComparison(value = '') {
-  return normalize(String(value || ''))
-    .replace(/\bcon\b/g, ' ')
-    .replace(/\bgorro\b/g, ' ')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-}
-
-function areEquivalentServices(a = '', b = '') {
-  const left = normalizeServiceForComparison(a);
-  const right = normalizeServiceForComparison(b);
-  if (!left || !right) return false;
-  if (left === right) return true;
-  const sameReflejosFamily = /\breflejos\b/.test(left) && /\breflejos\b/.test(right);
-  return sameReflejosFamily;
-}
-
-function hasBookingIntentText(text = '') {
-  const t = normalize(text || '');
-  return /(\bturno\b|\breserv\w*\b|\bagend\w*\b)/i.test(t);
-}
-
-function logTurnoFlowTransition({ waId = '', fromStep = '', toStep = '', reason = '' } = {}) {
-  console.log('[turno_flow_transition]', JSON.stringify({
-    wa_id: waId || '',
-    from_step: fromStep || '',
-    to_step: toStep || '',
-    reason: reason || '',
-  }));
 }
 
 function inferDraftFlowStep(base) {
@@ -16957,8 +16775,7 @@ lastCloseContext.set(waId, {
         historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 10, 1200),
       });
 
-      const bookingIntentGuardEarly = hasBookingIntentText(text) && !!pendingDraft;
-      if ((draftControlEarly.action === 'PAUSE_APPOINTMENT' || draftControlEarly.action === 'SWITCH_TOPIC') && !bookingIntentGuardEarly) {
+      if (draftControlEarly.action === 'PAUSE_APPOINTMENT' || draftControlEarly.action === 'SWITCH_TOPIC') {
         await deleteAppointmentDraft(waId);
 
         const pauseIntentEarly = extractTurnoPauseIntent(text);
@@ -17410,7 +17227,6 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
         const studentMergeDraft = await enrichCourseEnrollmentStudentData({
           draft: mergedCourseDraft,
           text,
-          waId,
           waPhone: phone,
           mediaMeta,
         });
@@ -17490,8 +17306,7 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
         historySnippet: buildConversationHistorySnippet(convForAI, 14, 1200),
       });
 
-      const bookingIntentGuard = hasBookingIntentText(text) && !!pendingDraft;
-      if ((draftControl.action === 'PAUSE_APPOINTMENT' || draftControl.action === 'SWITCH_TOPIC') && !bookingIntentGuard) {
+      if (draftControl.action === 'PAUSE_APPOINTMENT' || draftControl.action === 'SWITCH_TOPIC') {
         await deleteAppointmentDraft(waId);
         pendingDraft = null;
 
@@ -17654,12 +17469,6 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
     }
 
     async function askForMissingTurnoData(base) {
-      if (!base?.servicio && base?.last_service_name && base?.flow_step === 'awaiting_service') {
-        const fromStep = base.flow_step;
-        base.flow_step = 'awaiting_date';
-        logTurnoFlowTransition({ waId, fromStep, toStep: base.flow_step, reason: 'service_already_confirmed' });
-      }
-
       const servicioTxt = base?.servicio || base?.last_service_name || "";
       const availabilityMode = normalizeAvailabilityMode(base?.availability_mode || 'commercial');
 
@@ -17736,7 +17545,6 @@ Si quiere, dígame “servicio” o “producto” y sigo por ahí 😊`;
     async function askForContactData(base) {
       const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_contact', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
-      logTurnoFlowTransition({ waId, fromStep: base?.flow_step || '', toStep: toSave.flow_step, reason: 'request_missing_contact_data' });
       updateLastCloseContext(waId, { suppressInactivityPrompt: true });
       const msgContacto = `Perfecto 😊
 
@@ -17752,7 +17560,6 @@ Para dejar el turno listo necesito estos datos 😊
     async function askForName(base) {
       const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_name', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
-      logTurnoFlowTransition({ waId, fromStep: base?.flow_step || '', toStep: toSave.flow_step, reason: 'request_missing_name' });
       updateLastCloseContext(waId, { suppressInactivityPrompt: true });
       const msgSoloNombre = `Perfecto 
 
@@ -17767,7 +17574,6 @@ Ahora necesito este dato 😊
     async function askForPhone(base) {
       const toSave = { ...base, awaiting_contact: true, flow_step: 'awaiting_phone', last_intent: 'book_appointment', last_service_name: base.servicio || base.last_service_name || '' };
       await saveAppointmentDraft(waId, phone, toSave);
-      logTurnoFlowTransition({ waId, fromStep: base?.flow_step || '', toStep: toSave.flow_step, reason: 'request_missing_phone' });
       updateLastCloseContext(waId, { suppressInactivityPrompt: true });
       const msgTelefono = `Perfecto 
 
@@ -18402,37 +18208,6 @@ Si después necesita algo, estoy acá ✨`;
       }
     }
 
-    const topicLock = getTopicLock(waId);
-    const disambiguationState = getDisambiguationState(waId);
-    const normalizedText = normalize(text || '');
-
-    if (disambiguationState.awaiting_disambiguation === true) {
-      const selectedDomain = parseDisambiguationChoice(text);
-      if (selectedDomain) {
-        setTopicLock(waId, selectedDomain, 3);
-        setDisambiguationState(waId, { awaiting_disambiguation: false });
-        text = String(disambiguationState.pending_user_query || text || '').trim() || text;
-      }
-    }
-
-    const quickIntentV2 = classifyIntentV2({
-      text,
-      context: {
-        hasDraft: !!pendingDraft,
-        lastService: lastKnownService || null,
-        hasCourseContext: !!lastCourseContext,
-        hasProductContext: !!getLastProductContext(waId),
-        courseSignupActive: !!pendingCourseDraft,
-      },
-    });
-    const askedDisambiguation = quickIntentV2.needsClarification && (quickIntentV2.isLowScore || quickIntentV2.isTie || quickIntentV2.intent === 'UNKNOWN');
-    if (askedDisambiguation && !topicLock && normalizedText !== 'otro') {
-      setDisambiguationState(waId, { awaiting_disambiguation: true, pending_user_query: text });
-      await sendWhatsAppText(phone, buildDisambiguationQuestion());
-      scheduleInactivityFollowUp(waId, phone);
-      return;
-    }
-
     let intent = await classifyAndExtract(text, {
       lastServiceName: lastKnownService?.nombre || '',
       lastProductName: lastProductByUser.get(waId)?.nombre || '',
@@ -18448,15 +18223,6 @@ Si después necesita algo, estoy acá ✨`;
       hasDraft: !!pendingDraft,
       historySnippet: buildConversationHistorySnippet(convForAI, 18, 1600),
     });
-
-    if (topicLock && normalizedText === 'otro') {
-      intent = {
-        ...intent,
-        type: topicLock.topic,
-        query: intent.query || text || '',
-        mode: intent.mode || 'DETAIL',
-      };
-    }
 
 
     if (beautyIntentOverride) {
@@ -18510,13 +18276,6 @@ Si después necesita algo, estoy acá ✨`;
           mode: fastIntent.mode || intent.mode || 'DETAIL',
         };
       }
-    }
-
-    if (['PRODUCT', 'COURSE', 'SERVICE'].includes(intent?.type || '')) {
-      setTopicLock(waId, intent.type, 3);
-      setDisambiguationState(waId, { awaiting_disambiguation: false });
-    } else if (topicLock && normalizedText === 'otro') {
-      consumeTopicLockTurn(waId);
     }
 
     if (forcedCourseFlowIntent.isCourse) {
@@ -19272,7 +19031,6 @@ ${some}
         const studentMergeBase = await enrichCourseEnrollmentStudentData({
           draft: baseCourseDraft,
           text,
-          waId,
           waPhone: phone,
           mediaMeta,
         });
@@ -19547,87 +19305,7 @@ Si quiere, le paso información de cualquiera de esos 😊`;
       return;
     }
 
-    const correctionSignal = detectUserCorrection(text);
-    if (correctionSignal.detected) {
-      const weightedText = correctionSignal.weightedText || text;
-      const correctionIntentV2 = classifyIntentV2({
-        text: `${weightedText} ${weightedText}`.trim(),
-        context: {
-          hasProductContext: !!getLastProductContext(waId),
-          courseSignupActive: !!pendingCourseDraft,
-        },
-      });
-
-      const correctedDomain = String(correctionIntentV2?.intent || '').toUpperCase();
-      const activeOfferNow = getActiveAssistantOffer(waId);
-      const activeOfferType = String(activeOfferNow?.type || '').toUpperCase();
-      if (activeOfferNow && correctedDomain && activeOfferType && activeOfferType !== correctedDomain) {
-        clearActiveAssistantOffer(waId);
-      }
-
-      const lastResolvedBeauty = getLastResolvedBeauty(waId);
-      if (lastResolvedBeauty?.kind && correctedDomain && ['PRODUCT', 'SERVICE'].includes(correctedDomain) && String(lastResolvedBeauty.kind).toUpperCase() !== correctedDomain) {
-        clearLastResolvedBeauty(waId);
-      }
-
-      const correctionMsg = `Perfecto, entonces vemos ${correctedDomain === 'PRODUCT' ? 'productos' : correctedDomain === 'SERVICE' ? 'servicios' : correctedDomain === 'COURSE' ? 'cursos' : 'eso'} para ${weightedText} 👌`;
-      pushHistory(waId, 'assistant', correctionMsg);
-      await sendWhatsAppText(phone, correctionMsg);
-
-      updateLastCloseContext(waId, {
-        last_user_correction_at: new Date().toISOString(),
-        lastUserText: weightedText,
-      });
-
-      text = weightedText;
-      userIntentText = weightedText;
-    }
-
-    const lockedIntentV2 = classifyIntentV2({
-      text,
-      context: {
-        hasProductContext: !!getLastProductContext(waId),
-        courseSignupActive: !!pendingCourseDraft,
-      },
-    });
-    const lockedDomain = String(lockedIntentV2?.intent || 'UNKNOWN').toUpperCase();
-
-    if (lockedDomain === 'PRODUCT') {
-      const stock = filterSellableCatalogRows(await getStockCatalog(), { includeOutOfStock: false });
-      const related = findStockRelated(stock, text, { limit: 200 });
-      const replyCatalog = formatStockReply(related, related.length === 1 ? 'DETAIL' : 'LIST', { domain: detectProductDomain(text), familyLabel: detectFurnitureFamily(text) || detectProductFamily(text) });
-      if (replyCatalog) {
-        pushHistory(waId, 'assistant', replyCatalog);
-        await sendWhatsAppText(phone, replyCatalog);
-        scheduleInactivityFollowUp(waId, phone);
-        return;
-      }
-    }
-
-    if (lockedDomain === 'COURSE') {
-      const courses = await getCoursesCatalog();
-      const courseQuery = resolveImplicitCourseFollowupQuery(text, getLastCourseContext(waId)) || text;
-      const matches = findCourses(courses, courseQuery, 'DETAIL');
-      const replyCourse = formatCoursesReply(matches, 'DETAIL');
-      const outCourse = replyCourse || 'Por ahora solo puedo responder sobre cursos disponibles en la hoja CURSOS y el flujo de inscripción.';
-      pushHistory(waId, 'assistant', outCourse);
-      await sendWhatsAppText(phone, outCourse);
-      scheduleInactivityFollowUp(waId, phone);
-      return;
-    }
-
-    if (lockedDomain === 'SERVICE') {
-      const services = await getServicesCatalog();
-      const serviceQuery = normalizeServiceQuery({ raw: text, aiService: text }) || text;
-      const matches = findServices(services, serviceQuery, 'DETAIL');
-      const replyService = formatServicesReply(matches, 'DETAIL') || 'Seguimos con servicios/turnos. Si querés cambiar de tema, decime explícitamente curso o producto.';
-      pushHistory(waId, 'assistant', replyService);
-      await sendWhatsAppText(phone, replyService);
-      scheduleInactivityFollowUp(waId, phone);
-      return;
-    }
-
-    // fallback IA (solo SMALLTALK / UNKNOWN con poco contexto / reformulación)
+    // fallback
     const model = pickModelForText(text);
 
     const activeCampaignMessages = await buildAssistantMessagesForBroadcastCampaign(waId, getActiveAssistantOffer(waId));
@@ -19635,7 +19313,6 @@ Si quiere, le paso información de cualquiera de esos 😊`;
     const messages = [
       { role: "system", content: SYSTEM_PROMPT },
       ...activeCampaignMessages,
-      { role: "system", content: `locked_domain: ${lockedDomain}. Respetá este dominio y no mezcles temas.` },
       { role: "system", content: `Fecha y hora actual: ${nowARString()} (${TIMEZONE}).` },
       { role: "system", content: `Contexto del turno actual: ${JSON.stringify({
         servicio_actual: pendingDraft?.servicio || lastKnownService?.nombre || '',
