@@ -7726,8 +7726,8 @@ async function deleteCourseEnrollmentDraft(waId) {
 
 function inferCourseEnrollmentFlowStep(base = {}) {
   if (!String(base?.curso_nombre || '').trim()) return 'awaiting_course';
-  if (!String(base?.alumno_nombre || '').trim()) return 'awaiting_name';
-  if (!String(base?.alumno_dni || '').trim()) return 'awaiting_dni';
+  if (!String(base?.alumno_nombre || '').trim()) return 'awaiting_student_name';
+  if (!String(base?.alumno_dni || '').trim()) return 'awaiting_student_dni';
   if (base?.payment_status === 'payment_review') return 'payment_review';
   if (base?.payment_status === 'awaiting_salon_payment') return 'awaiting_salon_payment';
   if (base?.payment_status !== 'paid_verified') return 'awaiting_payment';
@@ -7757,9 +7757,11 @@ function stripStudentDni(text = '') {
 }
 
 function extractStudentFullName(text = '') {
-  const cleaned = cleanNameCandidate(stripStudentDni(text));
-  const parts = splitNameParts(cleaned);
-  return parts.fullName && parts.lastName ? parts.fullName : '';
+  const cleaned = cleanNameCandidate(stripStudentDni(text)).replace(/\s+/g, ' ').trim();
+  if (!cleaned) return '';
+  const alphaTokens = cleaned.match(/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:['-][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+)*/g) || [];
+  if (alphaTokens.length < 2) return '';
+  return alphaTokens.join(' ');
 }
 
 function mergeStudentIntoCourseEnrollment({ draft, text, waPhone }) {
@@ -8026,9 +8028,17 @@ Reglas:
   }
 }
 
-async function enrichCourseEnrollmentStudentData({ draft, text, waPhone, mediaMeta } = {}) {
+async function enrichCourseEnrollmentStudentData({ draft, text, waId, waPhone, mediaMeta } = {}) {
   const out = mergeStudentIntoCourseEnrollment({ draft, text, waPhone });
   const raw = String(text || '').trim();
+  const detectedName = extractStudentFullName(raw);
+  if (out?.flow_step === 'awaiting_student_name' && detectedName && !out.alumno_nombre) {
+    out.alumno_nombre = detectedName;
+    const fromStep = out.flow_step;
+    out.flow_step = 'awaiting_student_dni';
+    console.info('course_flow from awaiting_student_name -> awaiting_student_dni');
+    if (waId) await saveCourseEnrollmentDraft(waId, waPhone, out);
+  }
   const nameIssue = detectStudentNameIssue(raw);
   const dniIssue = detectStudentDniIssue(raw);
 
@@ -8152,8 +8162,12 @@ function buildCourseEnrollmentNeedNameMessage(courseName = '') {
 • *DNI*`;
 }
 
-function buildCourseEnrollmentNeedDniMessage(courseName = '') {
+function buildCourseEnrollmentNeedDniMessage(courseName = '', studentName = '') {
   const courseTxt = courseName ? ` para *${courseName}*` : '';
+  const cleanStudentName = cleanNameCandidate(studentName || '').replace(/\s+/g, ' ').trim();
+  if (cleanStudentName) {
+    return `Genial, ya anoté el nombre: *${cleanStudentName}*. Ahora pasame el DNI.`;
+  }
   return `Perfecto 😊 Ya me quedó el nombre${courseTxt}.
 
 Ahora necesito el *DNI del alumno o alumna* para completar los datos.`;
@@ -8552,7 +8566,7 @@ async function askForMissingCourseEnrollmentData({ waId, phone, base, courseOpti
   if (!draft.alumno_dni) {
     const msg = studentInput?.invalidDni || studentInput?.unreadableDocument || studentInput?.extractedName
       ? buildCourseEnrollmentNeedDniCorrectionMessage(draft.curso_nombre || '', studentInput)
-      : buildCourseEnrollmentNeedDniMessage(draft.curso_nombre || '');
+      : buildCourseEnrollmentNeedDniMessage(draft.curso_nombre || '', draft.alumno_nombre || '');
     await sendCourseEnrollmentPrompt(waId, phone, msg, 'Todavía me falta el *DNI del alumno o alumna* para seguir 😊');
     return { asked: 'dni', draft };
   }
@@ -17396,6 +17410,7 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
         const studentMergeDraft = await enrichCourseEnrollmentStudentData({
           draft: mergedCourseDraft,
           text,
+          waId,
           waPhone: phone,
           mediaMeta,
         });
@@ -19257,6 +19272,7 @@ ${some}
         const studentMergeBase = await enrichCourseEnrollmentStudentData({
           draft: baseCourseDraft,
           text,
+          waId,
           waPhone: phone,
           mediaMeta,
         });
