@@ -6470,9 +6470,19 @@ async function reviewInboundMessageFirstWithAI(text, context = {}) {
       && !hasConcreteServiceSignal(raw)
     );
 
+    const intentV2 = classifyIntentV2({
+      text: raw,
+      context: {
+        hasDraft: !!context.hasDraft,
+        lastService: context.lastService || null,
+        hasCourseContext: !!context.lastCourseContext,
+        hasProductContext: !!context.lastProductContext,
+        courseSignupActive: !!context.pendingCourseDraft,
+      },
+    });
     const inferredType = explicitCourse.isCourse
       ? 'COURSE'
-      : (bareAppointmentWithoutService ? 'SERVICE' : (fastIntent?.type || (isExplicitProductIntent(raw) ? 'PRODUCT' : (isExplicitServiceIntent(raw) ? 'SERVICE' : 'OTHER'))));
+      : (bareAppointmentWithoutService ? 'SERVICE' : (intentV2.intent === 'UNKNOWN' ? (fastIntent?.type || 'OTHER') : intentV2.intent));
 
     const followsActiveOffer = !!activeType
       && looksLikeActiveOfferFollowup(raw)
@@ -10513,17 +10523,18 @@ function detectProductKeywords(text) {
 function pickCategorias({ intentType, text }) {
   const t = canonicalizeQuery(text);
   const found = [];
+  const intentV2 = classifyIntentV2({ text, context: {} });
+  const resolvedIntent = intentType === "OTHER" ? intentV2.intent : intentType;
 
   const hasServiceSignal =
-    intentType === "SERVICE" ||
+    resolvedIntent === "SERVICE" ||
     /\bturno\b|\bservicio\b|\bagenda\b|\bcita\b|\bhacerme\b|\bpara hacerme\b|\bme quiero hacer\b|\bme gustaria hacerme\b/.test(t);
 
   const hasProductSignal =
-    intentType === "PRODUCT" ||
+    resolvedIntent === "PRODUCT" ||
     /\bproducto\b|\binsumo\b|\binsumos\b|\btenes\b|\btenés\b|\bvenden\b|\bcomprar\b|\bstock\b|\bprecio\b/.test(t);
 
-  const hasCourseSignal =
-    intentType === "COURSE" || /\bcurso\b|\bcursos\b|\btaller\b|\btalleres\b/.test(t);
+  const hasCourseSignal = resolvedIntent === "COURSE" || /\bcurso\b|\bcursos\b|\btaller\b|\btalleres\b/.test(t);
 
   const productHits = detectProductKeywords(t);
 
@@ -13350,6 +13361,49 @@ const PRODUCT_SIGNAL_RE = /(producto|productos|stock|insumo|insumos|shampoo|acon
 const PRODUCT_LIST_SIGNAL_RE = /(hay|tenes|tenés|tienen|venden|disponible|disponibles|stock|lista|opciones|catalogo|catálogo|mostrar|mostrame|mandame|pasame|busco|ando buscando|quiero ver|foto|fotos|imagen|imagenes|ver modelos|ver opciones)/i;
 const SERVICE_SIGNAL_RE = /(turno|turnos|servicio|servicios|reservar|reserva|agendar|agenda|cita|me quiero hacer|quiero hacerme|para hacerme|hacerme|me hago|realizan|trabajan con|atienden|precio del servicio|valor del servicio)/i;
 const SERVICE_LIST_SIGNAL_RE = /(que servicios|qué servicios|servicios tienen|lista de servicios|todos los servicios|mostrar servicios|mostrame servicios|mandame servicios|pasame servicios)/i;
+const INTENT_V2_THRESHOLD = Number(process.env.INTENT_V2_THRESHOLD || 2);
+
+function classifyIntentV2({ text, context = {} } = {}) {
+  const raw = String(text || '').trim();
+  const t = normalize(raw);
+  if (!t) return { intent: 'UNKNOWN', scores: {}, maxScore: 0, needsClarification: true, clarification: '¿Buscás producto, servicio o curso?' };
+
+  const scores = { PRODUCT: 0, SERVICE: 0, COURSE: 0, SMALLTALK: 0 };
+  const add = (intent, points) => { scores[intent] = (scores[intent] || 0) + points; };
+  const has = (rx) => rx.test(t);
+
+  if (has(/\bcurso\b|\bcursos\b|\btaller\b|\bcapacitacion\b|\bcapacitación\b|\binscribirme\b|\binscripcion\b|\binscripción\b/)) add('COURSE', 3);
+  if (has(/\bstock\b|\btenes\b|\btenés\b|\bproducto\b|\binsumo\b|\bcomprar\b/)) add('PRODUCT', 3);
+  if (has(/\bturno\b|\breserv(ar|o|a)?\b|\bagend(ar|o|a)?\b|\bcita\b|\bservicio\b/)) add('SERVICE', 3);
+
+  if (context?.hasCourseContext && has(/\bprecio\b|\bduracion\b|\bduración\b|\bhorario\b|\bhorarios\b/)) add('COURSE', 2);
+  if ((context?.hasDraft || context?.lastService) && has(/\bprecio\b|\bduracion\b|\bduración\b|\bhorario\b|\bhorarios\b/)) add('SERVICE', 2);
+  if (context?.hasProductContext && has(/\bprecio\b|\bstock\b/)) add('PRODUCT', 2);
+
+  if (has(/\bhola\b|\bbuenas\b|\bgracias\b|\bok\b/)) add('SMALLTALK', 1);
+
+  if (context?.hasDraft && scores.SERVICE > 0) scores.SERVICE += 2;
+  if (context?.courseSignupActive && scores.COURSE > 0) scores.COURSE += 2;
+
+  const entries = Object.entries(scores).filter(([k]) => k !== 'SMALLTALK');
+  entries.sort((a, b) => b[1] - a[1]);
+  const [topIntent, topScore] = entries[0] || ['UNKNOWN', 0];
+  const secondScore = entries[1]?.[1] || 0;
+  const strongChange = topScore >= 3 && topScore >= (secondScore + 2);
+
+  let finalIntent = topIntent;
+  if (context?.hasDraft && topIntent !== 'SERVICE' && !strongChange) finalIntent = 'SERVICE';
+  if (context?.courseSignupActive && topIntent !== 'COURSE' && !strongChange) finalIntent = 'COURSE';
+  if ((scores[finalIntent] || 0) < INTENT_V2_THRESHOLD) finalIntent = 'UNKNOWN';
+
+  return {
+    intent: finalIntent,
+    scores,
+    maxScore: topScore || 0,
+    needsClarification: finalIntent === 'UNKNOWN',
+    clarification: finalIntent === 'UNKNOWN' ? '¿Querés producto, servicio o curso?' : '',
+  };
+}
 
 function isLikelyGenericCourseListQuery(text) {
   const t = normalize(text || '');
@@ -13366,11 +13420,12 @@ function detectFastCatalogIntent(text, context = {}) {
   const t = normalize(raw);
   if (!t) return null;
 
+  const intentV2 = classifyIntentV2({ text: raw, context: { ...context, hasProductContext: !!context.lastProductContext, courseSignupActive: !!context.pendingCourseDraft } });
   const hasCourseSignal = COURSE_SIGNAL_RE.test(t)
     || /(dictan clases|dan clases|estan dando clases|están dando clases|se dicta|se dictan|se esta dictando|se está dictando|se estan dando|se están dando)/i.test(t);
   const hasCourseFollowup = !!context.hasCourseContext && ((COURSE_FOLLOWUP_RE.test(t) || isGenericCurrentCourseContextQuestion(raw)) || /^(ese|este|ese curso|este curso|de ese|de este|de ese curso|de este curso|barberia|barbería|maquillaje|colorimetria|colorimetría|auxiliar|peinados|cupos?|precio|info|horario|horarios|duracion|duración|modalidad|inicio|requisitos)$/.test(t));
 
-  if (hasCourseSignal || hasCourseFollowup) {
+  if (intentV2.intent === 'COURSE' || hasCourseSignal || hasCourseFollowup) {
     const generic = isLikelyGenericCourseListQuery(raw);
     return {
       type: 'COURSE',
@@ -13383,7 +13438,7 @@ function detectFastCatalogIntent(text, context = {}) {
   const hasProductSignal = PRODUCT_SIGNAL_RE.test(t);
   const hasServiceSignal = SERVICE_SIGNAL_RE.test(t);
 
-  if (hasProductSignal && !hasServiceSignal) {
+  if (intentV2.intent === 'PRODUCT' || (hasProductSignal && !hasServiceSignal)) {
     return {
       type: 'PRODUCT',
       query: raw,
@@ -13392,7 +13447,7 @@ function detectFastCatalogIntent(text, context = {}) {
     };
   }
 
-  if (hasServiceSignal && !hasProductSignal) {
+  if (intentV2.intent === 'SERVICE' || (hasServiceSignal && !hasProductSignal)) {
     return {
       type: 'SERVICE',
       query: raw,
