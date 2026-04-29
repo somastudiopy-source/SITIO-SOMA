@@ -13363,6 +13363,30 @@ const SERVICE_SIGNAL_RE = /(turno|turnos|servicio|servicios|reservar|reserva|age
 const SERVICE_LIST_SIGNAL_RE = /(que servicios|qué servicios|servicios tienen|lista de servicios|todos los servicios|mostrar servicios|mostrame servicios|mandame servicios|pasame servicios)/i;
 const INTENT_V2_THRESHOLD = Number(process.env.INTENT_V2_THRESHOLD || 2);
 
+
+function detectUserCorrection(text = '') {
+  const raw = String(text || '').trim();
+  if (!raw) return { detected: false, matchedPattern: '', weightedText: '' };
+  const normalized = normalize(raw);
+  const patterns = [
+    'te dije',
+    'no, era',
+    'me referia',
+    'no eso',
+    'eso no',
+    'hablo de',
+  ];
+  const matchedPattern = patterns.find((p) => normalized.includes(p)) || '';
+  if (!matchedPattern) return { detected: false, matchedPattern: '', weightedText: raw };
+
+  const weightedText = raw.replace(/^(?:\s*(?:no\s*,?\s*)?(?:te dije|no\s*,?\s*era|me refer[ií]a|no eso|eso no|hablo de)\s*)+/i, '').trim();
+  return {
+    detected: true,
+    matchedPattern,
+    weightedText: weightedText || raw,
+  };
+}
+
 function classifyIntentV2({ text, context = {} } = {}) {
   const raw = String(text || '').trim();
   const t = normalize(raw);
@@ -19358,6 +19382,42 @@ Si quiere, le paso información de cualquiera de esos 😊`;
       await sendWhatsAppText(phone, msgNo);
       scheduleInactivityFollowUp(waId, phone);
       return;
+    }
+
+    const correctionSignal = detectUserCorrection(text);
+    if (correctionSignal.detected) {
+      const weightedText = correctionSignal.weightedText || text;
+      const correctionIntentV2 = classifyIntentV2({
+        text: `${weightedText} ${weightedText}`.trim(),
+        context: {
+          hasProductContext: !!getLastProductContext(waId),
+          courseSignupActive: !!pendingCourseDraft,
+        },
+      });
+
+      const correctedDomain = String(correctionIntentV2?.intent || '').toUpperCase();
+      const activeOfferNow = getActiveAssistantOffer(waId);
+      const activeOfferType = String(activeOfferNow?.type || '').toUpperCase();
+      if (activeOfferNow && correctedDomain && activeOfferType && activeOfferType !== correctedDomain) {
+        clearActiveAssistantOffer(waId);
+      }
+
+      const lastResolvedBeauty = getLastResolvedBeauty(waId);
+      if (lastResolvedBeauty?.kind && correctedDomain && ['PRODUCT', 'SERVICE'].includes(correctedDomain) && String(lastResolvedBeauty.kind).toUpperCase() !== correctedDomain) {
+        clearLastResolvedBeauty(waId);
+      }
+
+      const correctionMsg = `Perfecto, entonces vemos ${correctedDomain === 'PRODUCT' ? 'productos' : correctedDomain === 'SERVICE' ? 'servicios' : correctedDomain === 'COURSE' ? 'cursos' : 'eso'} para ${weightedText} 👌`;
+      pushHistory(waId, 'assistant', correctionMsg);
+      await sendWhatsAppText(phone, correctionMsg);
+
+      updateLastCloseContext(waId, {
+        last_user_correction_at: new Date().toISOString(),
+        lastUserText: weightedText,
+      });
+
+      text = weightedText;
+      userIntentText = weightedText;
     }
 
     // fallback
