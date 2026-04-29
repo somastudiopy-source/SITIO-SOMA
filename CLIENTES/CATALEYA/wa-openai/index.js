@@ -5937,9 +5937,29 @@ const inactivityTimers = new Map();
 const closeTimers = new Map();
 const lastCloseContext = new Map(); // waId -> { phone, name, lastUserText, intentType, interest }
 const topicLockByConversation = new Map(); // waId -> { topic: PRODUCT|COURSE|SERVICE, turnsLeft: number }
+const disambiguationStateByConversation = new Map(); // waId -> { awaiting_disambiguation: boolean, pending_user_query: string }
 
 function buildDisambiguationQuestion() {
   return "¿Querés que te ayude con *productos*, *cursos* o *turnos*?";
+}
+
+function parseDisambiguationChoice(t='') {
+  const s = normalize(t);
+  if (/(^|\b)(producto|productos|stock|catalogo|catálogo)(\b|$)/.test(s)) return 'PRODUCT';
+  if (/(^|\b)(curso|cursos|taller|talleres|capacitacion|capacitación)(\b|$)/.test(s)) return 'COURSE';
+  if (/(^|\b)(turno|turnos|servicio|servicios|agendar|reservar)(\b|$)/.test(s)) return 'SERVICE';
+  return '';
+}
+
+function setDisambiguationState(waId, patch = {}) {
+  if (!waId) return;
+  const prev = disambiguationStateByConversation.get(waId) || { awaiting_disambiguation: false, pending_user_query: '' };
+  disambiguationStateByConversation.set(waId, { ...prev, ...patch });
+}
+
+function getDisambiguationState(waId) {
+  if (!waId) return { awaiting_disambiguation: false, pending_user_query: '' };
+  return disambiguationStateByConversation.get(waId) || { awaiting_disambiguation: false, pending_user_query: '' };
 }
 
 function setTopicLock(waId, topic, turns = 2) {
@@ -18368,7 +18388,18 @@ Si después necesita algo, estoy acá ✨`;
     }
 
     const topicLock = getTopicLock(waId);
+    const disambiguationState = getDisambiguationState(waId);
     const normalizedText = normalize(text || '');
+
+    if (disambiguationState.awaiting_disambiguation === true) {
+      const selectedDomain = parseDisambiguationChoice(text);
+      if (selectedDomain) {
+        setTopicLock(waId, selectedDomain, 3);
+        setDisambiguationState(waId, { awaiting_disambiguation: false });
+        text = String(disambiguationState.pending_user_query || text || '').trim() || text;
+      }
+    }
+
     const quickIntentV2 = classifyIntentV2({
       text,
       context: {
@@ -18381,6 +18412,7 @@ Si después necesita algo, estoy acá ✨`;
     });
     const askedDisambiguation = quickIntentV2.needsClarification && (quickIntentV2.isLowScore || quickIntentV2.isTie || quickIntentV2.intent === 'UNKNOWN');
     if (askedDisambiguation && !topicLock && normalizedText !== 'otro') {
+      setDisambiguationState(waId, { awaiting_disambiguation: true, pending_user_query: text });
       await sendWhatsAppText(phone, buildDisambiguationQuestion());
       scheduleInactivityFollowUp(waId, phone);
       return;
@@ -18466,7 +18498,8 @@ Si después necesita algo, estoy acá ✨`;
     }
 
     if (['PRODUCT', 'COURSE', 'SERVICE'].includes(intent?.type || '')) {
-      setTopicLock(waId, intent.type, 2);
+      setTopicLock(waId, intent.type, 3);
+      setDisambiguationState(waId, { awaiting_disambiguation: false });
     } else if (topicLock && normalizedText === 'otro') {
       consumeTopicLockTurn(waId);
     }
