@@ -95,6 +95,14 @@ function looksLikeCourseIntent(text = "") {
   return /\b(curso|cursos|inscrib|inscripcion|inscripción|capacitaci|clase)\b/.test(t);
 }
 
+function looksLikeCourseSelectionHint(text = "") {
+  const t = String(text || "").trim().toLowerCase();
+  if (!t) return false;
+  if (/^\d{1,2}$/.test(t)) return true;
+  if (/^(ese|esa|el\s+\d+|la\s+\d+|opci[oó]n\s+\d+)$/i.test(t)) return true;
+  return false;
+}
+
 function selectCourseFromText(text = "", catalog = []) {
   const t = String(text || "").toLowerCase().trim();
   if (!t) return null;
@@ -1094,10 +1102,34 @@ app.post("/webhook", async (req, res) => {
 
           const textForCourse = String(userIntentText || text || "").trim();
           const existingCourseCtx = getLastCourseContext(waId);
-          const shouldEvaluateCourse = looksLikeCourseIntent(textForCourse) || !!existingCourseCtx;
-          if (!shouldEvaluateCourse) continue;
+          const isCourseIntent = looksLikeCourseIntent(textForCourse);
+          const isSelectionHint = looksLikeCourseSelectionHint(textForCourse);
+          const shouldEvaluateCourse = isCourseIntent || isSelectionHint || !!existingCourseCtx;
+          console.log("📚 COURSES_FLOW_CHECK", JSON.stringify({
+            wa_id: waId || "",
+            text: String(text || "").slice(0, 180),
+            user_intent_text: String(userIntentText || "").slice(0, 180),
+            text_for_course: textForCourse.slice(0, 180),
+            is_course_intent: isCourseIntent,
+            is_selection_hint: isSelectionHint,
+            has_existing_context: !!existingCourseCtx,
+            should_evaluate_course: shouldEvaluateCourse,
+          }));
+          if (!shouldEvaluateCourse) {
+            console.log("📚 COURSES_FLOW_SKIPPED", JSON.stringify({ wa_id: waId || "", reason: "no_course_intent_or_context" }));
+            continue;
+          }
 
-          const catalog = await loadCoursesCatalogFromSheets();
+          let catalog = [];
+          try {
+            catalog = await loadCoursesCatalogFromSheets();
+          } catch (catalogErr) {
+            console.error("❌ COURSES_CATALOG_LOAD_ERROR", JSON.stringify({
+              wa_id: waId || "",
+              error: catalogErr?.message || String(catalogErr || ""),
+            }));
+            continue;
+          }
           console.log("📚 COURSES_FLOW_TRANSITION", JSON.stringify({
             wa_id: waId,
             stage: "catalog_loaded",
@@ -1110,7 +1142,7 @@ app.post("/webhook", async (req, res) => {
             continue;
           }
 
-          if (looksLikeCourseIntent(textForCourse) && !existingCourseCtx) {
+          if (isCourseIntent && !existingCourseCtx) {
             setLastCourseContext(waId, { stage: "catalog_presented", catalogSnapshot: catalog.slice(0, 20) });
             const listMsg = `Estos son los cursos disponibles:\n${catalog.slice(0, 10).map(courseLabel).join("\n")}\n\nDecime el nombre o número del curso que te interesa.`;
             console.log("📚 COURSES_FLOW_TRANSITION", JSON.stringify({ wa_id: waId, stage: "catalog_presented" }));
