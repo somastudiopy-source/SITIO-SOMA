@@ -6088,7 +6088,7 @@ function normalizeShortReply(text) {
 function isPoliteClosureAfterTurno(text) {
   const t = normalizeShortReply(text || '');
   if (!t) return false;
-  return /^(gracias|muchas gracias|mil gracias|bien gracias|bien muchas gracias|bien mil gracias|esta bien gracias|está bien gracias|todo bien gracias|todo bien muchas gracias|genial gracias|perfecto gracias|perfecto muchas gracias|buenisimo gracias|buenisimo muchas gracias|buenisimo|buenisima|genial|perfecto|listo|listo gracias|ok gracias|oka gracias|dale gracias|barbaro gracias|barbaro|joya|joya gracias)$/.test(t);
+  return /^(gracias|muchas gracias|mil gracias|bien gracias|bien muchas gracias|todo bien gracias|esta bien gracias|está bien gracias|genial gracias|perfecto gracias|perfecto muchas gracias|buenisimo gracias|buenisimo muchas gracias|buenisimo|buenisima|genial|perfecto|listo gracias|ok gracias|oka gracias|dale gracias|barbaro gracias|barbaro|joya|joya gracias)$/.test(t);
 }
 
 function isPoliteCatalogDecline(text) {
@@ -11210,6 +11210,52 @@ function parseServiceDurationToMinutes(value) {
   return 0;
 }
 
+
+function normalizeServiceTokenText(value = '') {
+  return normalize(cleanServiceName(value || ''))
+    .replace(/\b(de|del|la|el|los|las|un|una|unos|unas|para|por|quiero|quisiera|queria|quería|sacar|pedir|reservar|agendar|coordinar|solicitar|turno|turnos|cita|reserva|hacerme|hacerle|hacerse|pelo|cabello|servicio|servicios)\b/g, ' ')
+    .replace(/\bcolores\b/g, 'color')
+    .replace(/\bcompletos\b/g, 'completo')
+    .replace(/\bmechitas\b/g, 'mechita')
+    .replace(/\bmechas\b/g, 'mechita')
+    .replace(/\bmecha\b/g, 'mechita')
+    .replace(/\breflejos\b/g, 'reflejo')
+    .replace(/\bhombres\b/g, 'hombre')
+    .replace(/\bmujeres\b/g, 'mujer')
+    .replace(/\bfemenina\b/g, 'femenino')
+    .replace(/\bmasculina\b/g, 'masculino')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function serviceRowMatchesTokenQuery(row = {}, query = '') {
+  const cleanQuery = normalizeServiceTokenText(query);
+  if (!cleanQuery) return false;
+  const hay = normalizeServiceTokenText([row?.nombre, row?.categoria, row?.subcategoria].filter(Boolean).join(' '));
+  if (!hay) return false;
+  const tokens = cleanQuery.split(' ').map((x) => x.trim()).filter((x) => x.length >= 3);
+  if (!tokens.length) return false;
+  return tokens.every((tok) => hay.includes(tok));
+}
+
+function extractServiceQueryFromAppointmentText(text = '') {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return '';
+  return raw
+    .replace(/^(hola+|holaa+|buenas+|buen dia|buen día|buenos dias|buenos días|buenas tardes|buenas noches)[,!\.\s-]*/i, '')
+    .replace(/\b(quiero|quisiera|queria|quería|necesito|me gustaria|me gustaría)\b/gi, ' ')
+    .replace(/\b(sacar|pedir|reservar|agendar|coordinar|solicitar)\b/gi, ' ')
+    .replace(/\b(un|una|el|la|mi|su)\b/gi, ' ')
+    .replace(/\b(turno|turnitos|cita|reserva)\b/gi, ' ')
+    .replace(/\b(para|por|de)\b/gi, ' ')
+    .replace(/\b(hoy|mañana|manana|pasado mañana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo)\b.*$/i, '')
+    .replace(/\ba\s+las\s+\d{1,2}.*$/i, '')
+    .replace(/\b\d{1,2}[:.]\d{2}\b.*$/i, '')
+    .replace(/\b\d{1,2}\s*(hs|horas?)\b.*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function resolveServiceCatalogMatch(rows, serviceName) {
   const query = String(serviceName || '').trim();
   if (!query) return null;
@@ -11226,14 +11272,13 @@ function resolveServiceCatalogMatch(rows, serviceName) {
   const detailMatches = findServices(rows, query, 'DETAIL');
   if (detailMatches.length) return detailMatches[0];
 
-  const tokenMatches = rows
-    .filter((row) => serviceRowMatchesTokenQuery(row, query))
-    .filter((row) => {
-      const hay = normalize(`${row?.nombre || ''} ${row?.categoria || ''} ${row?.subcategoria || ''}`);
-      if (/\bcorte\b/i.test(normalize(query)) && detectFemaleContext(query)) return !/(mascul|varon|hombre|barber)/i.test(hay);
-      if (/\bcorte\b/i.test(normalize(query)) && detectMaleContext(query)) return /(mascul|varon|hombre|barber)/i.test(hay);
-      return true;
-    });
+  const explicitServiceQuery = extractServiceQueryFromAppointmentText(query);
+  if (explicitServiceQuery && explicitServiceQuery !== query) {
+    const explicitMatches = findServices(rows, explicitServiceQuery, 'DETAIL');
+    if (explicitMatches.length) return explicitMatches[0];
+  }
+
+  const tokenMatches = rows.filter((row) => serviceRowMatchesTokenQuery(row, explicitServiceQuery || query));
   if (tokenMatches.length) return tokenMatches[0];
 
   const baseQuery = getServiceBaseFromName(query);
@@ -11259,7 +11304,8 @@ async function applyCatalogServiceDataToTurno(turno) {
       base.duracion_min = durationMin;
     }
 
-    if (match?.nombre && !base.last_service_name) {
+    if (match?.nombre) {
+      base.servicio = match.nombre;
       base.last_service_name = match.nombre;
     }
 
@@ -13696,109 +13742,26 @@ ${lines.join("\n")}${footer}`.trim());
   return chunks;
 }
 
-function normalizeServiceTokenText(value = '') {
-  return normalize(cleanServiceName(value || ''))
-    .replace(/\b(de|del|la|el|los|las|un|una|unos|unas|para|por|quiero|quisiera|queria|quería|sacar|reservar|agendar|turno|turnos|cita|hacerme|hacerle|hacerse|pelo|cabello|servicio|servicios)\b/g, ' ')
-    .replace(/\bcolores\b/g, 'color')
-    .replace(/\bcompletos\b/g, 'completo')
-    .replace(/\bmechitas\b/g, 'mechita')
-    .replace(/\bmechas\b/g, 'mechita')
-    .replace(/\bmecha\b/g, 'mechita')
-    .replace(/\breflejos\b/g, 'reflejo')
-    .replace(/\bhombres\b/g, 'hombre')
-    .replace(/\bmujeres\b/g, 'mujer')
-    .replace(/\bfemenina\b/g, 'femenino')
-    .replace(/\bmasculina\b/g, 'masculino')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-
-function serviceRowMatchesTokenQuery(row = {}, query = '') {
-  const cleanQuery = normalizeServiceTokenText(query);
-  if (!cleanQuery) return false;
-
-  const hay = normalizeServiceTokenText([row?.nombre, row?.categoria, row?.subcategoria].filter(Boolean).join(' '));
-  if (!hay) return false;
-
-  const tokens = cleanQuery
-    .split(' ')
-    .map((x) => x.trim())
-    .filter((x) => x.length >= 3);
-
-  if (!tokens.length) return false;
-  return tokens.every((tok) => hay.includes(tok));
-}
-
-function looksLikeServiceSelectionForAppointmentFlow(text = '', services = [], context = {}) {
-  const raw = String(text || '').trim();
-  if (!raw || isExplicitProductIntent(raw) || isExplicitCourseKeyword(raw)) return false;
-
-  const rows = Array.isArray(services) ? services : [];
-  const explicitServiceQuery = extractServiceQueryFromAppointmentText(raw) || raw;
-
-  if (hasConcreteServiceSignal(raw)) return true;
-  if (!rows.length) return false;
-
-  const resolved = resolveServiceCatalogMatch(rows, explicitServiceQuery);
-  if (resolved?.nombre) return true;
-
-  return rows.some((row) => serviceRowMatchesTokenQuery(row, explicitServiceQuery));
-}
-
-function extractServiceQueryFromAppointmentText(text = '') {
-  const raw = String(text || '').replace(/\s+/g, ' ').trim();
-  if (!raw) return '';
-
-  let out = raw
-    .replace(/^(hola+|holaa+|buenas+|buen dia|buen día|buenos dias|buenos días|buenas tardes|buenas noches)[,!\.\s-]*/i, '')
-    .replace(/\b(quiero|quisiera|queria|quería|necesito|me gustaria|me gustaría)\b/gi, ' ')
-    .replace(/\b(sacar|pedir|reservar|agendar|coordinar|solicitar)\b/gi, ' ')
-    .replace(/\b(un|una|el|la|mi|su)\b/gi, ' ')
-    .replace(/\b(turno|turnitos|cita|reserva)\b/gi, ' ')
-    .replace(/\b(para|por|de)\b/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  out = out
-    .replace(/\b(hoy|mañana|manana|pasado mañana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo)\b.*$/i, '')
-    .replace(/\ba\s+las\s+\d{1,2}.*$/i, '')
-    .replace(/\b\d{1,2}[:.]\d{2}\b.*$/i, '')
-    .replace(/\b\d{1,2}\s*(hs|horas?)\b.*$/i, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  return out;
-}
-
 function resolveReliableTurnService({ services = [], text = '', pendingDraft = null, lastKnownService = null, aiService = '' } = {}) {
   const rows = Array.isArray(services) ? services : [];
   const currentDraftService = pendingDraft?.servicio || pendingDraft?.last_service_name || '';
   const currentKnownService = currentDraftService || lastKnownService?.nombre || '';
-  const explicitServiceQuery = extractServiceQueryFromAppointmentText(text);
 
-  const candidates = Array.from(new Set([
-    explicitServiceQuery,
-    aiService,
-    text,
-  ].map((x) => String(x || '').trim()).filter(Boolean)));
-
-  for (const candidate of candidates) {
-    const resolved = resolveServiceCatalogMatch(rows, candidate);
-    if (resolved?.nombre) return resolved.nombre;
-
-    const tokenMatches = rows
-      .filter((row) => serviceRowMatchesTokenQuery(row, candidate))
-      .filter((row) => {
-        const hay = normalize(`${row?.nombre || ''} ${row?.categoria || ''} ${row?.subcategoria || ''}`);
-        if (/\bcorte\b/i.test(normalize(candidate)) && detectFemaleContext(candidate)) return !/(mascul|varon|hombre|barber)/i.test(hay);
-        if (/\bcorte\b/i.test(normalize(candidate)) && detectMaleContext(candidate)) return /(mascul|varon|hombre|barber)/i.test(hay);
-        return true;
-      });
-    if (tokenMatches.length) return tokenMatches[0].nombre;
-  }
+  const directMatches = text ? findServices(rows, text, 'DETAIL') : [];
+  const directName = directMatches[0]?.nombre || '';
+  if (directName) return directName;
 
   if (currentKnownService) return currentKnownService;
+
+  const aiResolved = resolveServiceCatalogMatch(rows, aiService || '');
+  if (!aiResolved?.nombre) return '';
+
+  const cleanText = normalize(text || '');
+  const cleanAi = normalize(cleanServiceName(aiResolved.nombre));
+  const aiBase = getServiceBaseFromName(aiResolved.nombre);
+
+  if (cleanAi && cleanText.includes(cleanAi)) return aiResolved.nombre;
+  if (aiBase && cleanText.includes(aiBase)) return aiResolved.nombre;
 
   return '';
 }
@@ -14052,7 +14015,6 @@ function looksLikeAppointmentContextFollowUp(text, { pendingDraft, lastService }
 }
 
 function looksLikeAppointmentIntent(text, { pendingDraft, lastService } = {}) {
-  if (isPoliteClosureAfterTurno(text)) return false;
   const t = normalize(text || '');
   if (/(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b)/i.test(t)) return true;
   if (pendingDraft && /(si|sí|dale|ok|oka|quiero|quiero seguir|continuar|confirmar|bien|perfecto)/i.test(t)) return true;
@@ -14407,7 +14369,6 @@ function hasConcreteServiceSignal(text = '') {
   return /(alisado|botox|keratina|nutricion|nutrición|corte(?: de pelo)?(?: femenino| masculino)?|corte femenino|corte masculino|mechita|mechitas|mecha|mechas|reflejo|reflejos|balayage|color(?: completo)?(?:s)?|colores completo(?:s)?|tintura|emulsion|emulsión|lavado|brushing|peinado|bano de crema|baño de crema|depilacion|depilación|uñas|unas|manicuria|manicuría|facial|masaje|cejas|pestañas|pestanias|shock de keratina|shock de botox|barberia|barbería|barber)\b/i.test(t);
 }
 
-
 function isGenericAppointmentOnlyQuery(query = '') {
   const t = normalize(query || '');
   if (!t) return true;
@@ -14429,7 +14390,6 @@ function buildFallbackInboundRoutingText(rawText = '', context = {}) {
       flowStep === 'awaiting_service'
       || assistantAskedForService
       || (!!context?.pendingDraft && !context?.pendingDraft?.servicio)
-      || looksLikeAppointmentIntent(raw, { pendingDraft: context?.pendingDraft || null, lastService: context?.lastService || null })
     )
   ) {
     const serviceQuery = extractServiceQueryFromAppointmentText(raw) || raw;
@@ -14927,21 +14887,6 @@ Reglas:
     const flowHint = String(obj?.flow_hint || 'OTHER').trim().toUpperCase();
     const goal = cleanAiRoutedText(obj?.goal || '');
 
-    // Si el cliente pidió turno y nombró un servicio, la IA no puede borrar ese servicio.
-    // Ej: "quiero un turno para color completo" no puede terminar como "quiero sacar un turno".
-    if (
-      looksLikeAppointmentIntent(raw, {
-        pendingDraft: context?.pendingDraft || null,
-        lastService: context?.lastService || null,
-      })
-      && hasConcreteServiceSignal(raw)
-      && !hasConcreteServiceSignal(routedText)
-      && !isExplicitProductIntent(raw)
-      && !isExplicitCourseKeyword(raw)
-    ) {
-      routedText = fallbackText || `quiero sacar un turno para ${extractServiceQueryFromAppointmentText(raw) || raw}`.replace(/\s+/g, ' ').trim();
-    }
-
     if (
       looksLikeAppointmentIntent(raw, {
         pendingDraft: context?.pendingDraft || null,
@@ -14977,17 +14922,6 @@ Reglas:
 async function classifyAndExtract(text, context = {}) {
   const raw = String(text || '').trim();
   const normalizedRaw = normalize(raw);
-  const appointmentServiceQuery = extractServiceQueryFromAppointmentText(raw);
-  const appointmentWithService = (
-    looksLikeAppointmentIntent(raw, {
-      pendingDraft: context?.hasDraft ? (context?.pendingDraft || { servicio: context?.lastServiceName || '' }) : null,
-      lastService: context?.lastServiceName ? { nombre: context.lastServiceName } : null,
-    })
-    && !isExplicitProductIntent(raw)
-    && !isExplicitCourseKeyword(raw)
-    && hasConcreteServiceSignal(raw)
-    && !!appointmentServiceQuery
-  );
   const bareAppointmentWithoutService = (
     looksLikeAppointmentIntent(raw, {
       pendingDraft: context?.hasDraft ? (context?.pendingDraft || { servicio: context?.lastServiceName || '' }) : null,
@@ -14999,7 +14933,6 @@ async function classifyAndExtract(text, context = {}) {
   );
 
   const deterministicFallback = () => {
-    if (appointmentWithService) return { type: 'SERVICE', query: appointmentServiceQuery, mode: 'DETAIL' };
     if (bareAppointmentWithoutService) return { type: 'SERVICE', query: '', mode: 'DETAIL' };
     if (/(\bcurso\b|\bcursos\b|\binscrib|\bcapacitacion|\bcapacitación|\bmasterclass\b|\btaller\b)/i.test(normalizedRaw)) {
       return { type: 'COURSE', query: raw.trim(), mode: 'DETAIL' };
@@ -15103,10 +15036,6 @@ Respondé SOLO JSON.`
     const rawType = String(obj.type || "OTHER").trim().toUpperCase();
     let rawQuery = String(obj.query || "").trim();
     const rawMode = String(obj.mode || "DETAIL").trim().toUpperCase() === 'LIST' ? 'LIST' : 'DETAIL';
-
-    if (appointmentWithService) {
-      return { type: 'SERVICE', query: rawQuery || appointmentServiceQuery, mode: 'DETAIL' };
-    }
 
     if (bareAppointmentWithoutService) {
       return { type: 'SERVICE', query: '', mode: 'DETAIL' };
@@ -16803,29 +16732,6 @@ lastCloseContext.set(waId, {
     }
 
     const rawInboundTextForHistory = compactMergedInboundText(text || userIntentText || '');
-
-    // ✅ Cierre post-turno ANTES de normalizar con IA.
-    // Si el último mensaje del bot fue "TURNO RESERVADO" / "Seña recibida"
-    // y la clienta responde "bien, gracias", "muchas gracias", etc., no dejamos que
-    // la normalización lo convierta en una nueva intención de turno.
-    if (isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
-      try { await deleteAppointmentDraft(waId); } catch {}
-      clearProductMemory(waId);
-      clearActiveAssistantOffer(waId);
-      clearPendingAmbiguousBeauty(waId);
-      clearLastResolvedBeauty(waId);
-      lastServiceByUser.delete(waId);
-      const msgCierreTurno = `¡Gracias a vos! 😊
-
-Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
-      pushHistory(waId, "user", rawInboundTextForHistory || text);
-      pushHistory(waId, "assistant", msgCierreTurno);
-      await sendWhatsAppText(phone, msgCierreTurno);
-      updateLastCloseContext(waId, { lastUserText: text, suppressInactivityPrompt: true });
-      scheduleInactivityFollowUp(waId, phone);
-      return;
-    }
-
     const routingPendingDraft = await getAppointmentDraft(waId);
     const routingPendingCourseDraft = await getCourseEnrollmentDraft(waId);
     const routingLastService = getLastKnownService(waId, routingPendingDraft);
@@ -17015,10 +16921,14 @@ Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
     // variables early because looksLikeCourseFlowSignal uses pendingCourseDraft.
     let pendingDraft = await getAppointmentDraft(waId);
     let pendingCourseDraft = await getCourseEnrollmentDraft(waId);
+    // Detect whether the current message likely belongs to a course flow.  We call this
+    // before referencing quickCourseFlow to avoid a temporal dead zone.
+    const quickCourseFlowEarly = looksLikeCourseFlowSignal(text, {
+      lastCourseContext: getLastCourseContext(waId),
+      pendingCourseDraft,
+    });
 
-    // ✅ Cierre fuerte post-turno: si el turno ya quedó reservado/confirmado y la clienta solo agradece,
-    // no reabrimos el flujo ni volvemos a pedir servicio aunque haya quedado un borrador viejo.
-    if (isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
+    if (!mediaMeta && isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
       try { await deleteAppointmentDraft(waId); } catch {}
       pendingDraft = null;
       clearProductMemory(waId);
@@ -17036,31 +16946,19 @@ Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
       return;
     }
 
-    // Detect whether the current message likely belongs to a course flow.  We call this
-    // before referencing quickCourseFlow to avoid a temporal dead zone.
-    const quickCourseFlowEarly = looksLikeCourseFlowSignal(text, {
-      lastCourseContext: getLastCourseContext(waId),
-      pendingCourseDraft,
-    });
     if (pendingDraft && !quickCourseFlowEarly) {
-      let draftControlEarly = { action: 'UNCLEAR', reason: '', source: 'not_checked' };
-      let shouldSkipDraftControlEarly = false;
-      try {
-        const earlyServicesForDraft = await getServicesCatalog();
-        shouldSkipDraftControlEarly = looksLikeServiceSelectionForAppointmentFlow(text, earlyServicesForDraft, { pendingDraft });
-      } catch {}
+      const skipDraftControlEarly = !(pendingDraft?.servicio || pendingDraft?.last_service_name) && hasConcreteServiceSignal(text) && !isExplicitProductIntent(text) && !isExplicitCourseKeyword(text);
+      const draftControlEarly = skipDraftControlEarly
+        ? { action: 'UNCLEAR', reason: 'service_selection_while_awaiting_service', source: 'guard' }
+        : await classifyAppointmentDraftControl(text, {
+            serviceName: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
+            date: pendingDraft?.fecha || '',
+            time: pendingDraft?.hora || '',
+            flowStep: pendingDraft?.flow_step || '',
+            historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 10, 1200),
+          });
 
-      if (!shouldSkipDraftControlEarly) {
-        draftControlEarly = await classifyAppointmentDraftControl(text, {
-          serviceName: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
-          date: pendingDraft?.fecha || '',
-          time: pendingDraft?.hora || '',
-          flowStep: pendingDraft?.flow_step || '',
-          historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 10, 1200),
-        });
-      }
-
-      if (!shouldSkipDraftControlEarly && (draftControlEarly.action === 'PAUSE_APPOINTMENT' || draftControlEarly.action === 'SWITCH_TOPIC')) {
+      if (!skipDraftControlEarly && (draftControlEarly.action === 'PAUSE_APPOINTMENT' || draftControlEarly.action === 'SWITCH_TOPIC')) {
         await deleteAppointmentDraft(waId);
 
         const pauseIntentEarly = extractTurnoPauseIntent(text);
@@ -17583,24 +17481,18 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
     }
 
     if (pendingDraft) {
-      let draftControl = { action: 'UNCLEAR', reason: '', source: 'not_checked' };
-      let shouldSkipDraftControl = false;
-      try {
-        const servicesForDraftControl = await getServicesCatalog();
-        shouldSkipDraftControl = looksLikeServiceSelectionForAppointmentFlow(text, servicesForDraftControl, { pendingDraft });
-      } catch {}
+      const skipDraftControl = !(pendingDraft?.servicio || pendingDraft?.last_service_name) && hasConcreteServiceSignal(text) && !isExplicitProductIntent(text) && !isExplicitCourseKeyword(text);
+      const draftControl = skipDraftControl
+        ? { action: 'UNCLEAR', reason: 'service_selection_while_awaiting_service', source: 'guard' }
+        : await classifyAppointmentDraftControl(text, {
+            serviceName: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
+            date: pendingDraft?.fecha || '',
+            time: pendingDraft?.hora || '',
+            flowStep: pendingDraft?.flow_step || '',
+            historySnippet: buildConversationHistorySnippet(convForAI, 14, 1200),
+          });
 
-      if (!shouldSkipDraftControl) {
-        draftControl = await classifyAppointmentDraftControl(text, {
-          serviceName: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
-          date: pendingDraft?.fecha || '',
-          time: pendingDraft?.hora || '',
-          flowStep: pendingDraft?.flow_step || '',
-          historySnippet: buildConversationHistorySnippet(convForAI, 14, 1200),
-        });
-      }
-
-      if (!shouldSkipDraftControl && (draftControl.action === 'PAUSE_APPOINTMENT' || draftControl.action === 'SWITCH_TOPIC')) {
+      if (!skipDraftControl && (draftControl.action === 'PAUSE_APPOINTMENT' || draftControl.action === 'SWITCH_TOPIC')) {
         await deleteAppointmentDraft(waId);
         pendingDraft = null;
 
@@ -18090,10 +17982,6 @@ Ahora consulto con la estilista ${TURNOS_STYLIST_NAME}. Si ella puede en ese hor
       }
       if (result.type === "booked") {
         clearProductMemory(waId);
-        clearActiveAssistantOffer(waId);
-        clearPendingAmbiguousBeauty(waId);
-        clearLastResolvedBeauty(waId);
-        lastServiceByUser.delete(waId);
         const diaOk = weekdayEsFromYMD(base.fecha);
         const msgOk = `*TURNO RESERVADO*✅
 
@@ -18246,8 +18134,7 @@ Seña recibida ✔`.trim();
         const falt = new Set(turno?.faltantes || []);
         if (!merged.fecha) falt.add("fecha");
         if (!merged.hora) falt.add("hora");
-        if (merged.servicio) falt.delete("servicio");
-        else falt.add("servicio");
+        if (!merged.servicio) falt.add("servicio");
 
         Object.assign(merged, mergeContactIntoTurno({ turno: merged, text, waPhone: phone }));
         updateLastCloseContext(waId, { explicitName: merged.cliente_full || contactInfoFromText?.nombre || lastCloseContext.get(waId)?.explicitName || '' });
@@ -18257,12 +18144,18 @@ Seña recibida ✔`.trim();
         mergedWithPayment.last_intent = "book_appointment";
         mergedWithPayment.last_service_name = mergedWithPayment.servicio || mergedWithPayment.last_service_name || "";
 
-        if (falt.size) {
+        const faltantesReales = new Set();
+        if (!toYMD(mergedWithPayment.fecha)) faltantesReales.add('fecha');
+        if (!normalizeHourHM(mergedWithPayment.hora)) faltantesReales.add('hora');
+        if (!mergedWithPayment.servicio) faltantesReales.add('servicio');
+
+        if (faltantesReales.size) {
+          mergedWithPayment.faltantes = Array.from(faltantesReales);
           mergedWithPayment.flow_step = inferDraftFlowStep(mergedWithPayment);
           mergedWithPayment.last_intent = 'book_appointment';
           mergedWithPayment.last_service_name = mergedWithPayment.servicio || mergedWithPayment.last_service_name || '';
           await saveAppointmentDraft(waId, phone, mergedWithPayment);
-        updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+          updateLastCloseContext(waId, { suppressInactivityPrompt: true });
           await askForMissingTurnoData(mergedWithPayment);
           return;
         }
@@ -18295,8 +18188,9 @@ Seña recibida ✔`.trim();
       }
     }
 
-    if (isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
+    if (!mediaMeta && isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
       try { await deleteAppointmentDraft(waId); } catch {}
+      pendingDraft = null;
       clearProductMemory(waId);
       clearActiveAssistantOffer(waId);
       clearPendingAmbiguousBeauty(waId);
@@ -19820,3 +19714,4 @@ app.listen(PORT, () => {
     console.error('⚠️ El servidor quedó levantado para que Render no mate el deploy, pero revisá este error de bootstrap.');
   }
 })();
+                                                                                                                                                     
