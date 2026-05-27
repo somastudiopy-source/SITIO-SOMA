@@ -12657,7 +12657,18 @@ function findServices(rows, query, mode) {
     const preferred = matched.filter(r => !/(mascul|varon|hombre|barber)/i.test(normalize(`${r.nombre} ${r.categoria} ${r.subcategoria}`)));
     if (preferred.length) return preferred;
   }
-  return matched;
+  if (matched.length) return matched;
+
+  const tokenMatched = scopedRows.filter((row) => serviceRowMatchesTokenQuery(row, query));
+  if (/\bcorte\b/i.test(q) && detectFemaleContext(query)) {
+    const preferred = tokenMatched.filter(r => !/(mascul|varon|hombre|barber)/i.test(normalize(`${r.nombre} ${r.categoria} ${r.subcategoria}`)));
+    if (preferred.length) return preferred;
+  }
+  if (/\bcorte\b/i.test(q) && detectMaleContext(query)) {
+    const preferred = tokenMatched.filter(r => /(mascul|varon|hombre|barber)/i.test(normalize(`${r.nombre} ${r.categoria} ${r.subcategoria}`)));
+    if (preferred.length) return preferred;
+  }
+  return tokenMatched;
 }
 
 function sanitizeCourseSearchQuery(query) {
@@ -13688,9 +13699,20 @@ ${lines.join("\n")}${footer}`.trim());
 function normalizeServiceTokenText(value = '') {
   return normalize(cleanServiceName(value || ''))
     .replace(/\b(de|del|la|el|los|las|un|una|unos|unas|para|por|quiero|quisiera|queria|quería|sacar|reservar|agendar|turno|turnos|cita|hacerme|hacerle|hacerse|pelo|cabello|servicio|servicios)\b/g, ' ')
+    .replace(/\bcolores\b/g, 'color')
+    .replace(/\bcompletos\b/g, 'completo')
+    .replace(/\bmechitas\b/g, 'mechita')
+    .replace(/\bmechas\b/g, 'mechita')
+    .replace(/\bmecha\b/g, 'mechita')
+    .replace(/\breflejos\b/g, 'reflejo')
+    .replace(/\bhombres\b/g, 'hombre')
+    .replace(/\bmujeres\b/g, 'mujer')
+    .replace(/\bfemenina\b/g, 'femenino')
+    .replace(/\bmasculina\b/g, 'masculino')
     .replace(/\s+/g, ' ')
     .trim();
 }
+
 
 function serviceRowMatchesTokenQuery(row = {}, query = '') {
   const cleanQuery = normalizeServiceTokenText(query);
@@ -13706,6 +13728,22 @@ function serviceRowMatchesTokenQuery(row = {}, query = '') {
 
   if (!tokens.length) return false;
   return tokens.every((tok) => hay.includes(tok));
+}
+
+function looksLikeServiceSelectionForAppointmentFlow(text = '', services = [], context = {}) {
+  const raw = String(text || '').trim();
+  if (!raw || isExplicitProductIntent(raw) || isExplicitCourseKeyword(raw)) return false;
+
+  const rows = Array.isArray(services) ? services : [];
+  const explicitServiceQuery = extractServiceQueryFromAppointmentText(raw) || raw;
+
+  if (hasConcreteServiceSignal(raw)) return true;
+  if (!rows.length) return false;
+
+  const resolved = resolveServiceCatalogMatch(rows, explicitServiceQuery);
+  if (resolved?.nombre) return true;
+
+  return rows.some((row) => serviceRowMatchesTokenQuery(row, explicitServiceQuery));
 }
 
 function extractServiceQueryFromAppointmentText(text = '') {
@@ -14366,8 +14404,9 @@ function cleanAiRoutedText(value = '') {
 function hasConcreteServiceSignal(text = '') {
   const t = normalize(text || '');
   if (!t) return false;
-  return /(alisado|botox|keratina|nutricion|nutrición|corte(?: de pelo)?(?: femenino| femenino)?|mechitas|mechas|reflejos|balayage|color(?: completo)?(?:s)?|tintura|emulsion|emulsión|lavado|brushing|peinado|bano de crema|baño de crema|depilacion|depilación|uñas|unas|manicuria|manicuría|facial|masaje|cejas|pestañas|pestanias|shock de keratina|shock de botox|barberia|barbería|barber)\b/i.test(t);
+  return /(alisado|botox|keratina|nutricion|nutrición|corte(?: de pelo)?(?: femenino| masculino)?|corte femenino|corte masculino|mechita|mechitas|mecha|mechas|reflejo|reflejos|balayage|color(?: completo)?(?:s)?|colores completo(?:s)?|tintura|emulsion|emulsión|lavado|brushing|peinado|bano de crema|baño de crema|depilacion|depilación|uñas|unas|manicuria|manicuría|facial|masaje|cejas|pestañas|pestanias|shock de keratina|shock de botox|barberia|barbería|barber)\b/i.test(t);
 }
+
 
 function isGenericAppointmentOnlyQuery(query = '') {
   const t = normalize(query || '');
@@ -14390,9 +14429,11 @@ function buildFallbackInboundRoutingText(rawText = '', context = {}) {
       flowStep === 'awaiting_service'
       || assistantAskedForService
       || (!!context?.pendingDraft && !context?.pendingDraft?.servicio)
+      || looksLikeAppointmentIntent(raw, { pendingDraft: context?.pendingDraft || null, lastService: context?.lastService || null })
     )
   ) {
-    return `quiero sacar un turno para ${raw}`;
+    const serviceQuery = extractServiceQueryFromAppointmentText(raw) || raw;
+    return `quiero sacar un turno para ${serviceQuery}`.replace(/\s+/g, ' ').trim();
   }
 
   if (
@@ -14885,6 +14926,21 @@ Reglas:
     let routedText = cleanAiRoutedText(obj?.routed_text || '') || fallbackText;
     const flowHint = String(obj?.flow_hint || 'OTHER').trim().toUpperCase();
     const goal = cleanAiRoutedText(obj?.goal || '');
+
+    // Si el cliente pidió turno y nombró un servicio, la IA no puede borrar ese servicio.
+    // Ej: "quiero un turno para color completo" no puede terminar como "quiero sacar un turno".
+    if (
+      looksLikeAppointmentIntent(raw, {
+        pendingDraft: context?.pendingDraft || null,
+        lastService: context?.lastService || null,
+      })
+      && hasConcreteServiceSignal(raw)
+      && !hasConcreteServiceSignal(routedText)
+      && !isExplicitProductIntent(raw)
+      && !isExplicitCourseKeyword(raw)
+    ) {
+      routedText = fallbackText || `quiero sacar un turno para ${extractServiceQueryFromAppointmentText(raw) || raw}`.replace(/\s+/g, ' ').trim();
+    }
 
     if (
       looksLikeAppointmentIntent(raw, {
@@ -16987,15 +17043,24 @@ Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
       pendingCourseDraft,
     });
     if (pendingDraft && !quickCourseFlowEarly) {
-      const draftControlEarly = await classifyAppointmentDraftControl(text, {
-        serviceName: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
-        date: pendingDraft?.fecha || '',
-        time: pendingDraft?.hora || '',
-        flowStep: pendingDraft?.flow_step || '',
-        historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 10, 1200),
-      });
+      let draftControlEarly = { action: 'UNCLEAR', reason: '', source: 'not_checked' };
+      let shouldSkipDraftControlEarly = false;
+      try {
+        const earlyServicesForDraft = await getServicesCatalog();
+        shouldSkipDraftControlEarly = looksLikeServiceSelectionForAppointmentFlow(text, earlyServicesForDraft, { pendingDraft });
+      } catch {}
 
-      if (draftControlEarly.action === 'PAUSE_APPOINTMENT' || draftControlEarly.action === 'SWITCH_TOPIC') {
+      if (!shouldSkipDraftControlEarly) {
+        draftControlEarly = await classifyAppointmentDraftControl(text, {
+          serviceName: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
+          date: pendingDraft?.fecha || '',
+          time: pendingDraft?.hora || '',
+          flowStep: pendingDraft?.flow_step || '',
+          historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 10, 1200),
+        });
+      }
+
+      if (!shouldSkipDraftControlEarly && (draftControlEarly.action === 'PAUSE_APPOINTMENT' || draftControlEarly.action === 'SWITCH_TOPIC')) {
         await deleteAppointmentDraft(waId);
 
         const pauseIntentEarly = extractTurnoPauseIntent(text);
@@ -17518,15 +17583,24 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
     }
 
     if (pendingDraft) {
-      const draftControl = await classifyAppointmentDraftControl(text, {
-        serviceName: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
-        date: pendingDraft?.fecha || '',
-        time: pendingDraft?.hora || '',
-        flowStep: pendingDraft?.flow_step || '',
-        historySnippet: buildConversationHistorySnippet(convForAI, 14, 1200),
-      });
+      let draftControl = { action: 'UNCLEAR', reason: '', source: 'not_checked' };
+      let shouldSkipDraftControl = false;
+      try {
+        const servicesForDraftControl = await getServicesCatalog();
+        shouldSkipDraftControl = looksLikeServiceSelectionForAppointmentFlow(text, servicesForDraftControl, { pendingDraft });
+      } catch {}
 
-      if (draftControl.action === 'PAUSE_APPOINTMENT' || draftControl.action === 'SWITCH_TOPIC') {
+      if (!shouldSkipDraftControl) {
+        draftControl = await classifyAppointmentDraftControl(text, {
+          serviceName: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
+          date: pendingDraft?.fecha || '',
+          time: pendingDraft?.hora || '',
+          flowStep: pendingDraft?.flow_step || '',
+          historySnippet: buildConversationHistorySnippet(convForAI, 14, 1200),
+        });
+      }
+
+      if (!shouldSkipDraftControl && (draftControl.action === 'PAUSE_APPOINTMENT' || draftControl.action === 'SWITCH_TOPIC')) {
         await deleteAppointmentDraft(waId);
         pendingDraft = null;
 
@@ -18172,7 +18246,8 @@ Seña recibida ✔`.trim();
         const falt = new Set(turno?.faltantes || []);
         if (!merged.fecha) falt.add("fecha");
         if (!merged.hora) falt.add("hora");
-        if (!merged.servicio) falt.add("servicio");
+        if (merged.servicio) falt.delete("servicio");
+        else falt.add("servicio");
 
         Object.assign(merged, mergeContactIntoTurno({ turno: merged, text, waPhone: phone }));
         updateLastCloseContext(waId, { explicitName: merged.cliente_full || contactInfoFromText?.nombre || lastCloseContext.get(waId)?.explicitName || '' });
