@@ -6071,6 +6071,48 @@ function lastAssistantLooksLikeTurnoMessage(waId) {
   return /(turno reservado|solicitud recibida|sena recibida|comprobante recibido|lo estoy validando|datos para la transferencia|cuando haga la transferencia|ahora necesito este dato)/i.test(t);
 }
 
+function lastAssistantLooksLikeTurnoClosedMessage(waId) {
+  const last = getLastAssistantMessage(waId);
+  const t = normalize(last?.content || '');
+  if (!t) return false;
+  return /(turno reservado|turno confirmado|turno ya quedo registrado|sena recibida|seña recibida)/i.test(t);
+}
+
+function isFinalTurnoPoliteClosure(text = '') {
+  const raw = String(text || '').trim();
+  const t = normalizeShortReply(raw);
+  if (!t) return false;
+  if (/[?¿]/.test(raw)) return false;
+
+  if (isPoliteClosureAfterTurno(raw)) return true;
+
+  if (/^(muchas\s+)?gracias(\s+(a\s+vos|por\s+todo|por\s+registrar(?:\s+el\s+turno)?|por\s+la\s+atencion|por\s+la\s+atención|igual|listo|ya\s+esta|ya\s+está))?$/.test(t)) {
+    return true;
+  }
+
+  if (/^(listo|perfecto|genial|joya|barbaro|bárbaro|buenisimo|buenísimo)\s*,?\s*(gracias|muchas\s+gracias)(\s+(por\s+todo|por\s+registrar(?:\s+el\s+turno)?))?$/.test(t)) {
+    return true;
+  }
+
+  return false;
+}
+
+async function closeFinishedTurnoConversation({ waId = '', phone = '' } = {}) {
+  try { await deleteAppointmentDraft(waId); } catch {}
+
+  clearProductMemory(waId);
+  clearActiveAssistantOffer(waId);
+  clearPendingAmbiguousBeauty(waId);
+  clearLastResolvedBeauty(waId);
+
+  const msgCierreTurno = `¡Gracias a vos! 😊
+
+Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
+  pushHistory(waId, "assistant", msgCierreTurno);
+  await sendWhatsAppText(phone, msgCierreTurno);
+  updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+}
+
 function lastAssistantLooksLikeCatalogMessage(waId) {
   const last = getLastAssistantMessage(waId);
   const t = normalize(last?.content || '');
@@ -16657,6 +16699,16 @@ lastCloseContext.set(waId, {
     const routingLastCourseContext = getLastCourseContext(waId);
     const routingLastProductContext = getLastProductContext(waId);
     const routingHistorySnippet = buildConversationHistorySnippet(ensureConv(waId).messages || [], 14, 1800);
+
+    // ✅ Cierre inmediato de turno ya reservado.
+    // Si la clienta responde "muchas gracias" después de TURNO RESERVADO / SEÑA RECIBIDA,
+    // no debe volver a entrar al flujo de turnos ni pedir servicio otra vez.
+    if (isFinalTurnoPoliteClosure(userIntentText || text) && lastAssistantLooksLikeTurnoClosedMessage(waId)) {
+      pushHistory(waId, "user", rawInboundTextForHistory || text);
+      await closeFinishedTurnoConversation({ waId, phone });
+      return;
+    }
+
     const inboundRouting = await normalizeInboundForRoutingWithAI(userIntentText || text, {
       pendingDraft: routingPendingDraft,
       pendingCourseDraft: routingPendingCourseDraft,
@@ -18076,15 +18128,8 @@ Seña recibida ✔`.trim();
       }
     }
 
-    if (!pendingDraft && isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
-      clearProductMemory(waId);
-      clearActiveAssistantOffer(waId);
-      const msgCierreTurno = `¡Gracias a vos! 😊
-
-Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
-      pushHistory(waId, "assistant", msgCierreTurno);
-      await sendWhatsAppText(phone, msgCierreTurno);
-      updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+    if (!pendingDraft && isFinalTurnoPoliteClosure(text) && lastAssistantLooksLikeTurnoClosedMessage(waId)) {
+      await closeFinishedTurnoConversation({ waId, phone });
       return;
     }
 
