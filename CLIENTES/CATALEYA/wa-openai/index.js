@@ -6088,7 +6088,7 @@ function normalizeShortReply(text) {
 function isPoliteClosureAfterTurno(text) {
   const t = normalizeShortReply(text || '');
   if (!t) return false;
-  return /^(gracias|muchas gracias|mil gracias|genial gracias|perfecto gracias|perfecto muchas gracias|buenisimo gracias|buenisimo muchas gracias|buenisimo|buenisima|genial|perfecto|listo gracias|ok gracias|oka gracias|dale gracias|barbaro gracias|barbaro|joya|joya gracias)$/.test(t);
+  return /^(gracias|muchas gracias|mil gracias|bien gracias|bien muchas gracias|bien mil gracias|esta bien gracias|está bien gracias|todo bien gracias|todo bien muchas gracias|genial gracias|perfecto gracias|perfecto muchas gracias|buenisimo gracias|buenisimo muchas gracias|buenisimo|buenisima|genial|perfecto|listo|listo gracias|ok gracias|oka gracias|dale gracias|barbaro gracias|barbaro|joya|joya gracias)$/.test(t);
 }
 
 function isPoliteCatalogDecline(text) {
@@ -14014,6 +14014,7 @@ function looksLikeAppointmentContextFollowUp(text, { pendingDraft, lastService }
 }
 
 function looksLikeAppointmentIntent(text, { pendingDraft, lastService } = {}) {
+  if (isPoliteClosureAfterTurno(text)) return false;
   const t = normalize(text || '');
   if (/(\bturno\b|\breserv\w*\b|\bagend\w*\b|\bcita\b)/i.test(t)) return true;
   if (pendingDraft && /(si|sí|dale|ok|oka|quiero|quiero seguir|continuar|confirmar|bien|perfecto)/i.test(t)) return true;
@@ -14798,6 +14799,19 @@ async function normalizeInboundForRoutingWithAI(rawText, context = {}) {
       flow_hint: 'OTHER',
       goal: '',
       source: 'empty',
+    };
+  }
+
+  const lastAssistantForRouting = normalize(context?.lastAssistantMessage || '');
+  if (
+    isPoliteClosureAfterTurno(raw)
+    && /(turno reservado|solicitud recibida|sena recibida|comprobante recibido|lo estoy validando|datos para la transferencia|cuando haga la transferencia|ahora necesito este dato)/i.test(lastAssistantForRouting)
+  ) {
+    return {
+      routed_text: raw,
+      flow_hint: 'OTHER',
+      goal: 'cierre_turno',
+      source: 'post_appointment_closure_guard',
     };
   }
 
@@ -16733,6 +16747,29 @@ lastCloseContext.set(waId, {
     }
 
     const rawInboundTextForHistory = compactMergedInboundText(text || userIntentText || '');
+
+    // ✅ Cierre post-turno ANTES de normalizar con IA.
+    // Si el último mensaje del bot fue "TURNO RESERVADO" / "Seña recibida"
+    // y la clienta responde "bien, gracias", "muchas gracias", etc., no dejamos que
+    // la normalización lo convierta en una nueva intención de turno.
+    if (isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
+      try { await deleteAppointmentDraft(waId); } catch {}
+      clearProductMemory(waId);
+      clearActiveAssistantOffer(waId);
+      clearPendingAmbiguousBeauty(waId);
+      clearLastResolvedBeauty(waId);
+      lastServiceByUser.delete(waId);
+      const msgCierreTurno = `¡Gracias a vos! 😊
+
+Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
+      pushHistory(waId, "user", rawInboundTextForHistory || text);
+      pushHistory(waId, "assistant", msgCierreTurno);
+      await sendWhatsAppText(phone, msgCierreTurno);
+      updateLastCloseContext(waId, { lastUserText: text, suppressInactivityPrompt: true });
+      scheduleInactivityFollowUp(waId, phone);
+      return;
+    }
+
     const routingPendingDraft = await getAppointmentDraft(waId);
     const routingPendingCourseDraft = await getCourseEnrollmentDraft(waId);
     const routingLastService = getLastKnownService(waId, routingPendingDraft);
@@ -16932,6 +16969,7 @@ lastCloseContext.set(waId, {
       clearActiveAssistantOffer(waId);
       clearPendingAmbiguousBeauty(waId);
       clearLastResolvedBeauty(waId);
+      lastServiceByUser.delete(waId);
       const msgCierreTurno = `¡Gracias a vos! 😊
 
 Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
@@ -17978,6 +18016,10 @@ Ahora consulto con la estilista ${TURNOS_STYLIST_NAME}. Si ella puede en ese hor
       }
       if (result.type === "booked") {
         clearProductMemory(waId);
+        clearActiveAssistantOffer(waId);
+        clearPendingAmbiguousBeauty(waId);
+        clearLastResolvedBeauty(waId);
+        lastServiceByUser.delete(waId);
         const diaOk = weekdayEsFromYMD(base.fecha);
         const msgOk = `*TURNO RESERVADO*✅
 
@@ -18179,8 +18221,12 @@ Seña recibida ✔`.trim();
     }
 
     if (isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
+      try { await deleteAppointmentDraft(waId); } catch {}
       clearProductMemory(waId);
       clearActiveAssistantOffer(waId);
+      clearPendingAmbiguousBeauty(waId);
+      clearLastResolvedBeauty(waId);
+      lastServiceByUser.delete(waId);
       const msgCierreTurno = `¡Gracias a vos! 😊
 
 Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
