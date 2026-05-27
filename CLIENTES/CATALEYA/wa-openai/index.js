@@ -14400,7 +14400,7 @@ function looksLikeOperationalPayloadForCurrentFlow(text = '', context = {}) {
   const hasContactData = !!(contactInfo?.nombre || contactInfo?.telefono);
   const hasDni = !!extractStudentDni(raw);
   const hasProof = looksLikePaymentProofText(raw) || looksLikeProofAlreadySent(raw) || isLikelyPaymentText(raw);
-  const hasHour = !!normalizeHourHM(raw) || /(\b\d{1,2}\s*(hs|horas?)\b)/i.test(raw);
+  const hasHour = !!normalizeHourHM(raw) || !!extractLikelyHourFromText(raw) || /(\b\d{1,2}\s*(hs|horas?)\b)/i.test(raw);
   const hasDateLike = /(hoy|mañana|manana|pasado|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|\b\d{1,2}[\/.-]\d{1,2}(?:[\/.-]\d{2,4})?\b)/i.test(raw);
   const hasAffirmativeContinue = isWarmAffirmativeReply(raw) || /^(confirmo|confirmado|listo|perfecto|dale|si|sí|ok|oka|de una)$/i.test(t);
 
@@ -14735,6 +14735,20 @@ async function normalizeInboundForRoutingWithAI(rawText, context = {}) {
     };
   }
 
+  if (
+    context?.pendingDraft
+    && looksLikeOperationalPayloadForCurrentFlow(raw, context)
+    && !isExplicitProductIntent(raw)
+    && !isExplicitCourseKeyword(raw)
+  ) {
+    return {
+      routed_text: raw,
+      flow_hint: 'SERVICE',
+      goal: 'continuacion_turno',
+      source: 'appointment_state_guard',
+    };
+  }
+
   const fallbackText = buildFallbackInboundRoutingText(raw, context) || raw;
 
   try {
@@ -14800,6 +14814,7 @@ Reglas:
       && !isExplicitProductIntent(raw)
       && !isExplicitCourseKeyword(raw)
       && !hasConcreteServiceSignal(`${raw} ${routedText}`)
+      && !looksLikeOperationalPayloadForCurrentFlow(raw, context)
     ) {
       routedText = 'quiero sacar un turno';
     }
