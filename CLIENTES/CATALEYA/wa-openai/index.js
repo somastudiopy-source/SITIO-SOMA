@@ -6071,48 +6071,6 @@ function lastAssistantLooksLikeTurnoMessage(waId) {
   return /(turno reservado|solicitud recibida|sena recibida|comprobante recibido|lo estoy validando|datos para la transferencia|cuando haga la transferencia|ahora necesito este dato)/i.test(t);
 }
 
-function lastAssistantLooksLikeTurnoClosedMessage(waId) {
-  const last = getLastAssistantMessage(waId);
-  const t = normalize(last?.content || '');
-  if (!t) return false;
-  return /(turno reservado|turno confirmado|turno ya quedo registrado|sena recibida|seña recibida)/i.test(t);
-}
-
-function isFinalTurnoPoliteClosure(text = '') {
-  const raw = String(text || '').trim();
-  const t = normalizeShortReply(raw);
-  if (!t) return false;
-  if (/[?¿]/.test(raw)) return false;
-
-  if (isPoliteClosureAfterTurno(raw)) return true;
-
-  if (/^(muchas\s+)?gracias(\s+(a\s+vos|por\s+todo|por\s+registrar(?:\s+el\s+turno)?|por\s+la\s+atencion|por\s+la\s+atención|igual|listo|ya\s+esta|ya\s+está))?$/.test(t)) {
-    return true;
-  }
-
-  if (/^(listo|perfecto|genial|joya|barbaro|bárbaro|buenisimo|buenísimo)\s*,?\s*(gracias|muchas\s+gracias)(\s+(por\s+todo|por\s+registrar(?:\s+el\s+turno)?))?$/.test(t)) {
-    return true;
-  }
-
-  return false;
-}
-
-async function closeFinishedTurnoConversation({ waId = '', phone = '' } = {}) {
-  try { await deleteAppointmentDraft(waId); } catch {}
-
-  clearProductMemory(waId);
-  clearActiveAssistantOffer(waId);
-  clearPendingAmbiguousBeauty(waId);
-  clearLastResolvedBeauty(waId);
-
-  const msgCierreTurno = `¡Gracias a vos! 😊
-
-Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
-  pushHistory(waId, "assistant", msgCierreTurno);
-  await sendWhatsAppText(phone, msgCierreTurno);
-  updateLastCloseContext(waId, { suppressInactivityPrompt: true });
-}
-
 function lastAssistantLooksLikeCatalogMessage(waId) {
   const last = getLastAssistantMessage(waId);
   const t = normalize(last?.content || '');
@@ -11268,6 +11226,16 @@ function resolveServiceCatalogMatch(rows, serviceName) {
   const detailMatches = findServices(rows, query, 'DETAIL');
   if (detailMatches.length) return detailMatches[0];
 
+  const tokenMatches = rows
+    .filter((row) => serviceRowMatchesTokenQuery(row, query))
+    .filter((row) => {
+      const hay = normalize(`${row?.nombre || ''} ${row?.categoria || ''} ${row?.subcategoria || ''}`);
+      if (/\bcorte\b/i.test(normalize(query)) && detectFemaleContext(query)) return !/(mascul|varon|hombre|barber)/i.test(hay);
+      if (/\bcorte\b/i.test(normalize(query)) && detectMaleContext(query)) return /(mascul|varon|hombre|barber)/i.test(hay);
+      return true;
+    });
+  if (tokenMatches.length) return tokenMatches[0];
+
   const baseQuery = getServiceBaseFromName(query);
   if (baseQuery) {
     const byBase = rows.filter((r) => getServiceBaseFromName(r?.nombre || '') === baseQuery);
@@ -13717,26 +13685,82 @@ ${lines.join("\n")}${footer}`.trim());
   return chunks;
 }
 
+function normalizeServiceTokenText(value = '') {
+  return normalize(cleanServiceName(value || ''))
+    .replace(/\b(de|del|la|el|los|las|un|una|unos|unas|para|por|quiero|quisiera|queria|quería|sacar|reservar|agendar|turno|turnos|cita|hacerme|hacerle|hacerse|pelo|cabello|servicio|servicios)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function serviceRowMatchesTokenQuery(row = {}, query = '') {
+  const cleanQuery = normalizeServiceTokenText(query);
+  if (!cleanQuery) return false;
+
+  const hay = normalizeServiceTokenText([row?.nombre, row?.categoria, row?.subcategoria].filter(Boolean).join(' '));
+  if (!hay) return false;
+
+  const tokens = cleanQuery
+    .split(' ')
+    .map((x) => x.trim())
+    .filter((x) => x.length >= 3);
+
+  if (!tokens.length) return false;
+  return tokens.every((tok) => hay.includes(tok));
+}
+
+function extractServiceQueryFromAppointmentText(text = '') {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return '';
+
+  let out = raw
+    .replace(/^(hola+|holaa+|buenas+|buen dia|buen día|buenos dias|buenos días|buenas tardes|buenas noches)[,!\.\s-]*/i, '')
+    .replace(/\b(quiero|quisiera|queria|quería|necesito|me gustaria|me gustaría)\b/gi, ' ')
+    .replace(/\b(sacar|pedir|reservar|agendar|coordinar|solicitar)\b/gi, ' ')
+    .replace(/\b(un|una|el|la|mi|su)\b/gi, ' ')
+    .replace(/\b(turno|turnitos|cita|reserva)\b/gi, ' ')
+    .replace(/\b(para|por|de)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  out = out
+    .replace(/\b(hoy|mañana|manana|pasado mañana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo)\b.*$/i, '')
+    .replace(/\ba\s+las\s+\d{1,2}.*$/i, '')
+    .replace(/\b\d{1,2}[:.]\d{2}\b.*$/i, '')
+    .replace(/\b\d{1,2}\s*(hs|horas?)\b.*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return out;
+}
+
 function resolveReliableTurnService({ services = [], text = '', pendingDraft = null, lastKnownService = null, aiService = '' } = {}) {
   const rows = Array.isArray(services) ? services : [];
   const currentDraftService = pendingDraft?.servicio || pendingDraft?.last_service_name || '';
   const currentKnownService = currentDraftService || lastKnownService?.nombre || '';
+  const explicitServiceQuery = extractServiceQueryFromAppointmentText(text);
 
-  const directMatches = text ? findServices(rows, text, 'DETAIL') : [];
-  const directName = directMatches[0]?.nombre || '';
-  if (directName) return directName;
+  const candidates = Array.from(new Set([
+    explicitServiceQuery,
+    aiService,
+    text,
+  ].map((x) => String(x || '').trim()).filter(Boolean)));
+
+  for (const candidate of candidates) {
+    const resolved = resolveServiceCatalogMatch(rows, candidate);
+    if (resolved?.nombre) return resolved.nombre;
+
+    const tokenMatches = rows
+      .filter((row) => serviceRowMatchesTokenQuery(row, candidate))
+      .filter((row) => {
+        const hay = normalize(`${row?.nombre || ''} ${row?.categoria || ''} ${row?.subcategoria || ''}`);
+        if (/\bcorte\b/i.test(normalize(candidate)) && detectFemaleContext(candidate)) return !/(mascul|varon|hombre|barber)/i.test(hay);
+        if (/\bcorte\b/i.test(normalize(candidate)) && detectMaleContext(candidate)) return /(mascul|varon|hombre|barber)/i.test(hay);
+        return true;
+      });
+    if (tokenMatches.length) return tokenMatches[0].nombre;
+  }
 
   if (currentKnownService) return currentKnownService;
-
-  const aiResolved = resolveServiceCatalogMatch(rows, aiService || '');
-  if (!aiResolved?.nombre) return '';
-
-  const cleanText = normalize(text || '');
-  const cleanAi = normalize(cleanServiceName(aiResolved.nombre));
-  const aiBase = getServiceBaseFromName(aiResolved.nombre);
-
-  if (cleanAi && cleanText.includes(cleanAi)) return aiResolved.nombre;
-  if (aiBase && cleanText.includes(aiBase)) return aiResolved.nombre;
 
   return '';
 }
@@ -14883,6 +14907,17 @@ Reglas:
 async function classifyAndExtract(text, context = {}) {
   const raw = String(text || '').trim();
   const normalizedRaw = normalize(raw);
+  const appointmentServiceQuery = extractServiceQueryFromAppointmentText(raw);
+  const appointmentWithService = (
+    looksLikeAppointmentIntent(raw, {
+      pendingDraft: context?.hasDraft ? (context?.pendingDraft || { servicio: context?.lastServiceName || '' }) : null,
+      lastService: context?.lastServiceName ? { nombre: context.lastServiceName } : null,
+    })
+    && !isExplicitProductIntent(raw)
+    && !isExplicitCourseKeyword(raw)
+    && hasConcreteServiceSignal(raw)
+    && !!appointmentServiceQuery
+  );
   const bareAppointmentWithoutService = (
     looksLikeAppointmentIntent(raw, {
       pendingDraft: context?.hasDraft ? (context?.pendingDraft || { servicio: context?.lastServiceName || '' }) : null,
@@ -14894,6 +14929,7 @@ async function classifyAndExtract(text, context = {}) {
   );
 
   const deterministicFallback = () => {
+    if (appointmentWithService) return { type: 'SERVICE', query: appointmentServiceQuery, mode: 'DETAIL' };
     if (bareAppointmentWithoutService) return { type: 'SERVICE', query: '', mode: 'DETAIL' };
     if (/(\bcurso\b|\bcursos\b|\binscrib|\bcapacitacion|\bcapacitación|\bmasterclass\b|\btaller\b)/i.test(normalizedRaw)) {
       return { type: 'COURSE', query: raw.trim(), mode: 'DETAIL' };
@@ -14997,6 +15033,10 @@ Respondé SOLO JSON.`
     const rawType = String(obj.type || "OTHER").trim().toUpperCase();
     let rawQuery = String(obj.query || "").trim();
     const rawMode = String(obj.mode || "DETAIL").trim().toUpperCase() === 'LIST' ? 'LIST' : 'DETAIL';
+
+    if (appointmentWithService) {
+      return { type: 'SERVICE', query: rawQuery || appointmentServiceQuery, mode: 'DETAIL' };
+    }
 
     if (bareAppointmentWithoutService) {
       return { type: 'SERVICE', query: '', mode: 'DETAIL' };
@@ -16699,16 +16739,6 @@ lastCloseContext.set(waId, {
     const routingLastCourseContext = getLastCourseContext(waId);
     const routingLastProductContext = getLastProductContext(waId);
     const routingHistorySnippet = buildConversationHistorySnippet(ensureConv(waId).messages || [], 14, 1800);
-
-    // ✅ Cierre inmediato de turno ya reservado.
-    // Si la clienta responde "muchas gracias" después de TURNO RESERVADO / SEÑA RECIBIDA,
-    // no debe volver a entrar al flujo de turnos ni pedir servicio otra vez.
-    if (isFinalTurnoPoliteClosure(userIntentText || text) && lastAssistantLooksLikeTurnoClosedMessage(waId)) {
-      pushHistory(waId, "user", rawInboundTextForHistory || text);
-      await closeFinishedTurnoConversation({ waId, phone });
-      return;
-    }
-
     const inboundRouting = await normalizeInboundForRoutingWithAI(userIntentText || text, {
       pendingDraft: routingPendingDraft,
       pendingCourseDraft: routingPendingCourseDraft,
@@ -16892,6 +16922,26 @@ lastCloseContext.set(waId, {
     // variables early because looksLikeCourseFlowSignal uses pendingCourseDraft.
     let pendingDraft = await getAppointmentDraft(waId);
     let pendingCourseDraft = await getCourseEnrollmentDraft(waId);
+
+    // ✅ Cierre fuerte post-turno: si el turno ya quedó reservado/confirmado y la clienta solo agradece,
+    // no reabrimos el flujo ni volvemos a pedir servicio aunque haya quedado un borrador viejo.
+    if (isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
+      try { await deleteAppointmentDraft(waId); } catch {}
+      pendingDraft = null;
+      clearProductMemory(waId);
+      clearActiveAssistantOffer(waId);
+      clearPendingAmbiguousBeauty(waId);
+      clearLastResolvedBeauty(waId);
+      const msgCierreTurno = `¡Gracias a vos! 😊
+
+Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
+      pushHistory(waId, "assistant", msgCierreTurno);
+      await sendWhatsAppText(phone, msgCierreTurno);
+      updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+      scheduleInactivityFollowUp(waId, phone);
+      return;
+    }
+
     // Detect whether the current message likely belongs to a course flow.  We call this
     // before referencing quickCourseFlow to avoid a temporal dead zone.
     const quickCourseFlowEarly = looksLikeCourseFlowSignal(text, {
@@ -18128,8 +18178,15 @@ Seña recibida ✔`.trim();
       }
     }
 
-    if (!pendingDraft && isFinalTurnoPoliteClosure(text) && lastAssistantLooksLikeTurnoClosedMessage(waId)) {
-      await closeFinishedTurnoConversation({ waId, phone });
+    if (isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
+      clearProductMemory(waId);
+      clearActiveAssistantOffer(waId);
+      const msgCierreTurno = `¡Gracias a vos! 😊
+
+Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
+      pushHistory(waId, "assistant", msgCierreTurno);
+      await sendWhatsAppText(phone, msgCierreTurno);
+      updateLastCloseContext(waId, { suppressInactivityPrompt: true });
       return;
     }
 
