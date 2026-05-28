@@ -6068,7 +6068,16 @@ function lastAssistantLooksLikeTurnoMessage(waId) {
   const last = getLastAssistantMessage(waId);
   const t = normalize(last?.content || '');
   if (!t) return false;
-  return /(turno reservado|solicitud recibida|sena recibida|comprobante recibido|lo estoy validando|datos para la transferencia|cuando haga la transferencia|ahora necesito este dato)/i.test(t);
+
+  return /(turno reservado|turno confirmado|tu turno ya quedo registrado|turno ya quedo registrado|solicitud recibida|sena recibida|seña recibida|comprobante recibido|lo estoy validando|datos para la transferencia|cuando haga la transferencia|ahora necesito este dato)/i.test(t);
+}
+
+function lastAssistantLooksLikeFinalTurnoMessage(waId) {
+  const last = getLastAssistantMessage(waId);
+  const t = normalize(last?.content || '');
+  if (!t) return false;
+
+  return /(turno reservado|turno confirmado|tu turno ya quedo registrado|turno ya quedo registrado|seña recibida|sena recibida)/i.test(t);
 }
 
 function lastAssistantLooksLikeCatalogMessage(waId) {
@@ -6088,7 +6097,69 @@ function normalizeShortReply(text) {
 function isPoliteClosureAfterTurno(text) {
   const t = normalizeShortReply(text || '');
   if (!t) return false;
-  return /^(gracias|muchas gracias|mil gracias|bien gracias|bien muchas gracias|todo bien gracias|esta bien gracias|está bien gracias|genial gracias|perfecto gracias|perfecto muchas gracias|buenisimo gracias|buenisimo muchas gracias|buenisimo|buenisima|genial|perfecto|listo gracias|ok gracias|oka gracias|dale gracias|barbaro gracias|barbaro|joya|joya gracias)$/.test(t);
+  return /^(gracias|muchas gracias|mil gracias|genial gracias|perfecto gracias|perfecto muchas gracias|buenisimo gracias|buenisimo muchas gracias|buenisimo|buenisima|genial|perfecto|listo gracias|ok gracias|oka gracias|dale gracias|barbaro gracias|barbaro|joya|joya gracias)$/.test(t);
+}
+
+function isClosedTurnoContextQuestion(text = '') {
+  const t = normalize(text || '');
+  if (!t) return false;
+
+  // Si pide otro turno, no se toma como cierre: deja que el flujo normal inicie uno nuevo.
+  if (/(otro turno|nuevo turno|sacar turno|quiero turno|quiero sacar|reservar|agendar)/i.test(t)) {
+    return false;
+  }
+
+  return /(mi turno|el turno|a que hora|a qué hora|que hora|qué hora|que dia|qué día|cuando era|cuándo era|cuando tengo|cuándo tengo|me recordas|me recordás|recordame|confirmado|confirmada|seña|sena|comprobante|servicio|fecha|hora|telefono|teléfono|direccion|dirección|donde queda|dónde queda)/i.test(t);
+}
+
+function buildClosedTurnoContextReply(appt = null) {
+  if (!appt) {
+    return `Sí 😊 El turno ya quedó registrado.
+
+Si necesitás consultar algo puntual, decime y te ayudo.`;
+  }
+
+  const servicio = appt.service_name || appt.servicio || '';
+  const fecha = appt.fecha ? ymdToDMY(appt.fecha) : '';
+  const dia = appt.fecha ? weekdayEsFromYMD(appt.fecha) : '';
+  const hora = normalizeHourHM(appt.hora || '') || appt.hora || '';
+  const cliente = appt.client_name || appt.cliente_full || '';
+
+  return `Sí 😊 Te recuerdo el turno:
+
+${servicio ? `Servicio: ${servicio}\n` : ''}${fecha ? `📅 Día: ${dia ? `${dia} ` : ''}${fecha}\n` : ''}${hora ? `🕐 Hora: ${hora}\n` : ''}${cliente ? `👤 Cliente: ${cliente}\n` : ''}
+El turno ya quedó registrado con la seña recibida ✔`.trim();
+}
+
+async function closeFinishedTurnoRuntimeState({ waId, phone } = {}) {
+  try { await deleteAppointmentDraft(waId); } catch {}
+  clearPendingStylistSuggestion(waId);
+  pendingTurnos.delete(waId);
+
+  clearProductMemory(waId);
+  clearActiveAssistantOffer(waId);
+  clearPendingAmbiguousBeauty(waId);
+  clearLastResolvedBeauty(waId);
+  clearLastCourseContext(waId);
+  lastServiceByUser.delete(waId);
+
+  if (inactivityTimers.has(waId)) {
+    clearTimeout(inactivityTimers.get(waId));
+    inactivityTimers.delete(waId);
+  }
+
+  if (closeTimers.has(waId)) {
+    clearTimeout(closeTimers.get(waId));
+    closeTimers.delete(waId);
+  }
+
+  updateLastCloseContext(waId, {
+    waId,
+    phone,
+    suppressInactivityPrompt: true,
+    intentType: 'SERVICE',
+    interest: 'TURNO_CONFIRMADO',
+  });
 }
 
 function isPoliteCatalogDecline(text) {
@@ -11210,52 +11281,6 @@ function parseServiceDurationToMinutes(value) {
   return 0;
 }
 
-
-function normalizeServiceTokenText(value = '') {
-  return normalize(cleanServiceName(value || ''))
-    .replace(/\b(de|del|la|el|los|las|un|una|unos|unas|para|por|quiero|quisiera|queria|quería|sacar|pedir|reservar|agendar|coordinar|solicitar|turno|turnos|cita|reserva|hacerme|hacerle|hacerse|pelo|cabello|servicio|servicios)\b/g, ' ')
-    .replace(/\bcolores\b/g, 'color')
-    .replace(/\bcompletos\b/g, 'completo')
-    .replace(/\bmechitas\b/g, 'mechita')
-    .replace(/\bmechas\b/g, 'mechita')
-    .replace(/\bmecha\b/g, 'mechita')
-    .replace(/\breflejos\b/g, 'reflejo')
-    .replace(/\bhombres\b/g, 'hombre')
-    .replace(/\bmujeres\b/g, 'mujer')
-    .replace(/\bfemenina\b/g, 'femenino')
-    .replace(/\bmasculina\b/g, 'masculino')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function serviceRowMatchesTokenQuery(row = {}, query = '') {
-  const cleanQuery = normalizeServiceTokenText(query);
-  if (!cleanQuery) return false;
-  const hay = normalizeServiceTokenText([row?.nombre, row?.categoria, row?.subcategoria].filter(Boolean).join(' '));
-  if (!hay) return false;
-  const tokens = cleanQuery.split(' ').map((x) => x.trim()).filter((x) => x.length >= 3);
-  if (!tokens.length) return false;
-  return tokens.every((tok) => hay.includes(tok));
-}
-
-function extractServiceQueryFromAppointmentText(text = '') {
-  const raw = String(text || '').replace(/\s+/g, ' ').trim();
-  if (!raw) return '';
-  return raw
-    .replace(/^(hola+|holaa+|buenas+|buen dia|buen día|buenos dias|buenos días|buenas tardes|buenas noches)[,!\.\s-]*/i, '')
-    .replace(/\b(quiero|quisiera|queria|quería|necesito|me gustaria|me gustaría)\b/gi, ' ')
-    .replace(/\b(sacar|pedir|reservar|agendar|coordinar|solicitar)\b/gi, ' ')
-    .replace(/\b(un|una|el|la|mi|su)\b/gi, ' ')
-    .replace(/\b(turno|turnitos|cita|reserva)\b/gi, ' ')
-    .replace(/\b(para|por|de)\b/gi, ' ')
-    .replace(/\b(hoy|mañana|manana|pasado mañana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo)\b.*$/i, '')
-    .replace(/\ba\s+las\s+\d{1,2}.*$/i, '')
-    .replace(/\b\d{1,2}[:.]\d{2}\b.*$/i, '')
-    .replace(/\b\d{1,2}\s*(hs|horas?)\b.*$/i, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
 function resolveServiceCatalogMatch(rows, serviceName) {
   const query = String(serviceName || '').trim();
   if (!query) return null;
@@ -11271,15 +11296,6 @@ function resolveServiceCatalogMatch(rows, serviceName) {
 
   const detailMatches = findServices(rows, query, 'DETAIL');
   if (detailMatches.length) return detailMatches[0];
-
-  const explicitServiceQuery = extractServiceQueryFromAppointmentText(query);
-  if (explicitServiceQuery && explicitServiceQuery !== query) {
-    const explicitMatches = findServices(rows, explicitServiceQuery, 'DETAIL');
-    if (explicitMatches.length) return explicitMatches[0];
-  }
-
-  const tokenMatches = rows.filter((row) => serviceRowMatchesTokenQuery(row, explicitServiceQuery || query));
-  if (tokenMatches.length) return tokenMatches[0];
 
   const baseQuery = getServiceBaseFromName(query);
   if (baseQuery) {
@@ -11304,8 +11320,7 @@ async function applyCatalogServiceDataToTurno(turno) {
       base.duracion_min = durationMin;
     }
 
-    if (match?.nombre) {
-      base.servicio = match.nombre;
+    if (match?.nombre && !base.last_service_name) {
       base.last_service_name = match.nombre;
     }
 
@@ -12703,18 +12718,7 @@ function findServices(rows, query, mode) {
     const preferred = matched.filter(r => !/(mascul|varon|hombre|barber)/i.test(normalize(`${r.nombre} ${r.categoria} ${r.subcategoria}`)));
     if (preferred.length) return preferred;
   }
-  if (matched.length) return matched;
-
-  const tokenMatched = scopedRows.filter((row) => serviceRowMatchesTokenQuery(row, query));
-  if (/\bcorte\b/i.test(q) && detectFemaleContext(query)) {
-    const preferred = tokenMatched.filter(r => !/(mascul|varon|hombre|barber)/i.test(normalize(`${r.nombre} ${r.categoria} ${r.subcategoria}`)));
-    if (preferred.length) return preferred;
-  }
-  if (/\bcorte\b/i.test(q) && detectMaleContext(query)) {
-    const preferred = tokenMatched.filter(r => /(mascul|varon|hombre|barber)/i.test(normalize(`${r.nombre} ${r.categoria} ${r.subcategoria}`)));
-    if (preferred.length) return preferred;
-  }
-  return tokenMatched;
+  return matched;
 }
 
 function sanitizeCourseSearchQuery(query) {
@@ -13955,7 +13959,8 @@ async function getLastBookedAppointmentForUser({ waId, waPhone }) {
   const r = await db.query(
     `SELECT client_name, service_name, appointment_date, appointment_time, duration_min, created_at
        FROM appointments
-      WHERE wa_id = $1 OR wa_phone = $2
+      WHERE (wa_id = $1 OR wa_phone = $2)
+        AND status = 'booked'
       ORDER BY created_at DESC
       LIMIT 5`,
     [waId, phoneNorm]
@@ -14366,7 +14371,7 @@ function cleanAiRoutedText(value = '') {
 function hasConcreteServiceSignal(text = '') {
   const t = normalize(text || '');
   if (!t) return false;
-  return /(alisado|botox|keratina|nutricion|nutrición|corte(?: de pelo)?(?: femenino| masculino)?|corte femenino|corte masculino|mechita|mechitas|mecha|mechas|reflejo|reflejos|balayage|color(?: completo)?(?:s)?|colores completo(?:s)?|tintura|emulsion|emulsión|lavado|brushing|peinado|bano de crema|baño de crema|depilacion|depilación|uñas|unas|manicuria|manicuría|facial|masaje|cejas|pestañas|pestanias|shock de keratina|shock de botox|barberia|barbería|barber)\b/i.test(t);
+  return /(alisado|botox|keratina|nutricion|nutrición|corte(?: de pelo)?(?: femenino| femenino)?|mechitas|mechas|reflejos|balayage|color(?: completo)?(?:s)?|tintura|emulsion|emulsión|lavado|brushing|peinado|bano de crema|baño de crema|depilacion|depilación|uñas|unas|manicuria|manicuría|facial|masaje|cejas|pestañas|pestanias|shock de keratina|shock de botox|barberia|barbería|barber)\b/i.test(t);
 }
 
 function isGenericAppointmentOnlyQuery(query = '') {
@@ -14392,8 +14397,7 @@ function buildFallbackInboundRoutingText(rawText = '', context = {}) {
       || (!!context?.pendingDraft && !context?.pendingDraft?.servicio)
     )
   ) {
-    const serviceQuery = extractServiceQueryFromAppointmentText(raw) || raw;
-    return `quiero sacar un turno para ${serviceQuery}`.replace(/\s+/g, ' ').trim();
+    return `quiero sacar un turno para ${raw}`;
   }
 
   if (
@@ -14803,19 +14807,6 @@ async function normalizeInboundForRoutingWithAI(rawText, context = {}) {
     };
   }
 
-  const lastAssistantForRouting = normalize(context?.lastAssistantMessage || '');
-  if (
-    isPoliteClosureAfterTurno(raw)
-    && /(turno reservado|solicitud recibida|sena recibida|comprobante recibido|lo estoy validando|datos para la transferencia|cuando haga la transferencia|ahora necesito este dato)/i.test(lastAssistantForRouting)
-  ) {
-    return {
-      routed_text: raw,
-      flow_hint: 'OTHER',
-      goal: 'cierre_turno',
-      source: 'post_appointment_closure_guard',
-    };
-  }
-
   if (
     context?.pendingDraft
     && looksLikeOperationalPayloadForCurrentFlow(raw, context)
@@ -14831,6 +14822,19 @@ async function normalizeInboundForRoutingWithAI(rawText, context = {}) {
   }
 
   const fallbackText = buildFallbackInboundRoutingText(raw, context) || raw;
+
+  const lastAssistantTurnoish = /(turno reservado|turno confirmado|tu turno ya quedo registrado|turno ya quedo registrado|solicitud recibida|sena recibida|seña recibida|comprobante recibido|datos para la transferencia)/i.test(
+    normalize(context?.lastAssistantMessage || '')
+  );
+
+  if (lastAssistantTurnoish && isPoliteClosureAfterTurno(raw)) {
+    return {
+      routed_text: raw,
+      flow_hint: 'OTHER',
+      goal: 'cierre_turno',
+      source: 'turno_closure_guard',
+    };
+  }
 
   try {
     const completion = await openai.chat.completions.create({
@@ -16731,6 +16735,41 @@ lastCloseContext.set(waId, {
       updateLastCloseContext(waId, { explicitName: explicitNameAnswer, profileName: name || explicitNameAnswer });
     }
 
+    // ✅ CIERRE SEGURO DE TURNO FINALIZADO:
+    // Si el último mensaje del bot fue de turno confirmado / seña recibida,
+    // un "gracias", "perfecto", "ok" o una consulta corta del turno no debe volver a abrir horarios.
+    if (!pendingNameReq?.awaiting && lastAssistantLooksLikeFinalTurnoMessage(waId)) {
+      const latestClosedTurno = await getLastBookedAppointmentForUser({ waId, waPhone: phone });
+
+      if (isPoliteClosureAfterTurno(text)) {
+        const rawUser = compactMergedInboundText(text || userIntentText || '');
+        if (rawUser) pushHistory(waId, "user", rawUser);
+
+        await closeFinishedTurnoRuntimeState({ waId, phone });
+
+        const msgCierreTurno = `¡Gracias a vos! 😊
+
+Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
+
+        pushHistory(waId, "assistant", msgCierreTurno);
+        await sendWhatsAppText(phone, msgCierreTurno);
+        return;
+      }
+
+      if (isClosedTurnoContextQuestion(text)) {
+        const rawUser = compactMergedInboundText(text || userIntentText || '');
+        if (rawUser) pushHistory(waId, "user", rawUser);
+
+        await closeFinishedTurnoRuntimeState({ waId, phone });
+
+        const msgContextoTurno = buildClosedTurnoContextReply(latestClosedTurno);
+
+        pushHistory(waId, "assistant", msgContextoTurno);
+        await sendWhatsAppText(phone, msgContextoTurno);
+        return;
+      }
+    }
+
     const rawInboundTextForHistory = compactMergedInboundText(text || userIntentText || '');
     const routingPendingDraft = await getAppointmentDraft(waId);
     const routingPendingCourseDraft = await getCourseEnrollmentDraft(waId);
@@ -16927,38 +16966,16 @@ lastCloseContext.set(waId, {
       lastCourseContext: getLastCourseContext(waId),
       pendingCourseDraft,
     });
-
-    if (!mediaMeta && isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
-      try { await deleteAppointmentDraft(waId); } catch {}
-      pendingDraft = null;
-      clearProductMemory(waId);
-      clearActiveAssistantOffer(waId);
-      clearPendingAmbiguousBeauty(waId);
-      clearLastResolvedBeauty(waId);
-      lastServiceByUser.delete(waId);
-      const msgCierreTurno = `¡Gracias a vos! 😊
-
-Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
-      pushHistory(waId, "assistant", msgCierreTurno);
-      await sendWhatsAppText(phone, msgCierreTurno);
-      updateLastCloseContext(waId, { suppressInactivityPrompt: true });
-      scheduleInactivityFollowUp(waId, phone);
-      return;
-    }
-
     if (pendingDraft && !quickCourseFlowEarly) {
-      const skipDraftControlEarly = !(pendingDraft?.servicio || pendingDraft?.last_service_name) && hasConcreteServiceSignal(text) && !isExplicitProductIntent(text) && !isExplicitCourseKeyword(text);
-      const draftControlEarly = skipDraftControlEarly
-        ? { action: 'UNCLEAR', reason: 'service_selection_while_awaiting_service', source: 'guard' }
-        : await classifyAppointmentDraftControl(text, {
-            serviceName: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
-            date: pendingDraft?.fecha || '',
-            time: pendingDraft?.hora || '',
-            flowStep: pendingDraft?.flow_step || '',
-            historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 10, 1200),
-          });
+      const draftControlEarly = await classifyAppointmentDraftControl(text, {
+        serviceName: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
+        date: pendingDraft?.fecha || '',
+        time: pendingDraft?.hora || '',
+        flowStep: pendingDraft?.flow_step || '',
+        historySnippet: buildConversationHistorySnippet(ensureConv(waId).messages || [], 10, 1200),
+      });
 
-      if (!skipDraftControlEarly && (draftControlEarly.action === 'PAUSE_APPOINTMENT' || draftControlEarly.action === 'SWITCH_TOPIC')) {
+      if (draftControlEarly.action === 'PAUSE_APPOINTMENT' || draftControlEarly.action === 'SWITCH_TOPIC') {
         await deleteAppointmentDraft(waId);
 
         const pauseIntentEarly = extractTurnoPauseIntent(text);
@@ -17481,18 +17498,15 @@ Apenas ella me diga que puede, le paso por aquí los datos para la transferencia
     }
 
     if (pendingDraft) {
-      const skipDraftControl = !(pendingDraft?.servicio || pendingDraft?.last_service_name) && hasConcreteServiceSignal(text) && !isExplicitProductIntent(text) && !isExplicitCourseKeyword(text);
-      const draftControl = skipDraftControl
-        ? { action: 'UNCLEAR', reason: 'service_selection_while_awaiting_service', source: 'guard' }
-        : await classifyAppointmentDraftControl(text, {
-            serviceName: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
-            date: pendingDraft?.fecha || '',
-            time: pendingDraft?.hora || '',
-            flowStep: pendingDraft?.flow_step || '',
-            historySnippet: buildConversationHistorySnippet(convForAI, 14, 1200),
-          });
+      const draftControl = await classifyAppointmentDraftControl(text, {
+        serviceName: pendingDraft?.servicio || pendingDraft?.last_service_name || '',
+        date: pendingDraft?.fecha || '',
+        time: pendingDraft?.hora || '',
+        flowStep: pendingDraft?.flow_step || '',
+        historySnippet: buildConversationHistorySnippet(convForAI, 14, 1200),
+      });
 
-      if (!skipDraftControl && (draftControl.action === 'PAUSE_APPOINTMENT' || draftControl.action === 'SWITCH_TOPIC')) {
+      if (draftControl.action === 'PAUSE_APPOINTMENT' || draftControl.action === 'SWITCH_TOPIC') {
         await deleteAppointmentDraft(waId);
         pendingDraft = null;
 
@@ -17981,7 +17995,8 @@ Ahora consulto con la estilista ${TURNOS_STYLIST_NAME}. Si ella puede en ese hor
         return true;
       }
       if (result.type === "booked") {
-        clearProductMemory(waId);
+        await closeFinishedTurnoRuntimeState({ waId, phone });
+
         const diaOk = weekdayEsFromYMD(base.fecha);
         const msgOk = `*TURNO RESERVADO*✅
 
@@ -17992,9 +18007,9 @@ Servicio: ${base.servicio}
 📱 Teléfono: ${normalizePhone(base.telefono_contacto || '')}
 
 Seña recibida ✔`.trim();
+
         pushHistory(waId, "assistant", msgOk);
         await sendWhatsAppText(phone, msgOk);
-        scheduleInactivityFollowUp(waId, phone);
         return true;
       }
       return false;
@@ -18144,18 +18159,12 @@ Seña recibida ✔`.trim();
         mergedWithPayment.last_intent = "book_appointment";
         mergedWithPayment.last_service_name = mergedWithPayment.servicio || mergedWithPayment.last_service_name || "";
 
-        const faltantesReales = new Set();
-        if (!toYMD(mergedWithPayment.fecha)) faltantesReales.add('fecha');
-        if (!normalizeHourHM(mergedWithPayment.hora)) faltantesReales.add('hora');
-        if (!mergedWithPayment.servicio) faltantesReales.add('servicio');
-
-        if (faltantesReales.size) {
-          mergedWithPayment.faltantes = Array.from(faltantesReales);
+        if (falt.size) {
           mergedWithPayment.flow_step = inferDraftFlowStep(mergedWithPayment);
           mergedWithPayment.last_intent = 'book_appointment';
           mergedWithPayment.last_service_name = mergedWithPayment.servicio || mergedWithPayment.last_service_name || '';
           await saveAppointmentDraft(waId, phone, mergedWithPayment);
-          updateLastCloseContext(waId, { suppressInactivityPrompt: true });
+        updateLastCloseContext(waId, { suppressInactivityPrompt: true });
           await askForMissingTurnoData(mergedWithPayment);
           return;
         }
@@ -18188,20 +18197,14 @@ Seña recibida ✔`.trim();
       }
     }
 
-    if (!mediaMeta && isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeTurnoMessage(waId)) {
-      try { await deleteAppointmentDraft(waId); } catch {}
-      pendingDraft = null;
-      clearProductMemory(waId);
-      clearActiveAssistantOffer(waId);
-      clearPendingAmbiguousBeauty(waId);
-      clearLastResolvedBeauty(waId);
-      lastServiceByUser.delete(waId);
+    if (!pendingDraft && isPoliteClosureAfterTurno(text) && lastAssistantLooksLikeFinalTurnoMessage(waId)) {
+      await closeFinishedTurnoRuntimeState({ waId, phone });
+
       const msgCierreTurno = `¡Gracias a vos! 😊
 
 Tu turno ya quedó registrado. Cualquier cosa, estoy acá ✨`;
       pushHistory(waId, "assistant", msgCierreTurno);
       await sendWhatsAppText(phone, msgCierreTurno);
-      updateLastCloseContext(waId, { suppressInactivityPrompt: true });
       return;
     }
 
@@ -19714,4 +19717,3 @@ app.listen(PORT, () => {
     console.error('⚠️ El servidor quedó levantado para que Render no mate el deploy, pero revisá este error de bootstrap.');
   }
 })();
-                                                                                                                                                     
